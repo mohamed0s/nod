@@ -976,17 +976,24 @@ export function createJobs(options: {
         }
         case 'cv_save': {
           if (request.pdf) return withoutText(await savePdf(turn, request.id, request.revision));
-          return withoutText(
-            await turnWrite(turn, async (client) => {
-              await ownerOnly(client, turn, "change a CV's text");
-              return editCv(
-                client,
-                request.id,
-                { markdown: request.markdown, revision: request.revision },
-                'nod',
-              );
-            }),
-          );
+          const saved = await turnWrite(turn, async (client) => {
+            await ownerOnly(client, turn, "change a CV's text");
+            return editCv(
+              client,
+              request.id,
+              { markdown: request.markdown, revision: request.revision },
+              'nod',
+            );
+          });
+          const drafted = saved.is_main && (await profileState(pool)).revision === 0;
+          return {
+            ...withoutText(saved),
+            ...(drafted
+              ? {
+                  next: 'The profile is still empty. Draft it from this CV now with profile_update, then run jobs sync, as the job-search guide describes.',
+                }
+              : {}),
+          };
         }
         case 'profile_update': {
           const outcome = await updateProfile(turn, request, context.reviewLimits);
