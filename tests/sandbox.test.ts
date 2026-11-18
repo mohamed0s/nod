@@ -33,6 +33,7 @@ import {
 } from '../src/providers/docker/command.ts';
 import {
   artifactReadProgram,
+  artifactRemoveProgram,
   artifactWriteProgram,
   createCommandWorkspace,
   createDockerWorkspace,
@@ -732,7 +733,9 @@ test('workspace uploads transfer binary chunks atomically and reject symlink dir
     runCommand: async (_id, args, input) => {
       launches++;
       const request = JSON.parse(input.input!);
-      assert.ok([artifactWriteProgram, artifactReadProgram].includes(args.at(-1)!));
+      assert.ok(
+        [artifactWriteProgram, artifactReadProgram, artifactRemoveProgram].includes(args.at(-1)!),
+      );
       request.base = f.directory;
       return f.run(args, { ...input, input: JSON.stringify(request) });
     },
@@ -761,6 +764,18 @@ test('workspace uploads transfer binary chunks atomically and reject symlink dir
       workspace.readArtifact('fixture', 'nested/file.bin', bytes.length - 1),
       /workspace file operation failed/,
     );
+    await workspace.removeArtifact!('fixture', 'nested/file.bin');
+    assert.equal(await exists(join(f.directory, 'nested', 'file.bin')), false);
+    await workspace.removeArtifact!('fixture', 'nested/file.bin');
+    await writeFile(join(outside, 'kept.bin'), 'synthetic');
+    await assert.rejects(
+      workspace.removeArtifact!('fixture', 'escape/kept.bin'),
+      /workspace file operation failed/,
+    );
+    assert.equal(await exists(join(outside, 'kept.bin')), true);
+    const removals = launches;
+    await assert.rejects(workspace.removeArtifact!('fixture', '../foreign/file'), /stay within/);
+    assert.equal(launches, removals);
   } finally {
     await workspace.dispose();
     await f.close();

@@ -95,6 +95,26 @@ finally:
  for fd in reversed(fds): os.close(fd)
 `;
 
+export const artifactRemoveProgram = `import os,sys,json
+r=json.load(sys.stdin)
+fds=[]
+try:
+ parts=r['path'].split('/')
+ if not parts or any(p in ['', '.', '..'] for p in parts): raise ValueError()
+ fd=os.open(r['base'],os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+ fds.append(fd)
+ for part in parts[:-1]:
+  fd=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+  fds.append(fd)
+ os.unlink(parts[-1],dir_fd=fd)
+except FileNotFoundError:
+ pass
+except Exception:
+ sys.exit(1)
+finally:
+ for fd in reversed(fds): os.close(fd)
+`;
+
 export function createDockerWorkspace(options: {
   container: string;
   workspaceRoot: string;
@@ -239,6 +259,16 @@ export function createCommandWorkspace(options: {
         ).catch(() => {});
         throw error;
       }
+    },
+    async removeArtifact(id, path, signal) {
+      threadIdentity(id);
+      const base = `/workspace/${id}`;
+      await helper(
+        id,
+        artifactRemoveProgram,
+        { base, path: posix.relative(base, workspaceFile(id, path)) },
+        { maxBytes: 1024, signal },
+      );
     },
     async readArtifact(id, path, maxBytes) {
       threadIdentity(id);

@@ -232,6 +232,7 @@ export interface Workspace {
     maxBytes: number,
     purpose?: 'attachment' | 'publication',
   ): Promise<Uint8Array>;
+  removeArtifact?(threadId: string, path: string, signal?: AbortSignal): Promise<void>;
   open(input: { threadId: string; workspacePath: string; signal: AbortSignal }): WorkspaceSession;
   dispose(): void | Promise<void>;
 }
