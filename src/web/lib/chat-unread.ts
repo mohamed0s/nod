@@ -153,3 +153,33 @@ export async function writeChatReadCursor(
   if (native) await native;
   else window.localStorage.setItem(chatReadStorageKey(ownerId, threadId), JSON.stringify(value));
 }
+
+function taskReadStorageKey(ownerId: string, threadId: string) {
+  return `nod.chat-read-tasks.${JSON.stringify([ownerId, threadId])}`;
+}
+
+export function readTaskReadCursors(ownerId: string, threadId: string) {
+  try {
+    const saved = JSON.parse(
+      window.localStorage.getItem(taskReadStorageKey(ownerId, threadId)) ?? '{}',
+    );
+    return Object.fromEntries(
+      Object.entries(saved && typeof saved === 'object' ? saved : {}).flatMap(([id, value]) => {
+        const cursor = parseChatReadCursor(value);
+        return cursor ? [[id, cursor]] : [];
+      }),
+    ) as Record<string, ChatReadCursor>;
+  } catch {
+    return {};
+  }
+}
+
+export function writeTaskReadCursors(
+  ownerId: string,
+  threadId: string,
+  cursors: Record<string, ChatReadCursor>,
+) {
+  try {
+    window.localStorage.setItem(taskReadStorageKey(ownerId, threadId), JSON.stringify(cursors));
+  } catch {}
+}

@@ -130,6 +130,11 @@ function Workspace({
     focus: initialFocusMessageId,
   }));
   const mainChat = !chat.id && !chat.fresh;
+  const { markTaskRead } = unread;
+  const readTask = useMemo(
+    () => (chat.id ? () => markTaskRead(chat.id!) : undefined),
+    [chat.id, markTaskRead],
+  );
   useEffect(() => {
     if (chat.id && state && !state.tasks?.some((task) => task.id === chat.id)) setChat({});
   }, [chat.id, state?.tasks]);
@@ -248,6 +253,7 @@ function Workspace({
                     tasks={state.tasks ?? []}
                     chat={chat.id}
                     fresh={Boolean(chat.fresh)}
+                    unread={unread.taskCounts}
                     onChat={(id) => setChat({ id })}
                     onNewChat={() => setChat({ fresh: true })}
                     refresh={refresh}
@@ -272,7 +278,7 @@ function Workspace({
                       visible={path === '/'}
                       readCursor={mainChat ? unread.cursor : undefined}
                       readUnavailable={mainChat && unread.unavailable}
-                      onReadLatest={mainChat ? unread.markRead : undefined}
+                      onReadLatest={readTask ?? (mainChat ? unread.markRead : undefined)}
                       onFeedback={onFeedback}
                       onDismissFeedbackDiscovery={onDismissFeedbackDiscovery}
                       requestedMessage={mainChat ? chatRequests[0] : undefined}

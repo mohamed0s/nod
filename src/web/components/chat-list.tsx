@@ -16,6 +16,7 @@ export function ChatList({
   tasks,
   chat,
   fresh,
+  unread,
   onChat,
   onNewChat,
   refresh,
@@ -23,6 +24,7 @@ export function ChatList({
   tasks: Task[];
   chat?: string;
   fresh: boolean;
+  unread: Record<string, number>;
   onChat(id?: string): void;
   onNewChat(): void;
   refresh(): Promise<void>;
@@ -92,6 +94,12 @@ export function ChatList({
                     <span className="chat-list-dot" data-status={task.status} aria-hidden="true" />
                     <span className="chat-list-title">{task.title}</span>
                     <span className="sr-only">, {taskLabels[task.status]}</span>
+                    {Boolean(unread[task.id]) && chat !== task.id && (
+                      <span className="chat-list-unread">
+                        {unread[task.id]! > 99 ? '99+' : unread[task.id]}
+                        <span className="sr-only"> unread</span>
+                      </span>
+                    )}
                   </button>
                   {group.label === 'Done' && (
                     <Button

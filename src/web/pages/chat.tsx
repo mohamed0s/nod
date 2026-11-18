@@ -512,7 +512,7 @@ export function Chat({
           threadId,
           hiddenCount,
           cursor: readCursor,
-          messages: state.messages,
+          messages: state.messages.filter(inChat),
           hasEarlier: state.hasEarlierMessages === true,
         }
       : null;
@@ -1942,6 +1942,7 @@ export function Chat({
           threadId,
           before: before.createdAt,
           beforeId: before.id,
+          ...chatQuery,
         });
         return api<MessageHistoryPage>(`/api/messages?${query}`, { signal });
       },
