@@ -5258,23 +5258,26 @@ test(
             result: { message_thread_id: 700 + created.length, name: body.name, icon_color: 0 },
           });
         }
-        if (method === 'sendMessage') {
-          if (gone.has(body.message_thread_id as number))
+        if (['sendMessage', 'sendLocation', 'sendDocument'].includes(method)) {
+          const wire: Record<string, unknown> =
+            init?.body instanceof FormData
+              ? Object.fromEntries([...init.body].filter((entry) => typeof entry[1] === 'string'))
+              : body;
+          const thread = wire.message_thread_id ? Number(wire.message_thread_id) : undefined;
+          if (thread && gone.has(thread))
             return Response.json(
               { ok: false, error_code: 400, description: 'Bad Request: message thread not found' },
               { status: 400 },
             );
-          sent.push(body);
+          sent.push({ ...wire, method, message_thread_id: thread });
           return Response.json({
             ok: true,
             result: {
               message_id: 100 + sent.length,
               date: Math.floor(Date.now() / 1000),
               chat: { id: 123456, type: 'private' },
-              text: body.text,
-              ...(body.message_thread_id
-                ? { message_thread_id: body.message_thread_id, is_topic_message: true }
-                : {}),
+              text: wire.text,
+              ...(thread ? { message_thread_id: thread, is_topic_message: true } : {}),
             },
           });
         }
@@ -5285,10 +5288,12 @@ test(
     const answers: Array<{ replyToMessageId?: string; shownMessageId?: string }> = [];
     const commands: Array<{ replyToMessageId?: string; hasReply?: boolean }> = [];
     const codes: Array<string | undefined> = [];
+    const files = new Map<string, ReturnType<typeof attachment>>();
     channels = await createChannels(pool, {
       ownerId,
       transport: createChatSdkTransport(pool, fixtureEnv),
       present: async (_thread, input) => (input.kind === 'delivery' ? input.text : 'Synthetic'),
+      resolveAttachments: async (_thread, ids) => ids.map((id) => files.get(id)!),
       subscribe: () => () => {},
       intervalMs: 600_000,
       answer: async (_text, _channel, replyToMessageId, shownMessageId) => {
@@ -5385,11 +5390,26 @@ test(
       );
       return id;
     };
-    const say = async (turnId: string, text: string, replyTo: string | null = null) => {
+    const say = async (
+      turnId: string,
+      text: string,
+      replyTo: string | null = null,
+      file?: ReturnType<typeof attachment>,
+    ) => {
       const id = randomUUID();
+      const fileId = randomUUID();
+      if (file) files.set(fileId, file);
       await pool.query(
-        "INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id,reply_to_message_id) VALUES($1,$2,'assistant',$3,$4,$5,$6)",
-        [id, ownerId, text, threadId, turnId, replyTo],
+        "INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id,reply_to_message_id,attachments) VALUES($1,$2,'assistant',$3,$4,$5,$6,$7)",
+        [
+          id,
+          ownerId,
+          text,
+          threadId,
+          turnId,
+          replyTo,
+          JSON.stringify(file ? [{ id: fileId }] : []),
+        ],
       );
       return id;
     };
@@ -5512,5 +5532,27 @@ test(
         .rows[0],
       { state: 'sent', topic_id: '702' },
     );
+    for (const [topic, file, method] of [
+      [
+        702,
+        attachment('location.json', 'application/json', '{"latitude":41.4,"longitude":2.17}'),
+        'sendLocation',
+      ],
+      [703, attachment('notes.txt', 'text/plain', 'Synthetic notes'), 'sendDocument'],
+    ] as const) {
+      gone.add(topic);
+      const media = await say(taskTurn, '', null, file);
+      await service.drain();
+      assert.equal(
+        (await pool.query('SELECT state FROM channel_outbox WHERE message_id=$1', [media])).rows[0]
+          .state,
+        'pending',
+      );
+      await service.drain();
+      assert.deepEqual(
+        [sent.at(-1)?.method, sent.at(-1)?.message_thread_id, created.length],
+        [method, topic + 1, topic - 699],
+      );
+    }
   },
 );

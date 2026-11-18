@@ -801,17 +801,22 @@ export function createChatSdkTransport(
           : '';
       let id = '';
       const ids: string[] = [];
+      const gone = (reason: string, cause?: unknown) =>
+        !id && threadId !== input.threadId && /message thread not found/i.test(reason)
+          ? new MessagingTopicError('The Telegram topic is no longer available.', { cause })
+          : undefined;
+      const refused = async (response: Response, failure: string) => {
+        const reason = z
+          .object({ description: z.string().max(2000) })
+          .safeParse(await response.json().catch(() => undefined));
+        return (reason.success && gone(reason.data.description)) || new Error(failure);
+      };
       const post = (message: Parameters<typeof thread.reply>[1]) =>
         (input.replyToMessageId
           ? thread.reply(input.replyToMessageId, message)
           : thread.post(message)
         ).catch((cause: unknown) => {
-          throw !id &&
-            threadId !== input.threadId &&
-            cause instanceof Error &&
-            /message thread not found/i.test(cause.message)
-            ? new MessagingTopicError('The Telegram topic is no longer available.', { cause })
-            : cause;
+          throw (cause instanceof Error && gone(cause.message, cause)) || cause;
         });
       const messages =
         input.channelId === 'telegram'
@@ -847,7 +852,7 @@ export function createChatSdkTransport(
             `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVoice`,
             { method: 'POST', body, signal: AbortSignal.timeout(60_000), redirect: 'error' },
           );
-          if (!response.ok) throw new Error('Voice delivery was not confirmed.');
+          if (!response.ok) throw await refused(response, 'Voice delivery was not confirmed.');
           const sent = z
             .object({
               ok: z.literal(true),
@@ -977,10 +982,7 @@ export function createChatSdkTransport(
                 redirect: 'error',
               },
             );
-            if (!response.ok) {
-              await response.body?.cancel().catch(() => {});
-              throw new Error('Message delivery was not confirmed.');
-            }
+            if (!response.ok) throw await refused(response, 'Message delivery was not confirmed.');
             const sent = z
               .object({
                 ok: z.literal(true),
@@ -1015,7 +1017,8 @@ export function createChatSdkTransport(
             id ||= sent.id;
             ids.push(sent.id);
           },
-          () => {
+          (cause: unknown) => {
+            if (cause instanceof MessagingTopicError) throw cause;
             if (caption) throw new Error('Media delivery was not confirmed.');
             unsent.push(file);
           },
@@ -1030,7 +1033,10 @@ export function createChatSdkTransport(
             ? telegram!.chunks(notice ?? '').map((markdown) => ({ markdown }))
             : whatsapp!.chunks(notice ?? '').map((raw) => ({ raw }));
         for (const notice of notices) {
-          const sent = await post(notice).catch(() => undefined);
+          const sent = await post(notice).catch((cause: unknown) => {
+            if (cause instanceof MessagingTopicError) throw cause;
+            return undefined;
+          });
           if (sent) {
             id ||= sent.id;
             ids.push(sent.id);
