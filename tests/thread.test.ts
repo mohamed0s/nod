@@ -2436,6 +2436,33 @@ test(
           });
           assert.equal(await hiddenStatus(), 'confirmed');
           await waitFor(settled(answered.turnId));
+          const channel = 'telegram:synthetic';
+          const topicAsked = await chatMessages.submit('Synthetic chat approval', [], {
+            sessionId: randomUUID(),
+            channel,
+          });
+          await waitFor(settled(topicAsked.turnId));
+          const topic = (
+            await db.pool.query<{ id: string; confirmation_message_id: string }>(
+              'SELECT id,confirmation_message_id FROM approvals WHERE turn_id=$1',
+              [topicAsked.turnId],
+            )
+          ).rows[0]!;
+          assert.equal((await chatMessages.answer(consent, { channel }))?.approvalId, topic.id);
+          assert.equal(
+            (await chatMessages.answer(consent, { channel, mainOnly: true }))?.approvalId,
+            undefined,
+          );
+          const topicAnswered = await chatMessages.submit(consent, [], {
+            channel,
+            replyToMessageId: topic.confirmation_message_id,
+          });
+          assert.equal(
+            (await db.pool.query('SELECT status FROM approvals WHERE id=$1', [topic.id])).rows[0]
+              .status,
+            'confirmed',
+          );
+          await waitFor(settled(topicAnswered.turnId));
         },
       );
 
