@@ -214,6 +214,23 @@ Telegram and the WhatsApp QR connection receive the PDF and export as documents.
 
 Both channels have task controls. `/tasks` lists open tasks, with one message per task. Reply to a task message with `/status` to see its goal, steps and state, or `/stop` to stop only that task. `/stop` without a reply stops all active work and closes open tasks. Progress, questions and results stay linked to the same task. See [Track tasks](/use/tasks/#telegram-and-whatsapp-without-a-task-page).
 
+## Telegram topics
+
+Telegram can split your private chat with the bot into topics, one per task, like the chat list in the Nod app. The Bot API added topics in private chats in version 9.3 and let bots create them in version 9.4.
+
+To turn them on, open [BotFather](https://t.me/BotFather), select **Open** to start its mini app, choose your bot, then turn on **Threaded Mode** in its settings. Nod notices the change within five minutes, or when it restarts. In the same settings, stop users from creating topics if you want to keep writing to the main chat in General. If you allow it, Telegram puts each new conversation you start in its own topic, and Nod treats each one as a new chat.
+
+With topics on:
+
+- The main chat stays in **General**, with scheduled results and notifications.
+- Each task gets a topic named after it when its first message arrives. Its progress, questions, approvals, files and result go there.
+- Anything you write in a task's topic goes to that task, as a reply to its latest message. A "yes" there answers that task's approval, and `/status` or `/stop` there applies to that task only.
+- A message in a topic that Nod didn't create starts a new chat, like **New chat** in the app. Later messages in that topic stay in that chat.
+- In General, a message without a reply never answers a task's approval. Answer it in the task's topic.
+- If you delete a task's topic, Nod opens a new one for the task's next message.
+
+Without topics, Nod works as before: task messages reply to the task's first message in one chat.
+
 ## Related resources
 
 - [Host your own server](/deploy/self-host/)
