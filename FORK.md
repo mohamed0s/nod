@@ -15,9 +15,23 @@ upstream. It runs Nod from source on Windows and adds a few changes. The
   - Finished chats stay in the list, so you can continue them later in the
     same session, or close them.
   - Memory, rules, Vault, files and schedules stay shared.
+- **Job search.** A **Jobs** page keeps your CVs (one is the main CV), the
+  job profile Nod drafts from it, and referral message templates. Nod checks
+  and scores jobs with [career-ops](https://github.com/career-ops-hq/career-ops),
+  installed in the workspace image. See the docs page
+  [Job search](docs/src/content/docs/use/job-search.md).
 - **Private by default.** The installer turns off usage data
   (`NOD_ANALYTICS_ENABLED=false`) and conversation traces (`NOD_TRACES_URL=`).
 - **One-command install on Windows,** with Nod starting at every sign-in.
+
+## Credits
+
+The job search uses [career-ops](https://github.com/career-ops-hq/career-ops)
+by Santiago Fernández de Valderrama and contributors, under the MIT license.
+The workspace image installs a pinned commit
+(`abefa6dbdb57fd2971c0d24ec563f24de57477ca`, version 1.39.0) and checks its
+SHA-256; see `jobs/workspace/install-career-ops.sh`. Its license is in
+[NOTICE](NOTICE).
 
 ## Install on Windows 11
 
