@@ -769,6 +769,33 @@ test(
           );
         },
       );
+      await t.test(
+        'a code scoped to one session never reaches another session’s sign-in',
+        async () => {
+          await reset();
+          const pending = await seed({ channel: 'telegram:synthetic' });
+          await db.pool.query('UPDATE turns SET session_id=id WHERE id=$1', [pending.turnId]);
+          const accept = (sessionId: string) =>
+            verification.accept('482753', {
+              clientMessageId: randomUUID(),
+              channel: 'telegram:synthetic',
+              sessionId,
+              persistOrdinary: async () => {
+                throw new Error('No ordinary persistence expected.');
+              },
+            });
+          await assert.rejects(
+            accept(pending.threadId),
+            (error: unknown) => (error as { statusCode?: number }).statusCode === 409,
+          );
+          assert.equal(injected.length, 0);
+          assert.equal((await accept(pending.turnId))?.verificationStatus, 'submitted');
+          assert.deepEqual(
+            injected.map((item) => item.requestId),
+            [pending.requestId],
+          );
+        },
+      );
     } finally {
       await app.close();
     }

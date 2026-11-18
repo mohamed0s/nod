@@ -65,6 +65,7 @@ interface ChannelOptions {
       channel: string;
       threadId?: string;
       replyToMessageId?: string;
+      sessionId?: string;
       receiptOnly?: boolean;
       persistOrdinary: (client: PoolClient) => Promise<void>;
       persistVerification?: (client: PoolClient, response: SubmitMessageResponse) => Promise<void>;
@@ -628,6 +629,26 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     );
   }
 
+  async function codeSession(identity: ChannelIdentity, topicId?: string) {
+    if (!topicId)
+      return (await topicsShown(identity))
+        ? (
+            await pool.query<{ id: string }>(
+              'SELECT id FROM threads WHERE owner_id=$1 AND archived_at IS NULL',
+              [ownerId],
+            )
+          ).rows[0]?.id
+        : undefined;
+    const task = await pool.query<{ session_id: string }>(
+      `SELECT t.session_id FROM channel_topics c JOIN tasks t ON t.id=c.task_id AND t.owner_id=c.owner_id
+       JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
+       JOIN threads th ON th.id=u.thread_id AND th.owner_id=t.owner_id AND th.archived_at IS NULL
+       WHERE c.owner_id=$1 AND c.provider=$2 AND c.account_id=$3 AND c.sender_id=$4 AND c.topic_id=$5`,
+      [ownerId, identity.provider, identity.account_id, identity.sender_id, topicId],
+    );
+    return task.rows[0]?.session_id ?? randomUUID();
+  }
+
   async function shownInGeneral(row: InboxRow) {
     const shown = (
       await pool.query<{ id: string; turn_id: string | null }>(
@@ -864,11 +885,13 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
             throw Object.assign(new Error('The verification reply is unavailable.'), {
               statusCode: 409,
             });
+          const sessionId = target ? undefined : await codeSession(identity, topicId);
           verification = await options.acceptVerification(text, {
             clientMessageId: acceptedMessageId,
             channel: conversationChannel(identity),
             ...(mediaThreadId ? { threadId: mediaThreadId } : {}),
             ...(target ? { replyToMessageId: target } : {}),
+            ...(sessionId ? { sessionId } : {}),
             ...(recorded ? { receiptOnly: true } : {}),
             persistOrdinary: async (client) => {
               if (

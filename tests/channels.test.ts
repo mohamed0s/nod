@@ -5221,7 +5221,7 @@ test(
     const ownerId = 'fixture-topic-owner';
     const threadId = await createFixtureTables(pool, ownerId);
     await pool.query(`ALTER TABLE turns ADD COLUMN task_id uuid;
-      CREATE TABLE tasks(id uuid PRIMARY KEY,owner_id text NOT NULL,turn_id uuid,message_id uuid,title text NOT NULL)`);
+      CREATE TABLE tasks(id uuid PRIMARY KEY,owner_id text NOT NULL,turn_id uuid,session_id uuid,message_id uuid,title text NOT NULL)`);
     let topics = false;
     let refuse = false;
     const gone = new Set<number>();
@@ -5284,6 +5284,7 @@ test(
     const submitted: Array<{ replyToMessageId?: string; sessionId?: string }> = [];
     const answers: Array<{ replyToMessageId?: string; shownMessageId?: string }> = [];
     const commands: Array<{ replyToMessageId?: string; hasReply?: boolean }> = [];
+    const codes: Array<string | undefined> = [];
     channels = await createChannels(pool, {
       ownerId,
       transport: createChatSdkTransport(pool, fixtureEnv),
@@ -5292,6 +5293,18 @@ test(
       intervalMs: 600_000,
       answer: async (_text, _channel, replyToMessageId, shownMessageId) => {
         answers.push({ replyToMessageId, shownMessageId });
+        return undefined;
+      },
+      acceptVerification: async (_text, input) => {
+        codes.push(input.sessionId);
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          await input.persistOrdinary(client);
+          await client.query('COMMIT');
+        } finally {
+          client.release();
+        }
         return undefined;
       },
       taskCommand: async (_client, _command, replyToMessageId, hasReply) => {
@@ -5314,12 +5327,10 @@ test(
             : null);
         const turnId = randomUUID();
         if (sessionId)
-          await client.query('INSERT INTO tasks(id,owner_id,turn_id,title) VALUES($1,$2,$3,$4)', [
-            sessionId,
-            ownerId,
-            turnId,
-            text,
-          ]);
+          await client.query(
+            'INSERT INTO tasks(id,owner_id,turn_id,session_id,title) VALUES($1,$2,$3,$1,$4)',
+            [sessionId, ownerId, turnId, text],
+          );
         await client.query(
           "INSERT INTO turns(id,owner_id,thread_id,source_id,channel,status,task_id) VALUES($1,$2,$3,$4,$5,'succeeded',$6)",
           [turnId, ownerId, threadId, sourceId, channel, task],
@@ -5391,12 +5402,14 @@ test(
     const restart = () => service.replaceTransport(createChatSdkTransport(pool, fixtureEnv));
 
     const main = await receive('Start a synthetic report');
+    await receive('483920');
+    assert.deepEqual(codes, [undefined]);
     assert.deepEqual(answers.at(-1), { replyToMessageId: undefined, shownMessageId: undefined });
     const taskId = randomUUID();
     const ack = await say(main.turn_id, 'Started the synthetic report');
     const taskTurn = await turn(main.channel, taskId);
     await pool.query(
-      'INSERT INTO tasks(id,owner_id,turn_id,message_id,title) VALUES($1,$2,$3,$4,$5)',
+      'INSERT INTO tasks(id,owner_id,turn_id,session_id,message_id,title) VALUES($1,$2,$3,$1,$4,$5)',
       [taskId, ownerId, taskTurn, ack, 'Synthetic report'],
     );
     await say(taskTurn, 'Fallback task update', ack);
@@ -5435,6 +5448,11 @@ test(
     await service.drain();
     assert.equal(delivery('Main chat reply').message_thread_id, undefined);
 
+    await receive('483921', 701);
+    await receive('483922');
+    await receive('483923', 950);
+    assert.deepEqual(codes.slice(1, 3), [taskId, threadId]);
+    assert.ok(![undefined, taskId, threadId].includes(codes[3]));
     const answered = answers.length;
     const fresh = await receive('Plan a synthetic trip', 900);
     const chat = submitted.at(-1)!;
@@ -5455,12 +5473,10 @@ test(
     refuse = true;
     const invoiceId = randomUUID();
     const invoiceTurn = await turn(main.channel, invoiceId);
-    await pool.query('INSERT INTO tasks(id,owner_id,turn_id,title) VALUES($1,$2,$3,$4)', [
-      invoiceId,
-      ownerId,
-      invoiceTurn,
-      'Synthetic invoice',
-    ]);
+    await pool.query(
+      'INSERT INTO tasks(id,owner_id,turn_id,session_id,title) VALUES($1,$2,$3,$1,$4)',
+      [invoiceId, ownerId, invoiceTurn, 'Synthetic invoice'],
+    );
     const invoiceQuestion = await say(invoiceTurn, 'Approve the synthetic invoice?');
     await service.drain();
     refuse = false;

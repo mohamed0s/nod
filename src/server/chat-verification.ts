@@ -12,6 +12,7 @@ interface VerificationInput {
   channel?: string;
   threadId?: string;
   replyToMessageId?: string;
+  sessionId?: string;
   verificationRequestId?: string;
   receiptOnly?: boolean;
   attachmentIds?: string[];
@@ -261,8 +262,16 @@ export async function createChatVerification(
            AND r.status='pending' AND (r.kind<>'payment' OR u.channel='web')
            AND ${waitingTurnSql('u', 'credentials')}
            AND ($3::uuid IS NULL OR r.turn_id=$3) AND ($4::text IS NULL OR r.id=$4)
+           AND ($6::uuid IS NULL OR u.session_id=$6)
            ORDER BY u.created_at,r.id LIMIT 2`,
-        [options.ownerId, channel, turnId ?? null, requestId ?? null, thread.id],
+        [
+          options.ownerId,
+          channel,
+          turnId ?? null,
+          requestId ?? null,
+          thread.id,
+          input.sessionId ?? null,
+        ],
       );
       if (!requests.rowCount) {
         if (requestId) throw conflict(unavailableMessage);
