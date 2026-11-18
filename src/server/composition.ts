@@ -3096,6 +3096,7 @@ async function initializeApplication(
         attachments,
         onInserted,
         stopSignal,
+        sessionId,
       ) =>
         (
           await userMessages.submit(text, attachments, {
@@ -3107,12 +3108,13 @@ async function initializeApplication(
             answer,
             onInserted,
             stopSignal,
+            ...(sessionId ? { sessionId } : {}),
           })
         ).turnId,
       stopSignal,
       messageAccepted: ownerMessageAccepted,
-      answer: (text, channel, replyToMessageId) =>
-        userMessages.answer(text, { channel, replyToMessageId }),
+      answer: (text, channel, replyToMessageId, mainOnly) =>
+        userMessages.answer(text, { channel, replyToMessageId, mainOnly }),
     });
     channels.registerRoutes(app);
     await channelSettings?.recover();

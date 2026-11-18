@@ -5197,3 +5197,276 @@ test(
     );
   },
 );
+
+test(
+  'Telegram topics give each task its own topic, keep the main chat in General and fall back without them',
+  { skip: !process.env.TEST_DATABASE_URL, timeout: 60_000 },
+  async (t) => {
+    const schema = `test_channel_topics_${randomUUID().replaceAll('-', '')}`;
+    const admin = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL });
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = new pg.Pool({
+      connectionString: process.env.TEST_DATABASE_URL,
+      options: `-c search_path=${schema}`,
+    });
+    let channels: Awaited<ReturnType<typeof createChannels>> | undefined;
+    const app = Fastify();
+    t.after(async () => {
+      await app.close();
+      await channels?.close();
+      await pool.end();
+      await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+      await admin.end();
+    });
+    const ownerId = 'fixture-topic-owner';
+    const threadId = await createFixtureTables(pool, ownerId);
+    await pool.query(`ALTER TABLE turns ADD COLUMN task_id uuid;
+      CREATE TABLE tasks(id uuid PRIMARY KEY,owner_id text NOT NULL,turn_id uuid,message_id uuid,title text NOT NULL)`);
+    let topics = false;
+    const gone = new Set<number>();
+    const created: Record<string, unknown>[] = [];
+    const sent: Record<string, unknown>[] = [];
+    t.mock.method(
+      globalThis,
+      'fetch',
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = input instanceof Request ? input.url : String(input);
+        const body =
+          typeof init?.body === 'string' ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+        const method = url.replace('https://api.telegram.org/bot987:fixture-not-live/', '');
+        if (method === 'getMe')
+          return Response.json({
+            ok: true,
+            result: {
+              id: 987,
+              is_bot: true,
+              first_name: 'Fixture',
+              username: 'fixture_bot',
+              ...(topics ? { has_topics_enabled: true } : {}),
+            },
+          });
+        if (method === 'createForumTopic') {
+          created.push(body);
+          return Response.json({
+            ok: true,
+            result: { message_thread_id: 700 + created.length, name: body.name, icon_color: 0 },
+          });
+        }
+        if (method === 'sendMessage') {
+          if (gone.has(body.message_thread_id as number))
+            return Response.json(
+              { ok: false, error_code: 400, description: 'Bad Request: message thread not found' },
+              { status: 400 },
+            );
+          sent.push(body);
+          return Response.json({
+            ok: true,
+            result: {
+              message_id: 100 + sent.length,
+              date: Math.floor(Date.now() / 1000),
+              chat: { id: 123456, type: 'private' },
+              text: body.text,
+              ...(body.message_thread_id
+                ? { message_thread_id: body.message_thread_id, is_topic_message: true }
+                : {}),
+            },
+          });
+        }
+        throw new Error('Unexpected fixture provider call.');
+      },
+    );
+    const submitted: Array<{ replyToMessageId?: string; sessionId?: string }> = [];
+    const answers: Array<{ replyToMessageId?: string; mainOnly?: boolean }> = [];
+    const commands: Array<{ replyToMessageId?: string; hasReply?: boolean }> = [];
+    channels = await createChannels(pool, {
+      ownerId,
+      transport: createChatSdkTransport(pool, fixtureEnv),
+      present: async (_thread, input) => (input.kind === 'delivery' ? input.text : 'Synthetic'),
+      subscribe: () => () => {},
+      intervalMs: 600_000,
+      answer: async (_text, _channel, replyToMessageId, mainOnly) => {
+        answers.push({ replyToMessageId, mainOnly });
+        return undefined;
+      },
+      taskCommand: async (_client, _command, replyToMessageId, hasReply) => {
+        commands.push({ replyToMessageId, hasReply });
+        return { threadId, replies: [{ text: 'Synthetic task status' }] };
+      },
+      submit: async (text, sourceId, client, channel, ...rest) => {
+        const [, , replyToMessageId, , , , sessionId] = rest;
+        submitted.push({ replyToMessageId, sessionId });
+        const task =
+          sessionId ??
+          (replyToMessageId
+            ? (
+                await client.query(
+                  `SELECT COALESCE(u.task_id,t.id) AS id FROM messages m LEFT JOIN turns u ON u.id=m.turn_id
+                   LEFT JOIN tasks t ON t.message_id=m.id WHERE m.id=$1`,
+                  [replyToMessageId],
+                )
+              ).rows[0]?.id
+            : null);
+        const turnId = randomUUID();
+        if (sessionId)
+          await client.query('INSERT INTO tasks(id,owner_id,turn_id,title) VALUES($1,$2,$3,$4)', [
+            sessionId,
+            ownerId,
+            turnId,
+            text,
+          ]);
+        await client.query(
+          "INSERT INTO turns(id,owner_id,thread_id,source_id,channel,status,task_id) VALUES($1,$2,$3,$4,$5,'succeeded',$6)",
+          [turnId, ownerId, threadId, sourceId, channel, task],
+        );
+        return turnId;
+      },
+    });
+    channels.registerRoutes(app);
+    const service = channels;
+    let update = 0;
+    const receive = async (text: string, topic?: number) => {
+      update++;
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/webhooks/telegram',
+        headers: {
+          'content-type': 'application/json',
+          'x-telegram-bot-api-secret-token': fixtureEnv.TELEGRAM_WEBHOOK_SECRET_TOKEN,
+        },
+        payload: JSON.stringify({
+          update_id: update,
+          message: {
+            message_id: update,
+            date: Math.floor(Date.now() / 1000),
+            text,
+            from: { id: 123456, is_bot: false, first_name: 'Fixture' },
+            chat: { id: 123456, type: 'private' },
+            ...(topic
+              ? {
+                  message_thread_id: topic,
+                  is_topic_message: true,
+                  reply_to_message: { message_id: topic },
+                }
+              : {}),
+          },
+        }),
+      });
+      assert.equal(response.statusCode, 200);
+      await service.drain();
+      return (
+        await pool.query(
+          'SELECT turn_id,channel,topic_id,provider_reply_id FROM channel_inbox WHERE source_id=$1',
+          [`channel:telegram:987:123456:${update}`],
+        )
+      ).rows[0];
+    };
+    const turn = async (channel: string, task: string | null = null) => {
+      const id = randomUUID();
+      await pool.query(
+        "INSERT INTO turns(id,owner_id,thread_id,channel,status,task_id) VALUES($1,$2,$3,$4,'succeeded',$5)",
+        [id, ownerId, threadId, channel, task],
+      );
+      return id;
+    };
+    const say = async (turnId: string, text: string, replyTo: string | null = null) => {
+      const id = randomUUID();
+      await pool.query(
+        "INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id,reply_to_message_id) VALUES($1,$2,'assistant',$3,$4,$5,$6)",
+        [id, ownerId, text, threadId, turnId, replyTo],
+      );
+      return id;
+    };
+    const delivered = (text: string) => {
+      const index = sent.findLastIndex((body) => body.text === text);
+      assert.notEqual(index, -1);
+      return index;
+    };
+    const delivery = (text: string) => sent[delivered(text)]!;
+    const restart = () => service.replaceTransport(createChatSdkTransport(pool, fixtureEnv));
+
+    const main = await receive('Start a synthetic report');
+    assert.deepEqual(answers.at(-1), { replyToMessageId: undefined, mainOnly: false });
+    const taskId = randomUUID();
+    const ack = await say(main.turn_id, 'Started the synthetic report');
+    const taskTurn = await turn(main.channel, taskId);
+    await pool.query(
+      'INSERT INTO tasks(id,owner_id,turn_id,message_id,title) VALUES($1,$2,$3,$4,$5)',
+      [taskId, ownerId, taskTurn, ack, 'Synthetic report'],
+    );
+    await say(taskTurn, 'Fallback task update', ack);
+    await service.drain();
+    assert.equal(created.length, 0);
+    assert.equal(delivery('Started the synthetic report').message_thread_id, undefined);
+    assert.equal(delivery('Fallback task update').message_thread_id, undefined);
+    assert.deepEqual(delivery('Fallback task update').reply_parameters, {
+      message_id: 101 + delivered('Started the synthetic report'),
+      allow_sending_without_reply: true,
+    });
+
+    topics = true;
+    await restart();
+    await say(taskTurn, 'First topic update', ack);
+    const latest = await say(taskTurn, 'Second topic update');
+    await service.drain();
+    assert.deepEqual(created, [{ chat_id: '123456', name: 'Synthetic report' }]);
+    assert.equal(delivery('First topic update').message_thread_id, 701);
+    assert.equal(delivery('First topic update').reply_parameters, undefined);
+    assert.equal(delivery('Second topic update').message_thread_id, 701);
+
+    const inTopic = await receive('Add a synthetic chart', 701);
+    assert.deepEqual([inTopic.topic_id, inTopic.provider_reply_id], ['701', null]);
+    assert.deepEqual(submitted.at(-1), { replyToMessageId: latest, sessionId: undefined });
+    assert.deepEqual(answers.at(-1), { replyToMessageId: latest, mainOnly: false });
+    assert.equal(
+      (await pool.query('SELECT task_id FROM turns WHERE id=$1', [inTopic.turn_id])).rows[0]
+        .task_id,
+      taskId,
+    );
+    await receive('/status', 701);
+    assert.deepEqual(commands.at(-1), { replyToMessageId: latest, hasReply: true });
+    assert.equal(delivery('Synthetic task status').message_thread_id, 701);
+    await say(await turn(main.channel), 'Main chat reply');
+    await service.drain();
+    assert.equal(delivery('Main chat reply').message_thread_id, undefined);
+
+    const answered = answers.length;
+    const fresh = await receive('Plan a synthetic trip', 900);
+    const chat = submitted.at(-1)!;
+    assert.equal(chat.replyToMessageId, undefined);
+    assert.ok(chat.sessionId);
+    assert.equal(answers.length, answered);
+    await say(fresh.turn_id, 'Trip chat reply');
+    await service.drain();
+    assert.equal(delivery('Trip chat reply').message_thread_id, 900);
+    assert.equal(created.length, 1);
+    await receive('Make it a week', 900);
+    assert.equal(submitted.at(-1)?.sessionId, undefined);
+    assert.ok(submitted.at(-1)?.replyToMessageId);
+
+    await restart();
+    await receive('yes');
+    assert.deepEqual(answers.at(-1), { replyToMessageId: undefined, mainOnly: true });
+
+    gone.add(701);
+    const lost = await say(taskTurn, 'Update after the topic was deleted');
+    await service.drain();
+    assert.equal(
+      (await pool.query('SELECT state FROM channel_outbox WHERE message_id=$1', [lost])).rows[0]
+        .state,
+      'pending',
+    );
+    assert.equal(
+      (await pool.query("SELECT count(*)::int AS count FROM channel_inbox WHERE topic_id='701'"))
+        .rows[0].count,
+      0,
+    );
+    await service.drain();
+    assert.equal(created.length, 2);
+    assert.equal(delivery('Update after the topic was deleted').message_thread_id, 702);
+    assert.deepEqual(
+      (await pool.query('SELECT state,topic_id FROM channel_outbox WHERE message_id=$1', [lost]))
+        .rows[0],
+      { state: 'sent', topic_id: '702' },
+    );
+  },
+);
