@@ -1,6 +1,6 @@
 ---
 name: job-search
-description: Run the owner's own job search pipeline in Nod. Use for their CVs, job profile, message templates, career-ops checks, scoring jobs and CV PDFs. Use hiring-and-career for any other career or hiring task.
+description: Run the owner's own job search pipeline in Nod. Use whenever the owner sends or mentions their own CV or resume, even with just "this is my CV", to add it to their CV library before anything else, and for their CVs, job profile, message templates, career-ops checks, scoring jobs and CV PDFs. Use hiring-and-career for other people's CVs and any other career or hiring task.
 ---
 
 # Job search
