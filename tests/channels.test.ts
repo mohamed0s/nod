@@ -5475,6 +5475,10 @@ test(
     await receive('483923', 950);
     assert.deepEqual(codes.slice(1, 3), [taskId, threadId]);
     assert.ok(![undefined, taskId, threadId].includes(codes[3]));
+    await receive('/stop', 960);
+    assert.deepEqual(commands.at(-1), { replyToMessageId: undefined, hasReply: true });
+    await receive('/tasks', 960);
+    assert.deepEqual(commands.at(-1), { replyToMessageId: undefined, hasReply: false });
     const answered = answers.length;
     const fresh = await receive('Plan a synthetic trip', 900);
     const chat = submitted.at(-1)!;

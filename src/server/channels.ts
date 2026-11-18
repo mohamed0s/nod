@@ -1176,7 +1176,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
           client,
           command,
           retiredBeforeAnswer ? undefined : replyToMessageId,
-          retiredBeforeAnswer ? command === 'stop' : hasReply,
+          retiredBeforeAnswer ? command === 'stop' : hasReply || (newChat && command === 'stop'),
         );
         for (const message of reply.replies)
           await saveReply(client, row.source_id, reply.threadId, message);
