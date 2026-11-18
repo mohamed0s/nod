@@ -3,7 +3,7 @@ set -eu
 
 usage() {
   printf '%s\n' 'Usage: career-ops <command> [arguments]' \
-    'Commands: doctor, scan, scan:full, pdf, cv:html, cv:verify-facts, cv:verify-ats, linkedin-import, prepare:application, verify, tracker, liveness, sync-check, or any career-ops script by its file name without .mjs.' \
+    'Commands: doctor, pdf, cv:html, cv:templates, cv:verify-facts, cv:verify-ats, sync-check.' \
     'Files live in /workspace/<this workspace>/shared/career-ops.'
 }
 
@@ -35,38 +35,23 @@ case "$name" in
     usage
     exit 0
     ;;
+  doctor) script=doctor ;;
   pdf) script=generate-pdf ;;
-  scan:full) script=scan-ats-full ;;
   cv:html) script=build-cv-html ;;
   cv:templates) script=cv-templates ;;
   cv:verify-facts) script=verify-cv-facts ;;
   cv:verify-ats) script=verify-ats ;;
-  prepare:application) script=prepare-application ;;
-  verify) script=verify-pipeline ;;
-  liveness) script=check-liveness ;;
   sync-check) script=cv-sync-check ;;
-  *) script=$name ;;
-esac
-case "$script" in
   openai-eval | gemini-eval | openrouter-runner | ollama-eval | batch-evaluate-gemini | openai-tailor)
     echo "career-ops $name calls a model API. Nod never runs it in the workspace; do this step yourself." >&2
     exit 2
     ;;
-  update-system | plugin-install | install-latex-engine | test-all | upgrade-tests | updater-migration-tests)
-    echo "career-ops $name changes the installed copy, which Nod pins in its workspace image." >&2
-    exit 2
-    ;;
-  '' | *[!a-z0-9-]*)
-    echo "Unknown career-ops command: $name" >&2
+  *)
+    echo "career-ops $name isn't available in Nod's workspace." >&2
     usage >&2
     exit 2
     ;;
 esac
-if [ ! -f "/opt/career-ops/$script.mjs" ]; then
-  echo "Unknown career-ops command: $name" >&2
-  usage >&2
-  exit 2
-fi
 
 export CAREER_OPS_DATA_DIR="/workspace/$thread/shared/career-ops"
 unset CAREER_OPS_ROOT CAREER_OPS_PROFILE
