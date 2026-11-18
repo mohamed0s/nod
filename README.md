@@ -1,3 +1,5 @@
+> **This is a fork of [n8n-io/nod](https://github.com/n8n-io/nod) where each task is its own chat.** To install it on Windows with one command, see [FORK.md](FORK.md).
+
 <p align="center">
   <a href="https://nod.n8n.io#gh-dark-mode-only"><img src="docs/src/assets/readme/hero-dark.webp" alt="n8n presents Nod: open source personal agent with its own computer" width="100%" /></a>
   <a href="https://nod.n8n.io#gh-light-mode-only"><img src="docs/src/assets/readme/hero.webp" alt="n8n presents Nod: open source personal agent with its own computer" width="100%" /></a>
