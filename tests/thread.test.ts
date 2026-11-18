@@ -2583,6 +2583,54 @@ test(
         },
       );
 
+      await t.test(
+        'a task started inside another session takes only its own turns from the main chat',
+        async (t) => {
+          const session = randomUUID();
+          const [before, linked, task] = [randomUUID(), randomUUID(), randomUUID()];
+          const [report, update] = [randomUUID(), randomUUID()];
+          t.after(async () => {
+            await db.pool.query('UPDATE turns SET task_id=NULL WHERE id=$1', [linked]);
+            await db.pool.query('DELETE FROM tasks WHERE id=$1', [task]);
+            await db.pool.query('DELETE FROM messages WHERE id=ANY($1::uuid[])', [
+              [report, update],
+            ]);
+            await db.pool.query('DELETE FROM turns WHERE id=ANY($1::uuid[])', [[before, linked]]);
+          });
+          await db.pool.query(
+            `INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,background)
+             VALUES($1,$3,$4,$5,'schedule','Synthetic run','succeeded',true),
+               ($2,$3,$4,$5,'resume','Synthetic run follow-up','succeeded',true)`,
+            [before, linked, ownerId, threadId, session],
+          );
+          await db.pool.query(
+            `INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id)
+             VALUES($1,$3,'assistant','Synthetic run report',$4,$5),
+               ($2,$3,'assistant','Synthetic run task update',$4,$6)`,
+            [report, update, ownerId, threadId, before, linked],
+          );
+          await db.pool.query(
+            "INSERT INTO tasks(id,owner_id,turn_id,session_id,title,done_when,now_text) VALUES($1,$2,$3,$4,'Synthetic run task','Checked','Checking')",
+            [task, ownerId, linked, session],
+          );
+          await db.pool.query('UPDATE turns SET task_id=$1 WHERE id=$2', [task, linked]);
+          const page = async (query: string) =>
+            (await request('GET', `/api/messages?${query}`)).json<{
+              messages: Array<{ id: string; taskId?: string | null }>;
+            }>().messages;
+          assert.deepEqual(
+            (await page(`task=${task}`)).map(({ id, taskId }) => ({ id, taskId })),
+            [{ id: update, taskId: task }],
+          );
+          const main = await page('task=main');
+          assert.equal(main.find(({ id }) => id === report)?.taskId, null);
+          assert.equal(
+            main.some(({ id }) => id === update),
+            false,
+          );
+        },
+      );
+
       await t.test('a task resumes its own session when its next check is due', async (t) => {
         const previousObserver = inspectObserver;
         const prompt = 'Track a synthetic reply after connecting its source.';
