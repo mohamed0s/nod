@@ -8,9 +8,11 @@ import { browserErrorMessage } from '../../shared/browser-errors';
 
 export function BrowserScreen({
   data,
+  task,
   onStopped,
 }: {
   data: { currentBrowser?: CurrentBrowser | null } | null;
+  task?: string;
   onStopped(threadId: string): void;
 }) {
   const browserId = data?.currentBrowser?.threadId;
@@ -57,7 +59,7 @@ export function BrowserScreen({
       const requestedActivity = activity.current ?? '';
       try {
         const response = await apiResponse(
-          `/api/browser/screen?threadId=${encodeURIComponent(browserId)}`,
+          `/api/browser/screen?${task ? `task=${encodeURIComponent(task)}` : `threadId=${encodeURIComponent(browserId)}`}`,
           {
             cache: 'no-store',
             credentials: 'same-origin',
@@ -156,7 +158,9 @@ export function BrowserScreen({
                   onClick={() => {
                     const id = browserId;
                     setStoppingBrowser(id);
-                    void post('/api/thread/stop')
+                    void post(
+                      task ? `/api/tasks/${encodeURIComponent(task)}/stop` : '/api/thread/stop',
+                    )
                       .then(() => {
                         setError('');
                         onStopped(id);

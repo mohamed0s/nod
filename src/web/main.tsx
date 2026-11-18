@@ -18,6 +18,7 @@ import './components/private-entry.css';
 import './components/app-discovery-dialog.css';
 import './components/composer.css';
 import './pages/chat.css';
+import './components/chat-list.css';
 import './theme.css';
 import './pages/secondary-pages.css';
 import './pages/apps.css';

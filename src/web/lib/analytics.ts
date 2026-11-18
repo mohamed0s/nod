@@ -123,11 +123,12 @@ type AnalyticsEvents = {
     action:
       | 'expand'
       | 'stop'
-      | 'show_in_chat'
+      | 'open_chat'
+      | 'new_chat'
+      | 'close_chat'
       | 'open_browser'
       | 'show_activity'
-      | 'show_commands'
-      | 'reply';
+      | 'show_commands';
   };
   tab_viewed: { page: 'apps'; tab: 'all' | 'connected' };
   ui_error: {
@@ -271,11 +272,12 @@ const eventProperties: Record<keyof AnalyticsEvents, Record<string, readonly unk
     action: [
       'expand',
       'stop',
-      'show_in_chat',
+      'open_chat',
+      'new_chat',
+      'close_chat',
       'open_browser',
       'show_activity',
       'show_commands',
-      'reply',
     ],
   },
   tab_viewed: {

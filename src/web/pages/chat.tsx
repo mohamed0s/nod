@@ -119,23 +119,28 @@ function Welcome() {
     </div>
   );
 }
+const chatActivity = (taskId?: string) => (item: Activity) =>
+  taskId ? item.taskId === taskId : !item.background && !item.taskId;
 function Working({
   items = [],
   label,
   sending = false,
   writing = false,
   quiet = true,
+  taskId,
 }: {
   items?: Activity[];
   label?: string;
   sending?: boolean;
   writing?: boolean;
   quiet?: boolean;
+  taskId?: string;
 }) {
-  const found = items.find((item) => !item.background && !item.taskId);
+  const own = chatActivity(taskId);
+  const found = items.find(own);
   const chat = found?.doing === 'queued' ? undefined : found;
   const thinking = !writing && (Boolean(found) || sending);
-  const receipt = items.some((item) => !item.background && item.received)
+  const receipt = items.some((item) => own(item) && item.received)
     ? 'Got your message. I’ll read it after this step.'
     : null;
   if (!thinking && !label && !receipt && !found) return null;
@@ -314,6 +319,10 @@ export function Chat({
   onFeedback,
   onDismissFeedbackDiscovery,
   onReturnToMemory,
+  chatId,
+  startsChat = false,
+  browserLink = false,
+  onOpenChat,
 }: {
   ownerId: string;
   state: AppState;
@@ -331,8 +340,24 @@ export function Chat({
   onFeedback?(): void;
   onDismissFeedbackDiscovery?(): void;
   onReturnToMemory?(): void;
+  chatId?: string;
+  startsChat?: boolean;
+  browserLink?: boolean;
+  onOpenChat?(id?: string, focus?: string): void;
 }) {
   const dateFormat = useDateFormat();
+  const chatTask = chatId ? state.tasks?.find((task) => task.id === chatId) : undefined;
+  const inChat = (message: Message) =>
+    !startsChat &&
+    (chatId ? message.taskId === chatId || message.id === chatTask?.messageId : !message.taskId);
+  const chatRoute = useRef({ inChat, onOpenChat });
+  chatRoute.current = { inChat, onOpenChat };
+  const chatQuery: Record<string, string> = chatId
+    ? { task: chatId }
+    : startsChat
+      ? {}
+      : { task: 'main' };
+  const [startedChat, setStartedChat] = useState<string>();
   const { data: connections } = usePageData<Connection[]>('/api/apps');
   const { data: trust, refresh: refreshTrust } = usePageData<TrustView>('/api/trust');
   const trustRefreshKey = state.turns.map((turn) => `${turn.id}:${turn.status}`).join(',');
@@ -380,7 +405,6 @@ export function Chat({
   const [replyNotice, setReplyNotice] = useState('');
   const [unavailableQuestions, setUnavailableQuestions] = useState<ReadonlySet<string>>(new Set());
   useEffect(() => setReplyNotice(''), [text, state.threadId]);
-  const taskReply = useRef<string | null>(null);
   const [focusTarget, setFocusTarget] = useState<{
     id: string;
     pages: number;
@@ -419,7 +443,6 @@ export function Chat({
   const activeReplySends = useRef(new Map<string, Set<{ retired: boolean }>>());
   function retireReplyTarget(id: string) {
     for (const send of activeReplySends.current.get(id) ?? []) send.retired = true;
-    if (taskReply.current === id) taskReply.current = null;
     if (retry.current?.replyId === id)
       retry.current = {
         ...retry.current,
@@ -441,7 +464,6 @@ export function Chat({
     const hidden = hiddenMessageIds.current;
     const targets = new Set([
       replyTo?.id,
-      taskReply.current,
       retry.current?.replyId,
       ...optimistic
         .filter((item) => item.threadId === threadId)
@@ -537,7 +559,7 @@ export function Chat({
     epoch: 0,
     messages: [],
   });
-  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(Boolean(chatId));
   const [historyError, setHistoryError] = useState('');
   const historyRequest = useRef<{
     version: number;
@@ -613,11 +635,12 @@ export function Chat({
       : new Set<string>();
   const activeHistoryPage =
     historyPage.threadId === threadId && historyPage.epoch === historyEpoch ? historyPage : null;
-  const hasEarlier = activeHistoryPage?.hasMore ?? state.hasEarlierMessages === true;
+  const hasEarlier =
+    activeHistoryPage?.hasMore ?? (!chatId && !startsChat && state.hasEarlierMessages === true);
   const persistedMessages = useMemo(() => {
     const merged = mergeMessages(
       known.current.threadId === threadId ? known.current.messages : [],
-      [...(activeHistoryPage?.messages ?? []), ...state.messages],
+      [...(activeHistoryPage?.messages ?? []), ...state.messages].filter(inChat),
       hiddenIds,
     );
     const pending = state.pendingAnswerChoiceMessageIds
@@ -643,6 +666,7 @@ export function Chat({
     hiddenIds,
     state.pendingAnswerChoiceMessageIds,
     unavailableQuestions,
+    chatTask?.messageId,
   ]);
   const persistedIds = new Set(persistedMessages.map((message) => message.id));
   const targetValidation = useRef({
@@ -667,7 +691,6 @@ export function Chat({
     confirmedTargetIds.add(id);
     const active = new Set([
       replyTo?.id,
-      taskReply.current,
       retry.current?.replyId,
       focusTarget?.id,
       ...optimistic
@@ -709,7 +732,12 @@ export function Chat({
       ),
   ];
   const live = state.activity ?? [];
-  const working = live.some((item) => !item.background);
+  const own = chatActivity(chatId);
+  const working = startsChat
+    ? false
+    : chatId
+      ? live.some(own)
+      : live.some((item) => !item.background);
   const lastMessage = allMessages.at(-1);
   const beforeLast = allMessages.at(-2);
   const modelFailed =
@@ -727,9 +755,8 @@ export function Chat({
     !beforeLast.cardAnswer
       ? beforeLast.text
       : undefined;
-  const chatWork = connected
-    ? live.find((item) => !item.background && !item.taskId && !item.runId)
-    : undefined;
+  const chatWork =
+    connected && !startsChat ? live.find((item) => own(item) && !item.runId) : undefined;
   const workOf = (message: Message): MessageWork | undefined => {
     const work = message.work;
     if (!work) return undefined;
@@ -793,8 +820,17 @@ export function Chat({
     return () => window.clearTimeout(timer);
   }, [holding, finishing?.turnId]);
   const [welcoming, setWelcoming] = useState(
-    () => allMessages.length === 0 && !working && state.configuration.llmReady,
+    () =>
+      !chatId &&
+      !startsChat &&
+      allMessages.length === 0 &&
+      !working &&
+      state.configuration.llmReady,
   );
+  useEffect(() => {
+    const task = startedChat && state.messages.find((item) => item.id === startedChat)?.taskId;
+    if (task) onOpenChat?.(task);
+  }, [startedChat, state.messages]);
   const introduction = usePageData<{ messageId: string | null }>('/api/onboarding/introduction');
   useEffect(() => {
     if (!welcoming) return;
@@ -807,7 +843,7 @@ export function Chat({
       .finally(() => setWelcoming(false));
   }, []);
   const persistedStreams = new Set(allMessages.map((message) => message.streamId).filter(Boolean));
-  const streamEntries = Object.entries(streams).filter(
+  const streamEntries = Object.entries(chatId || startsChat ? {} : streams).filter(
     ([id, value]) => value && !persistedStreams.has(id),
   );
   const streamIds = new Set(streamEntries.map(([id]) => id));
@@ -866,7 +902,10 @@ export function Chat({
     .join(';');
   const files = useMemo(() => conversationFiles(visibleMessages), [fileKey]);
   const planning =
-    state.planningTasks === true && !allMessages.some((message) => message.suggestions);
+    !chatId &&
+    !startsChat &&
+    state.planningTasks === true &&
+    !allMessages.some((message) => message.suggestions);
   const unseen = away
     ? persistedMessages.filter(
         (message) => message.role === 'assistant' && Date.parse(message.createdAt) > away.since,
@@ -1086,6 +1125,14 @@ export function Chat({
             )
               return;
             focusLoading.current = false;
+            const found = messages.find((message) => message.id === id);
+            const route = chatRoute.current;
+            if (found && !route.inChat(found) && route.onOpenChat) {
+              setCanReturn(false);
+              returnPosition.current = null;
+              route.onOpenChat(found.taskId ?? undefined, id);
+              return;
+            }
             setHistoryPage((current) => ({
               threadId: expectedThread,
               epoch: expectedEpoch,
@@ -1177,8 +1224,16 @@ export function Chat({
       void history();
       return;
     }
+    const missing = focusTarget.id;
     setFocusTarget(null);
-    setError('Could not find that message in this chat.');
+    const notFound = () => setError('Could not find that message in this chat.');
+    void api<Message[]>(`/api/messages/around/${encodeURIComponent(missing)}`)
+      .then((messages) => {
+        const found = messages.find((message) => message.id === missing);
+        if (found && !inChat(found) && onOpenChat) onOpenChat(found.taskId ?? undefined, missing);
+        else notFound();
+      })
+      .catch(notFound);
   }, [focusTarget, loadingHistory, historyPage, hasEarlier, historyError, visible]);
   async function recover(selection?: ModelSelection) {
     setRecovering(true);
@@ -1211,13 +1266,25 @@ export function Chat({
       | 'ask_nod'
       | 'task_reply'
       | 'answer_choice'
-      | 'approval_card' = reply && reply.id === taskReply.current ? 'task_reply' : 'composer',
+      | 'approval_card' = chatId ? 'task_reply' : 'composer',
     recording?: File,
     questionAnswer?: QuestionAnswer,
     displayText?: string,
     approvalAnswer?: { approvalId: string; approved: boolean },
   ): Promise<ComposerSendResult & { error?: string; questionUnavailable?: true }> {
-    if (welcoming) return { sent: false, restoreText: true };
+    if (welcoming || startedChat) return { sent: false, restoreText: true };
+    const implicitReply = Boolean(chatId && !reply);
+    if (chatId && !reply) {
+      const target =
+        persistedMessages.findLast((message) => message.role === 'assistant') ??
+        persistedMessages.at(-1);
+      if (!target) {
+        const error = 'This chat has nothing to reply to yet. Start a new chat instead.';
+        setError(error);
+        return { sent: false, restoreText: true, restoreRecording: true, error };
+      }
+      reply = { id: target.id, role: target.role, text: target.text };
+    }
     unreadPositioned.current = currentUnreadVisit.current;
     const replyId = reply?.id;
     questionAnswer ??=
@@ -1333,10 +1400,7 @@ export function Chat({
     let replyUnavailable = false;
     let responseConflict = false;
     let submittedBody = previousAttempt?.body;
-    if (reply && !directAnswer) {
-      taskReply.current = null;
-      setReplyTo(null);
-    }
+    if (reply && !directAnswer) setReplyTo(null);
     const message: Message = {
       id,
       role: 'user',
@@ -1447,6 +1511,7 @@ export function Chat({
           ...(verificationRequestId ? { verificationRequestId } : {}),
           ...(questionAnswer ? { questionAnswer } : {}),
           ...(approvalAnswer ? { approvalAnswer } : {}),
+          ...(startsChat ? { newChat: true } : {}),
         });
       submittedBody = messageBody;
       let body: string | FormData = messageBody;
@@ -1534,6 +1599,10 @@ export function Chat({
       );
       if (verificationStatus === 'unavailable')
         setError(verificationFailure(verificationStatus, false));
+      if (startsChat && !privateVerification) {
+        captureAnalytics('task_action', { action: 'new_chat' });
+        setStartedChat(id);
+      }
       await refresh().catch(() => {});
       return { sent: true };
     } catch (cause) {
@@ -1624,6 +1693,7 @@ export function Chat({
       if (
         failed &&
         reply &&
+        !implicitReply &&
         !directAnswer &&
         !replyUnavailable &&
         !hiddenMessageIds.current.has(reply.id) &&
@@ -1700,6 +1770,7 @@ export function Chat({
           threadId,
           before: before.createdAt,
           beforeId: before.id,
+          ...chatQuery,
         });
         const result = await api<MessageHistoryPage>(`/api/messages?${query}`, {
           signal: controller.signal,
@@ -1735,10 +1806,41 @@ export function Chat({
     return () => controller.abort();
   }, [historyEpoch, threadId]);
   useEffect(() => {
+    if (!chatId) return;
+    const controller = new AbortController();
+    const epoch = historyEpoch;
+    setLoadingHistory(true);
+    void api<MessageHistoryPage>(
+      `/api/messages?${new URLSearchParams({ threadId, ...chatQuery })}`,
+      {
+        signal: controller.signal,
+      },
+    )
+      .then((result) => {
+        if (controller.signal.aborted || hiddenHistory.current.epoch !== epoch) return;
+        setHistoryPage((current) => ({
+          threadId,
+          epoch,
+          messages: mergeMessages(
+            current.threadId === threadId && current.epoch === epoch ? current.messages : [],
+            result.messages,
+            hiddenMessageIds.current,
+          ),
+          hasMore: result.hasMore,
+        }));
+      })
+      .catch((cause) => {
+        if (!controller.signal.aborted) setError(errorMessage(cause));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingHistory(false);
+      });
+    return () => controller.abort();
+  }, []);
+  useEffect(() => {
     if (hiddenCount <= (state.hiddenMessageIds?.length ?? 0)) return;
     const targets = new Set([
       replyTo?.id,
-      taskReply.current,
       retry.current?.replyId,
       focusTarget?.id,
       ...optimistic
@@ -1936,7 +2038,12 @@ export function Chat({
     setLoadingHistory(true);
     setHistoryError('');
     try {
-      const query = new URLSearchParams({ threadId, before: first.createdAt, beforeId: first.id });
+      const query = new URLSearchParams({
+        threadId,
+        before: first.createdAt,
+        beforeId: first.id,
+        ...chatQuery,
+      });
       const result = await api<MessageHistoryPage>(`/api/messages?${query}`, {
         signal: request.controller.signal,
       });
@@ -2092,8 +2199,13 @@ export function Chat({
     setStopping(true);
     setError('');
     try {
-      await post('/api/thread/stop');
-      captureAnalytics('chat_stop_requested');
+      if (chatId) {
+        await post(`/api/tasks/${chatId}/stop`);
+        captureAnalytics('task_action', { action: 'stop' });
+      } else {
+        await post('/api/thread/stop');
+        captureAnalytics('chat_stop_requested');
+      }
       await refresh();
     } catch (cause) {
       if (threadRef.current === stoppedThread) setError(errorMessage(cause));
@@ -2169,6 +2281,24 @@ export function Chat({
           onKeyDown={cancelReturn}
         >
           <div className="conversation-column">
+            {chatTask && (
+              <div className="chat-task-header">
+                <TaskCard
+                  task={chatTask}
+                  live={live.find((item) => item.taskId === chatTask.id)}
+                  pinned
+                />
+                {browserLink && (
+                  <a
+                    href={`/browser?task=${encodeURIComponent(chatTask.id)}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open the live browser
+                  </a>
+                )}
+              </div>
+            )}
             {unreadError && (
               <div className="history-control">
                 <Tooltip content={unreadError}>
@@ -2216,6 +2346,7 @@ export function Chat({
               </div>
             )}
             {visibleMessages.length === 0 &&
+              !chatId &&
               !welcoming &&
               !working &&
               !sending &&
@@ -2278,7 +2409,7 @@ export function Chat({
                         void send(task.title, [], null, 'task_card');
                       }}
                     />
-                  ) : state.tasks?.some((task) => task.messageId === message.id) ? (
+                  ) : !chatId && state.tasks?.some((task) => task.messageId === message.id) ? (
                     state.tasks
                       ?.filter((task) => task.messageId === message.id)
                       .map((task) => (
@@ -2286,20 +2417,17 @@ export function Chat({
                           key={task.id}
                           task={task}
                           live={live.find((item) => item.taskId === task.id)}
-                          onReply={() => {
-                            const target =
-                              allMessages.find((item) => item.id === task.questionMessageId) ??
-                              message;
-                            taskReply.current = target.id;
-                            setReplyTo(target);
-                            composer.current?.focus();
-                          }}
+                          inChat
                         />
                       ))
                   ) : (
                     <MessageBubble
-                      message={message}
-                      work={workOf(message)}
+                      message={
+                        chatId && !message.replyTo?.isQuote
+                          ? { ...message, replyTo: undefined }
+                          : message
+                      }
+                      work={chatId ? undefined : workOf(message)}
                       answersDisabled={sending || !state.configuration.llmReady || welcoming}
                       onAnswer={async (value, answer) => {
                         if (replyTo?.id === message.id && composer.current?.hasDraft()) {
@@ -2365,7 +2493,6 @@ export function Chat({
                       onReply={
                         message.turnId || persistedIds.has(message.id)
                           ? (quote?: string) => {
-                              taskReply.current = null;
                               const preview =
                                 (message.role === 'user' ? message.displayText : undefined) ??
                                 message.audioCaption ??
@@ -2403,10 +2530,17 @@ export function Chat({
                 />
               ) : (
                 <Working
-                  items={connected ? (holding && finishing ? [finishing, ...live] : live) : []}
+                  items={
+                    connected && !startsChat
+                      ? holding && finishing
+                        ? [finishing, ...live]
+                        : live
+                      : []
+                  }
                   sending={sending}
                   writing={Boolean(streamEntries.length) && finishing?.doing !== 'tool'}
                   quiet={!streamEntries.length}
+                  taskId={chatId}
                 />
               )}
             </div>
@@ -2484,7 +2618,7 @@ export function Chat({
               {replyNotice}
             </Notice>
           )}
-          {state.chatRecovery && (
+          {!chatId && !startsChat && state.chatRecovery && (
             <Notice kind="info">
               <div className="chat-recovery">
                 <span>This chat needs a restart. Your messages, files and tasks stay.</span>
@@ -2576,12 +2710,12 @@ export function Chat({
               key={`${ownerId}.${threadId}`}
               active={visible}
               ref={composer}
-              draftKey={`nod.chat-draft.${ownerId}.${threadId}`}
+              draftKey={`nod.chat-draft.${ownerId}.${threadId}${chatId ? `.${chatId}` : startsChat ? '.new' : ''}`}
               privateReply={Boolean(state.verificationRequests?.length)}
               restoreReply={(saved) => {
                 if (!saved || !hiddenMessageIds.current.has(saved.id)) setReplyTo(saved);
               }}
-              ready={state.configuration.llmReady && !welcoming && !recovering}
+              ready={state.configuration.llmReady && !welcoming && !recovering && !startedChat}
               busy={connected && working}
               text={text}
               setText={setText}
@@ -2594,17 +2728,19 @@ export function Chat({
                   ? () => setFailedReplyValidation(null)
                   : undefined
               }
-              clearReply={() => {
-                taskReply.current = null;
-                setReplyTo(null);
-              }}
+              clearReply={() => setReplyTo(null)}
               onSend={(value, attachments, recording, displayText) =>
                 send(value, attachments, replyTo, undefined, recording, undefined, displayText)
               }
               onStop={
-                working ||
-                state.tasks?.some((task) =>
-                  ['queued', 'working', 'needs_you'].includes(task.status),
+                (
+                  chatId
+                    ? chatTask && !['done', 'cancelled'].includes(chatTask.status)
+                    : !startsChat &&
+                      (working ||
+                        state.tasks?.some((task) =>
+                          ['queued', 'working', 'needs_you'].includes(task.status),
+                        ))
                 )
                   ? () => void stop()
                   : undefined

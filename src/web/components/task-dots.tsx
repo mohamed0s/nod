@@ -3,9 +3,7 @@ import type { Task } from '../../shared/contracts';
 import { Tooltip } from './tooltip';
 
 export function TaskDots({ tasks }: { tasks: Task[] }) {
-  const open = tasks.filter(
-    (task) => (task.status === 'working' || task.status === 'needs_you') && task.messageId,
-  );
+  const open = tasks.filter((task) => task.status === 'working' || task.status === 'needs_you');
   if (!open.length) return null;
   return (
     <nav className="task-pips" aria-label="Open tasks">
@@ -19,17 +17,11 @@ export function TaskDots({ tasks }: { tasks: Task[] }) {
               task.status === 'needs_you' ? `${task.title} needs you` : `Show ${task.title}`
             }
             style={{ '--dot-delay': `${index * -0.6}s` } as CSSProperties}
-            onClick={() => {
-              const cardOpened = !window.dispatchEvent(
-                new CustomEvent('nod:open-task', { detail: { taskId: task.id }, cancelable: true }),
-              );
-              if (!cardOpened)
-                window.dispatchEvent(
-                  new CustomEvent('nod:focus-message', {
-                    detail: { messageId: task.messageId, taskId: task.id },
-                  }),
-                );
-            }}
+            onClick={() =>
+              window.dispatchEvent(
+                new CustomEvent('nod:open-chat', { detail: { taskId: task.id } }),
+              )
+            }
           />
         </Tooltip>
       ))}

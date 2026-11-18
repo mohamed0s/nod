@@ -52,6 +52,8 @@ const icons = {
 const closed = (task: Task) => task.status === 'done' || task.status === 'cancelled';
 const showMessage = (messageId: string) =>
   window.dispatchEvent(new window.CustomEvent('nod:focus-message', { detail: { messageId } }));
+const openChat = (taskId: string) =>
+  window.dispatchEvent(new window.CustomEvent('nod:open-chat', { detail: { taskId } }));
 
 function TaskActivity({ id }: { id: string }) {
   const data = usePageData<TaskDetail>(`/api/tasks/${id}`);
@@ -142,12 +144,14 @@ export function TaskCard({
   task,
   live,
   onScheduled,
-  onReply,
+  inChat = false,
+  pinned = false,
 }: {
   task: Task;
   live?: Activity;
   onScheduled?(): void;
-  onReply?(): void;
+  inChat?: boolean;
+  pinned?: boolean;
 }) {
   const headingId = useId();
   const stuck = task.status === 'failed';
@@ -156,7 +160,6 @@ export function TaskCard({
     if (stuck) setExpanded(true);
   }, [stuck]);
   const card = useRef<HTMLElement>(null);
-  const inChat = Boolean(onReply);
   useEffect(() => {
     if (!inChat) return;
     const open = (event: Event) => {
@@ -194,9 +197,8 @@ export function TaskCard({
         : 'todo';
   const chevron = <ChevronDown size={16} aria-hidden="true" className="task-preview-chevron" />;
   const handoffMessage = task.browserHandoff ? task.questionMessageId : null;
-  const startMessage = task.questionMessageId ?? task.messageId;
   const line =
-    !onReply && expanded && task.status === 'needs_you'
+    !pinned && expanded && task.status === 'needs_you'
       ? task.now || 'Waiting for your answer'
       : taskHeadline(task);
   const showLive = live && (task.status === 'working' || task.status === 'queued') ? live : null;
@@ -212,7 +214,7 @@ export function TaskCard({
       }}
       aria-labelledby={headingId}
       tabIndex={-1}
-      data-message-id={onReply ? task.messageId : undefined}
+      data-message-id={inChat ? task.messageId : undefined}
     >
       <h2 className="task-preview-heading">
         <button
@@ -273,7 +275,7 @@ export function TaskCard({
                 await pageDataCache.refresh('/api/tasks', true);
               }}
             />
-            {!onReply && task.status === 'needs_you' && task.question && (
+            {!pinned && task.status === 'needs_you' && task.question && (
               <div className="task-preview-question">
                 <MessageText text={task.question} />
               </div>
@@ -355,29 +357,18 @@ export function TaskCard({
                   <Globe2 size={16} aria-hidden="true" />
                   Open browser
                 </Button>
-              ) : onReply ? (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    captureAnalytics('task_action', { action: 'reply' });
-                    onReply();
-                  }}
-                >
-                  Reply
-                </Button>
               ) : (
-                startMessage && (
+                !pinned && (
                   <Button
                     variant="ghost"
                     size="sm"
                     onClick={() => {
-                      captureAnalytics('task_action', { action: 'show_in_chat' });
-                      showMessage(startMessage);
+                      captureAnalytics('task_action', { action: 'open_chat' });
+                      openChat(task.id);
                     }}
                   >
                     <MessageSquare size={16} aria-hidden="true" />
-                    Show in chat
+                    Open chat
                   </Button>
                 )
               )}
