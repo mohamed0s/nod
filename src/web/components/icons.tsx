@@ -1,5 +1,6 @@
 import type { JSX, SVGProps } from 'react';
 import {
+  Briefcase as LucideBriefcase,
   CreditCard as LucideCreditCard,
   FileAudio as LucideFileAudio,
   FileImage as LucideFileImage,
@@ -176,6 +177,7 @@ export const Wrench = n8n('wrench');
 export const X = n8n('x');
 export const Zap = n8n('lightning');
 
+export const Briefcase = lucide(LucideBriefcase);
 export const CreditCard = lucide(LucideCreditCard);
 export const FileAudio = lucide(LucideFileAudio);
 export const FileImage = lucide(LucideFileImage);

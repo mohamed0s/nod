@@ -1,4 +1,12 @@
-import { Blocks, CalendarClock, Gauge, MessageCircle, Send, Vault } from '../components/icons';
+import {
+  Blocks,
+  Briefcase,
+  CalendarClock,
+  Gauge,
+  MessageCircle,
+  Send,
+  Vault,
+} from '../components/icons';
 
 export const sidebarItems = [
   { path: '/', label: 'Chat', key: '1', icon: MessageCircle },
@@ -7,6 +15,7 @@ export const sidebarItems = [
   { path: '/channels', label: 'Channels', key: '4', icon: Send },
   { path: '/usage', label: 'Usage', key: '5', icon: Gauge },
   { path: '/vault', label: 'Vault', key: '6', icon: Vault },
+  { path: '/jobs', label: 'Jobs', key: '7', icon: Briefcase },
 ] as const;
 
 type NavigationGuard = (path: string, proceed: () => void) => boolean;
