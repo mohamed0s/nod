@@ -222,12 +222,12 @@ To turn them on, open [BotFather](https://t.me/BotFather), select **Open** to st
 
 With topics on:
 
-- The main chat stays in **General**, with scheduled results and notifications.
-- Each task gets a topic named after it when its first message arrives. Its progress, questions, approvals, files and result go there.
-- Anything you write in a task's topic goes to that task, as a reply to its latest message. A "yes" there answers that task's approval, and `/status` or `/stop` there applies to that task only.
-- A message in a topic that Nod didn't create starts a new chat, like **New chat** in the app. Later messages in that topic stay in that chat.
-- In General, a message without a reply never answers a task's approval. Answer it in the task's topic.
-- If you delete a task's topic, Nod opens a new one for the task's next message.
+- The main chat stays in **General**, with scheduled results and notifications. A task started inside a scheduled run stays there with that run.
+- Each task gets a topic named after it when its first message arrives. Its progress, questions, approvals, files and result go there. If Telegram refuses to create the topic, that message arrives in General, and Nod tries again with the task's next message.
+- Anything you write in a task's topic goes to that task, as a reply to its latest message. A "yes" there answers that task's approval, a sign-in code goes only to that task's sign-in, and `/status` or `/stop` there applies to that task only.
+- A message in a topic that Nod didn't create starts a new chat, like **New chat** in the app. Later messages in that topic stay in that chat. `/stop` there stops nothing, and `/tasks` and `/status` there cover all tasks.
+- In General, a "yes" without a reply answers only the latest message Nod sent in General, never an approval waiting in a task's topic. A sign-in code sent in General goes only to the main chat's sign-in; for another one, reply to its request.
+- If you delete a task's topic, Nod opens a new one for the task's next message, including voice notes, contacts, locations and files.
 
 Without topics, Nod works as before: task messages reply to the task's first message in one chat.
 

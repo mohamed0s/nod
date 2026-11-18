@@ -143,7 +143,7 @@ The task list sends one message per task. You can reply to that message, the tas
 
 A status message that shows a pending question keeps a link to that exact question. Your approval applies only to the saved action it shows. An old status message cannot approve a later action.
 
-With [Telegram topics](/use/channels/#telegram-topics) on, each task has its own topic. Its messages, questions, approvals, files and result arrive there, and the main chat stays in General. Anything you write in the topic goes to that task, without the Reply control, and `/status` or `/stop` there applies to that task only. A topic you start yourself becomes a new chat.
+With [Telegram topics](/use/channels/#telegram-topics) on, each task has its own topic. Its messages, questions, approvals, files and result arrive there, and the main chat stays in General. Anything you write in the topic goes to that task, without the Reply control, and `/status` or `/stop` there applies to that task only. A topic you start yourself becomes a new chat. A task started inside a scheduled run stays in General with that run.
 
 Telegram, WhatsApp and web use the same task record and saved session. Task commands do not grant permission for an outside action. Private sign-in and payment steps still use Nod's private forms.
 
@@ -177,7 +177,7 @@ stateDiagram-v2
 
 A question stays **Needs you** until you reply to it or continue its session. An unrelated chat message does not answer it. A failed task opens its card, so **Open chat** and **Stop this task** are in view. A task that stops without a plan or a result shows **Needs you** with a note to reply to continue. A task that fails, including one Nod started on its own, says so in chat with the task's name and what stopped it. When a task reaches its spending check-in, it shows **Needs you** with the check-in question. A stopped task shows **Stopped**. Reply to the task to continue the same saved session. While a task works on your reply, the chat shows that Nod is working.
 
-In the web app, a message in **Main** never answers a question or approval that a task's chat is waiting on. Answer it in that task's chat. With Telegram topics on, General works the same way: answer a task's approval in its topic. Otherwise, in Telegram and WhatsApp, if you ask a question in the main chat after a task's yes/no approval without replying directly, Nod closes that approval without running its action. The task remains open with a message that says its current work stopped. Reply to that message to continue what is unfinished.
+In the web app, a message in **Main** never answers a question or approval that a task's chat is waiting on. Answer it in that task's chat. With Telegram topics on, a message in General answers only the latest message Nod sent there, so answer a task's approval in its topic. Otherwise, in Telegram and WhatsApp, if you ask a question in the main chat after a task's yes/no approval without replying directly, Nod closes that approval without running its action. The task remains open with a message that says its current work stopped. Reply to that message to continue what is unfinished.
 
 If you pause or delete a schedule directly while a task is waiting for approval to change that schedule, the old confirmation expires. The task stays open and shows a new message you can reply to if it has more work to do.
 
