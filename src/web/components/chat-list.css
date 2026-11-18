@@ -46,7 +46,7 @@
 }
 .chat-list-item {
   display: flex;
-  flex: 1;
+  flex: none;
   align-items: center;
   gap: 8px;
   min-width: 0;
@@ -59,6 +59,9 @@
   font-size: var(--text-control);
   text-align: left;
   cursor: pointer;
+}
+.chat-list-row > .chat-list-item {
+  flex: 1;
 }
 .chat-list-item:hover {
   background: var(--hover);
