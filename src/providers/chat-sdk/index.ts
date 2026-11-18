@@ -14,7 +14,7 @@ import type {
 } from '../../ports/messaging.ts';
 import { telegramSecret, telegramUserId } from '../../ports/channel-settings.ts';
 import { logRepeatedFailure } from '../../ports/failure-log.ts';
-import { MessagingConnectionError } from '../../ports/messaging.ts';
+import { MessagingConnectionError, MessagingTopicError } from '../../ports/messaging.ts';
 import { telegramMessage, telegramPairing, telegramAttachments } from './telegram.ts';
 import { telegramText, whatsappText } from './format.ts';
 import { contactCards, sharedLocation } from '../../shared/channel-content.ts';
@@ -83,6 +83,35 @@ class Telegram extends TelegramAdapter {
     const fit = (part: string): string[] =>
       this.fits(part, 4096) ? [part] : chunks(part, Math.floor(part.length / 2)).flatMap(fit);
     return chunks(text).flatMap(fit);
+  }
+
+  private topicState?: { enabled: boolean; at: number };
+
+  async topicsEnabled(signal?: AbortSignal) {
+    if (!this.topicState || Date.now() - this.topicState.at >= 300_000) {
+      const me = await this.telegramFetch<{ has_topics_enabled?: boolean }>('getMe', undefined, {
+        signal,
+      });
+      this.topicState = { enabled: me.has_topics_enabled === true, at: Date.now() };
+    }
+    return this.topicState.enabled;
+  }
+
+  async createTopic(threadId: string, title: string, signal?: AbortSignal) {
+    let name = '';
+    for (const { segment } of new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(
+      title.trim().replace(/\s+/g, ' '),
+    )) {
+      if (name.length + segment.length > 128) break;
+      name += segment;
+    }
+    if (!name) throw new Error('A Telegram topic needs a name.');
+    const topic = await this.telegramFetch<{ message_thread_id: unknown }>(
+      'createForumTopic',
+      { chat_id: this.decodeThreadId(threadId).chatId, name },
+      { signal },
+    );
+    return String(z.number().int().positive().parse(topic.message_thread_id));
   }
 
   typing(threadId: string, signal?: AbortSignal) {
@@ -564,7 +593,11 @@ export function createChatSdkTransport(
         }
         const start = /^\/start(?:\s+(\S+))?$/.exec(parsed.data.text);
         if (env.TELEGRAM_ALLOWED_USER_ID && start) return accepted();
-        const replied = parsed.data.reply_to_message;
+        const topic = parsed.data.is_topic_message ? parsed.data.message_thread_id : undefined;
+        const replied =
+          parsed.data.reply_to_message?.message_id === topic
+            ? undefined
+            : parsed.data.reply_to_message;
         const message = telegram.parseMessage({
           message_id: parsed.data.message_id,
           date: parsed.data.date,
@@ -595,6 +628,7 @@ export function createChatSdkTransport(
             messageId: message.id,
             replyToMessageId: replyId,
             threadId: message.threadId,
+            ...(topic ? { topicId: String(topic) } : {}),
             text,
             ...(attachments.length ? { attachments } : {}),
             sentAt: message.metadata.dateSent,
@@ -704,6 +738,24 @@ export function createChatSdkTransport(
         throw new Error('Channel is not configured.');
       await telegram.progress(input);
     },
+    async topics(input) {
+      if (
+        !telegram ||
+        input.channelId !== 'telegram' ||
+        input.accountId !== env.TELEGRAM_BOT_TOKEN!.split(':')[0]
+      )
+        return false;
+      return telegram.topicsEnabled(input.signal);
+    },
+    async createTopic(input) {
+      if (
+        !telegram ||
+        input.channelId !== 'telegram' ||
+        input.accountId !== env.TELEGRAM_BOT_TOKEN!.split(':')[0]
+      )
+        throw new Error('Channel topics are unavailable.');
+      return telegram.createTopic(input.threadId, input.name, input.signal);
+    },
     async post(input) {
       if (
         !channels.some(
@@ -716,7 +768,19 @@ export function createChatSdkTransport(
         throw new Error('Channel is not configured.');
       const attachments = input.attachments ?? [];
       await bot.initialize();
-      const thread = bot.thread(input.threadId);
+      const threadId =
+        input.channelId === 'telegram' && input.topicId
+          ? telegram!.encodeThreadId({
+              chatId: telegram!.decodeThreadId(input.threadId).chatId,
+              messageThreadId: Number(
+                z
+                  .string()
+                  .regex(/^\d{1,15}$/)
+                  .parse(input.topicId),
+              ),
+            })
+          : input.threadId;
+      const thread = bot.thread(threadId);
       const unsent = attachments.filter((file) =>
         input.channelId === 'whatsapp'
           ? !['image/png', 'image/jpeg'].includes(file.mimeType) ||
@@ -738,9 +802,17 @@ export function createChatSdkTransport(
       let id = '';
       const ids: string[] = [];
       const post = (message: Parameters<typeof thread.reply>[1]) =>
-        input.replyToMessageId
+        (input.replyToMessageId
           ? thread.reply(input.replyToMessageId, message)
-          : thread.post(message);
+          : thread.post(message)
+        ).catch((cause: unknown) => {
+          throw !id &&
+            threadId !== input.threadId &&
+            cause instanceof Error &&
+            /message thread not found/i.test(cause.message)
+            ? new MessagingTopicError('The Telegram topic is no longer available.', { cause })
+            : cause;
+        });
       const messages =
         input.channelId === 'telegram'
           ? telegram!.chunks(caption ? '' : input.text).map((markdown) => ({ markdown }))
@@ -753,7 +825,7 @@ export function createChatSdkTransport(
       for (const file of attachments) {
         if (unsent.includes(file)) continue;
         if (input.channelId === 'telegram' && /^audio\/(ogg|mpeg|mp4)$/.test(file.mimeType)) {
-          const decoded = telegram!.decodeThreadId(input.threadId);
+          const decoded = telegram!.decodeThreadId(threadId);
           const body = new FormData();
           body.set('chat_id', decoded.chatId);
           if (decoded.messageThreadId)
@@ -880,7 +952,7 @@ export function createChatSdkTransport(
                     },
                   ]
                 : [];
-          const decoded = telegram!.decodeThreadId(input.threadId);
+          const decoded = telegram!.decodeThreadId(threadId);
           for (const message of native) {
             const response = await request(
               `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${message.method}`,

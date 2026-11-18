@@ -1370,6 +1370,21 @@ test('Telegram media keeps native replies and checks the sender before any downl
   assert.equal(result.messages?.length, 1);
   assert.equal(result.messages[0].text, 'Read this image');
   assert.equal(result.messages[0].replyToMessageId, '123456:41');
+  assert.equal(result.messages[0].topicId, undefined);
+  const topical = (
+    await receive({
+      ...message,
+      message_thread_id: 77,
+      is_topic_message: true,
+      reply_to_message: { message_id: 77 },
+    })
+  ).messages![0];
+  assert.deepEqual(
+    [topical.topicId, topical.replyToMessageId, topical.threadId],
+    ['77', undefined, result.messages[0].threadId],
+  );
+  const threaded = (await receive({ ...message, message_thread_id: 41 })).messages![0];
+  assert.deepEqual([threaded.topicId, threaded.replyToMessageId], [undefined, '123456:41']);
   assert.equal(requests.length, 0);
   assert.deepEqual(Buffer.from(await result.messages[0].attachments![0].read()), bytes);
   requests.length = 0;

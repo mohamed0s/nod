@@ -35,6 +35,14 @@ export function combineMessagingTransports(
       if (!transport) throw new Error('Channel is not configured.');
       return transport.post(input);
     },
+    async topics(input) {
+      return (await forChannel(input.channelId)?.topics?.(input)) ?? false;
+    },
+    async createTopic(input) {
+      const transport = forChannel(input.channelId);
+      if (!transport?.createTopic) throw new Error('Channel topics are unavailable.');
+      return transport.createTopic(input);
+    },
     async react(input) {
       return (await forChannel(input.channelId)?.react?.(input)) ?? 'unsupported';
     },

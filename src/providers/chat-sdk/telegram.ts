@@ -13,6 +13,8 @@ const telegramFile = z.object({
 
 export const telegramMessage = z.object({
   message_id: z.number().int().nonnegative(),
+  message_thread_id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  is_topic_message: z.boolean().optional(),
   reply_to_message: z
     .object({ message_id: z.number().int().nonnegative() })
     .passthrough()

@@ -2,6 +2,8 @@ import type { ChannelLinkStatus } from '../shared/contracts.ts';
 
 export class MessagingConnectionError extends Error {}
 
+export class MessagingTopicError extends Error {}
+
 export class MessagingAttachmentError extends Error {
   constructor(readonly maxBytes: number) {
     super('The channel file is too large.');
@@ -36,6 +38,7 @@ export interface InboundMessage {
   senderId: string;
   messageId: string;
   threadId: string;
+  topicId?: string;
   text: string;
   attachments?: MessagingAttachment[];
   replyToMessageId?: string;
@@ -94,12 +97,21 @@ export interface MessagingTransport {
     channelId: string;
     accountId: string;
     threadId: string;
+    topicId?: string;
     text: string;
     attachments?: MessagingAttachment[];
     replyToMessageId?: string;
     replyToText?: string;
     attachmentFailure?: (names: string[]) => Promise<string | undefined>;
   }): Promise<{ id: string; ids?: string[] }>;
+  topics?(input: { channelId: string; accountId: string; signal?: AbortSignal }): Promise<boolean>;
+  createTopic?(input: {
+    channelId: string;
+    accountId: string;
+    threadId: string;
+    name: string;
+    signal?: AbortSignal;
+  }): Promise<string>;
   react?(input: {
     channelId: string;
     accountId: string;
