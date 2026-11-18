@@ -21,7 +21,7 @@ const item = (max: number) => z.string().trim().min(1).max(max);
 const languageTag = z
   .string()
   .trim()
-  .regex(/^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/, 'Use a language tag such as en or ar-EG.');
+  .regex(/^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/, 'Use a language tag such as en or fr-CA.');
 
 export const jobProfileFields = {
   name: text(120),
@@ -34,7 +34,7 @@ export const jobProfileFields = {
     .object({
       default: languageTag,
       byCountry: z.record(
-        z.string().regex(/^[A-Z]{2}$/, 'Use a two-letter country code such as EG.'),
+        z.string().regex(/^[A-Z]{2}$/, 'Use a two-letter country code such as CA.'),
         languageTag,
       ),
     })
@@ -101,6 +101,8 @@ export function unknownPlaceholders(body: string) {
   ];
 }
 
+export const jobLimitFields = ['inviteLimits', 'noLuck'] as const;
+
 export type JobCv = {
   id: string;
   label: string;
@@ -110,8 +112,18 @@ export type JobCv = {
   markdown: string;
   file: { id: string; name: string; mimeType: string; url: string } | null;
   pdf: { id: string; name: string; url: string } | null;
+  pdfFile: string;
+  converting: boolean;
   createdAt: string;
   updatedAt: string;
+};
+
+export type JobRevision<T> = {
+  id: string;
+  revision: number;
+  actor: 'owner' | 'nod';
+  createdAt: string;
+  data: T;
 };
 
 export type JobSetup = {
@@ -128,4 +140,5 @@ export type JobProfileView = {
 export type JobTemplatesView = {
   templates: Array<JobTemplate & { revision: number }>;
   examples: boolean;
+  revision: number;
 };

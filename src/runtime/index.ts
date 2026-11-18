@@ -99,6 +99,7 @@ const parallelTools = new Set([
 const orderedTools = new Set([
   'apps',
   'files',
+  'jobs',
   'manage_personal_context',
   'skills',
   'read_source',

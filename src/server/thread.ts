@@ -87,6 +87,7 @@ export const boss = new PgBoss({
   max: 10,
 });
 const running = new Map<string, AbortController>();
+export const turnSignal = (turnId: string) => running.get(turnId)?.signal;
 const inflight = new Set<Promise<void>>();
 let stopping = false;
 let nextStop = new AbortController();

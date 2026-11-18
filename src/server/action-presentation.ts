@@ -32,6 +32,7 @@ const nodActions: Array<[string, string]> = [
   ['NOD_browser', 'Continue in the browser'],
   ['NOD_vault_allow', 'Use a saved sign-in'],
   ['NOD_limits_update', 'Change spending limits'],
+  ['NOD_jobs_limits_update', 'Change job search limits'],
   ['NOD_bug_report_send', 'Send a bug report to the Nod team'],
   ['NOD_model_select', 'Change the model'],
   ['NOD_notification_preferences_update', 'Change Nod settings'],
