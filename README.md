@@ -15,13 +15,14 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\install.ps1
 
 The first start takes 10 minutes or more. After that:
 
-| To                                         | Do this                                                               |
-| ------------------------------------------ | --------------------------------------------------------------------- |
-| Open Nod                                   | Double-click `nod` on the desktop, or go to `http://localhost:4310`   |
-| Start Nod                                  | Nothing: it starts when you sign in to Windows                        |
-| Stop Nod                                   | `powershell -File scripts\windows\stop.ps1`                           |
-| Get n8n's latest changes                   | `powershell -ExecutionPolicy Bypass -File scripts\windows\update.ps1` |
-| Back up the key that protects saved logins | Copy the `NOD_VAULT_KEY` line from `.env` into your password manager  |
+| To                                         | Do this                                                                                                 |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
+| Open Nod                                   | Double-click `nod` on the desktop, or go to `http://localhost:4310`                                     |
+| Start Nod                                  | Nothing: it starts when you sign in to Windows                                                          |
+| Stop Nod                                   | `powershell -File scripts\windows\stop.ps1`                                                             |
+| Get n8n's latest changes                   | `powershell -ExecutionPolicy Bypass -File scripts\windows\update.ps1`                                   |
+| Back up the key that protects saved logins | Copy the `NOD_VAULT_KEY` line from `.env` into your password manager                                    |
+| Backups                                    | Automatic every night at 03:30, into the `nod-backups` folder next to this one (the newest 14 are kept) |
 
 The update script stops Nod, merges n8n's new code into this fork, pushes it
 to your GitHub fork, and starts Nod again. If n8n's changes clash with this

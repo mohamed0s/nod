@@ -39,8 +39,15 @@ The installer:
    off.
 4. **Starts Nod at every Windows sign-in,** through the scheduled task
    `\Nod\start`.
-5. **Adds a `nod` desktop shortcut.**
-6. **Starts Nod and opens it in your browser.** The first start builds four
+5. **Backs Nod up every night at 03:30,** through the scheduled task
+   `\Nod\backup`.
+   - **What's saved:** the database, the `.local` folder, and the browser and
+     tools volumes.
+   - **Where:** the `nod-backups` folder next to this one. The newest 14 are
+     kept.
+   - **Not saved:** the Vault key.
+6. **Adds a `nod` desktop shortcut.**
+7. **Starts Nod and opens it in your browser.** The first start builds four
    containers and can take 10 minutes or more.
 
 **Save the `NOD_VAULT_KEY` line from `.env` in your password manager.** Saved
@@ -55,6 +62,7 @@ logins can't be read without it.
 | Start Nod again            | `Start-ScheduledTask -TaskPath '\Nod\' -TaskName start`, or sign out and in |
 | Update                     | `powershell -ExecutionPolicy Bypass -File scripts\windows\update.ps1`       |
 | See what happened at start | `.local\windows-start.log`                                                  |
+| Back up now                | `powershell -ExecutionPolicy Bypass -File scripts\windows\backup.ps1`       |
 
 ## Troubleshooting
 

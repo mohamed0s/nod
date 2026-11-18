@@ -70,6 +70,14 @@ $settingsSet = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIf
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive
 Register-ScheduledTask -TaskName 'start' -TaskPath '\Nod\' -Action $action -Trigger $trigger -Settings $settingsSet -Principal $principal -Force | Out-Null
 
+Step 'Backing up Nod every night at 03:30 (the newest 14 are kept)'
+$backup = Join-Path $PSScriptRoot 'backup.ps1'
+$backupAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$backup`"" -WorkingDirectory $repo
+$backupTrigger = New-ScheduledTaskTrigger -Daily -At '03:30'
+$backupSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 1) -MultipleInstances IgnoreNew -StartWhenAvailable
+Register-ScheduledTask -TaskName 'backup' -TaskPath '\Nod\' -Action $backupAction -Trigger $backupTrigger -Settings $backupSettings -Principal $principal -Force | Out-Null
+Write-Host "    Backups go to $(Join-Path (Split-Path -Parent $repo) 'nod-backups')."
+
 $port = 4310
 $line = Select-String -Path $envFile -Pattern '^PORT=(\d+)\s*$' | Select-Object -First 1
 if ($line) { $port = [int]$line.Matches[0].Groups[1].Value }
