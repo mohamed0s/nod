@@ -17,6 +17,7 @@ import {
   insertAssistantMessage,
   lockThread,
   resumeTurn,
+  stopSession,
   wakeThreadAt,
   withTurnLock,
   type TurnRef,
@@ -439,6 +440,7 @@ export function createTasks(options: {
       )
     ).rows[0];
     if (!task) throw failure('Task not found.', 404);
+    if (actor === 'owner') stopSession(task.session_id);
     const cancelled = await cancelTurns(
       client,
       threadId,

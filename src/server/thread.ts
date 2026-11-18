@@ -90,7 +90,15 @@ const running = new Map<string, AbortController>();
 const inflight = new Set<Promise<void>>();
 let stopping = false;
 let nextStop = new AbortController();
-export const stopSignal = () => nextStop.signal;
+let stops = 0;
+const arrivals = new WeakMap<AbortSignal, number>();
+const sessionStops = new Map<string, number>();
+export const stopSignal = () => {
+  const signal = AbortSignal.any([nextStop.signal]);
+  arrivals.set(signal, stops);
+  return signal;
+};
+export const stopSession = (sessionId: string) => sessionStops.set(sessionId, ++stops);
 
 export type TurnSource = 'user' | 'schedule' | 'event' | 'resume' | 'task';
 export const ownerStarted = (turn = 'u') => `${turn}.source IN ('user','task','resume')`;
@@ -615,7 +623,13 @@ type TaskReply = (
   threadId: string,
   messageId: string,
 ) => Promise<
-  | { id: string; session_id: string; background: boolean; record(turnId: string): Promise<void> }
+  | {
+      id: string;
+      task_id: string;
+      session_id: string;
+      background: boolean;
+      record(turnId: string): Promise<void>;
+    }
   | undefined
 >;
 type StartChat = (
@@ -806,6 +820,11 @@ export async function submitUserMessage(
           )
         ).rows[0]
       : undefined;
+    const sessionId = options.sessionId ?? question?.session_id ?? thread.id;
+    const held = live && (sessionStops.get(sessionId) ?? 0) > (arrivals.get(stop) ?? stops);
+    if (held && options.audioCaption !== undefined)
+      throw httpError('This voice message was cancelled.');
+    const queued = live && !held;
     await client.query(
       `INSERT INTO turns(id,owner_id,thread_id,source,source_id,message_id,prompt,channel,session_id,background,parent_turn_id,status,finished_at,withdrawn)
        VALUES($1,$2,$3,'user',$4,$5,$6,$7,$8,$9,$10,$11,CASE WHEN $11='cancelled' THEN now() END,$11='cancelled')`,
@@ -817,13 +836,19 @@ export async function submitUserMessage(
         messageId,
         options.prompt ?? text,
         channel,
-        options.sessionId ?? question?.session_id ?? thread.id,
+        sessionId,
         newChat || (question?.background ?? false),
         question?.id ?? null,
-        live ? 'queued' : 'cancelled',
+        queued ? 'queued' : 'cancelled',
       ],
     );
-    if (taskTarget) await taskTarget.record(turnId);
+    if (taskTarget && queued) await taskTarget.record(turnId);
+    else if (taskTarget)
+      await client.query('UPDATE turns SET task_id=$1 WHERE id=$2 AND owner_id=$3', [
+        taskTarget.task_id,
+        turnId,
+        ownerId,
+      ]);
     const prepared = (await options.prepareAttachments?.(client, thread.id)) ?? [];
     await client.query(
       "INSERT INTO messages(id,owner_id,role,text,display_text,thread_id,turn_id,attachments,reply_to_message_id,reply_quote,audio_caption,question_answer) VALUES($1,$2,'user',$3,$4,$5,$6,$7,$8,$9,$10,$11)",
@@ -847,9 +872,9 @@ export async function submitUserMessage(
         sessionId: options.sessionId,
         messageId,
         text: options.prompt ?? text,
-        live,
+        live: queued,
       });
-    if (live) await sendDrain(client, thread.id);
+    if (queued) await sendDrain(client, thread.id);
     markInserted();
     return { threadId: thread.id, turnId, messageId };
   };

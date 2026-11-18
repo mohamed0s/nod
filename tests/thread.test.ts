@@ -2488,12 +2488,40 @@ test(
               (await turnStatus(first.turnId)) === 'running' &&
               (await turnStatus(second.turnId)) === 'running',
           );
+          const arrival = thread.stopSignal();
           assert.equal((await request('POST', `/api/tasks/${first.task}/stop`)).statusCode, 200);
           await waitFor(settled(first.turnId));
           assert.equal(await turnStatus(first.turnId), 'cancelled');
           assert.equal(await turnStatus(second.turnId), 'running');
           assert.equal(await taskState(first.task), 'cancelled');
           assert.equal(await taskState(second.task), 'open');
+          const late = await userMessages.submit('Synthetic late reply', [], {
+            replyToMessageId: first.messageId,
+            stopSignal: arrival,
+          });
+          assert.deepEqual(
+            (
+              await db.pool.query(
+                'SELECT status,withdrawn,session_id,task_id FROM turns WHERE id=$1',
+                [late.turnId],
+              )
+            ).rows[0],
+            { status: 'cancelled', withdrawn: true, session_id: first.task, task_id: first.task },
+          );
+          await assert.rejects(
+            userMessages.submit('Synthetic late recording', [], {
+              replyToMessageId: first.messageId,
+              stopSignal: arrival,
+              audioCaption: '',
+            }),
+            (error: unknown) => (error as { statusCode?: number }).statusCode === 409,
+          );
+          assert.equal(
+            (await db.pool.query("SELECT 1 FROM messages WHERE text='Synthetic late recording'"))
+              .rowCount,
+            0,
+          );
+          assert.equal(await taskState(first.task), 'cancelled');
           release('Synthetic chat B');
           await waitFor(settled(second.turnId));
           assert.equal(await turnStatus(second.turnId), 'succeeded');
