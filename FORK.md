@@ -67,6 +67,12 @@ The installer:
 **Save the `NOD_VAULT_KEY` line from `.env` in your password manager.** Saved
 logins can't be read without it.
 
+**Morning schedules while the PC sleeps (optional).** Add `-WakeAt 07:20` to
+the install command. The scheduled task `\Nod\wake` then wakes the PC from
+sleep at that time and keeps it awake for 90 minutes, starting Nod if it isn't
+running. It can't wake a PC that's shut down, and wake timers must be allowed
+in Windows' power options (they are by default).
+
 ## Day to day
 
 | To                         | Do this                                                                     |
@@ -77,6 +83,7 @@ logins can't be read without it.
 | Update                     | `powershell -ExecutionPolicy Bypass -File scripts\windows\update.ps1`       |
 | See what happened at start | `.local\windows-start.log`                                                  |
 | Back up now                | `powershell -ExecutionPolicy Bypass -File scripts\windows\backup.ps1`       |
+| Stop the morning wake      | `Unregister-ScheduledTask -TaskPath '\Nod\' -TaskName wake -Confirm:$false` |
 
 ## Troubleshooting
 

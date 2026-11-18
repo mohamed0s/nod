@@ -1,4 +1,4 @@
-param([switch]$NoStart)
+param([switch]$NoStart, [string]$WakeAt)
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -77,6 +77,16 @@ $backupTrigger = New-ScheduledTaskTrigger -Daily -At '03:30'
 $backupSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 1) -MultipleInstances IgnoreNew -StartWhenAvailable
 Register-ScheduledTask -TaskName 'backup' -TaskPath '\Nod\' -Action $backupAction -Trigger $backupTrigger -Settings $backupSettings -Principal $principal -Force | Out-Null
 Write-Host "    Backups go to $(Join-Path (Split-Path -Parent $repo) 'nod-backups')."
+
+if ($WakeAt) {
+    $wakeTime = [datetime]::ParseExact($WakeAt, 'HH:mm', [Globalization.CultureInfo]::InvariantCulture)
+    Step "Waking the PC from sleep at $WakeAt and keeping it awake for 90 minutes"
+    $wake = Join-Path $PSScriptRoot 'wake.ps1'
+    $wakeAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$wake`"" -WorkingDirectory $repo
+    $wakeTrigger = New-ScheduledTaskTrigger -Daily -At $wakeTime
+    $wakeSettings = New-ScheduledTaskSettingsSet -WakeToRun -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew
+    Register-ScheduledTask -TaskName 'wake' -TaskPath '\Nod\' -Action $wakeAction -Trigger $wakeTrigger -Settings $wakeSettings -Principal $principal -Force | Out-Null
+}
 
 $port = 4310
 $line = Select-String -Path $envFile -Pattern '^PORT=(\d+)\s*$' | Select-Object -First 1
