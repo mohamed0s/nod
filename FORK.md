@@ -48,13 +48,13 @@ logins can't be read without it.
 
 ## Day to day
 
-| To                         | Do this                                                                         |
-| -------------------------- | ------------------------------------------------------------------------------- |
-| Open Nod                   | Double-click the `nod` shortcut, or go to `http://localhost:4310`               |
-| Stop Nod                   | `powershell -File scripts\windows\stop.ps1`                                     |
-| Start Nod again            | `Start-ScheduledTask -TaskPath '\Nod\' -TaskName start`, or sign out and in     |
-| Update                     | Stop Nod, run `git pull`, then start Nod again. The start rebuilds what changed |
-| See what happened at start | `.local\windows-start.log`                                                      |
+| To                         | Do this                                                                     |
+| -------------------------- | --------------------------------------------------------------------------- |
+| Open Nod                   | Double-click the `nod` shortcut, or go to `http://localhost:4310`           |
+| Stop Nod                   | `powershell -File scripts\windows\stop.ps1`                                 |
+| Start Nod again            | `Start-ScheduledTask -TaskPath '\Nod\' -TaskName start`, or sign out and in |
+| Update                     | `powershell -ExecutionPolicy Bypass -File scripts\windows\update.ps1`       |
+| See what happened at start | `.local\windows-start.log`                                                  |
 
 ## Troubleshooting
 

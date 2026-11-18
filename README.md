@@ -1,4 +1,33 @@
-> **This is a fork of [n8n-io/nod](https://github.com/n8n-io/nod) where each task is its own chat.** To install it on Windows with one command, see [FORK.md](FORK.md).
+## Start here: this fork
+
+This is a fork of [n8n-io/nod](https://github.com/n8n-io/nod) where **each
+task is its own chat**. It runs from source on Windows and stays in step with
+n8n's updates. Details and troubleshooting are in [FORK.md](FORK.md); n8n's
+original README follows below.
+
+**Install** (Windows 11, with Docker Desktop and Git installed):
+
+```powershell
+git clone https://github.com/mohamed0s/nod.git
+cd nod
+powershell -ExecutionPolicy Bypass -File scripts\windows\install.ps1
+```
+
+The first start takes 10 minutes or more. After that:
+
+| To                                         | Do this                                                               |
+| ------------------------------------------ | --------------------------------------------------------------------- |
+| Open Nod                                   | Double-click `nod` on the desktop, or go to `http://localhost:4310`   |
+| Start Nod                                  | Nothing: it starts when you sign in to Windows                        |
+| Stop Nod                                   | `powershell -File scripts\windows\stop.ps1`                           |
+| Get n8n's latest changes                   | `powershell -ExecutionPolicy Bypass -File scripts\windows\update.ps1` |
+| Back up the key that protects saved logins | Copy the `NOD_VAULT_KEY` line from `.env` into your password manager  |
+
+The update script stops Nod, merges n8n's new code into this fork, pushes it
+to your GitHub fork, and starts Nod again. If n8n's changes clash with this
+fork's, it changes nothing and tells you so.
+
+---
 
 <p align="center">
   <a href="https://nod.n8n.io#gh-dark-mode-only"><img src="docs/src/assets/readme/hero-dark.webp" alt="n8n presents Nod: open source personal agent with its own computer" width="100%" /></a>
