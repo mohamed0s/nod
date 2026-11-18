@@ -13,7 +13,7 @@ To send it, call `jobs cv_file` (or `jobs cv_file {id}` for another CV), then `s
 
 1. Run `jobs sync`, so `shared/career-ops/cv.md` holds the main CV's markdown.
 2. Read the JSON payload format in `/opt/career-ops/modes/pdf.md` (the section that starts "Write a JSON file with this structure") and fill it from the CV's markdown only, in its own order and wording. This is not tailoring: no job keywords, no reordering, no summary rewrite.
-3. Run `career-ops cv:html payload.json cv.html`, then `career-ops cv:verify-ats cv.html`, then `career-ops pdf cv.html cv.pdf`. The pdf step checks the facts against `cv.md`; fix the payload when it reports a difference, never the check. For a Word CV that isn't the main one, `cv.md` is another CV, so compare the payload with that CV's markdown yourself and add `--skip-fact-check`.
+3. Keep the payload, HTML and PDF in `shared/career-ops/output/` and pass absolute paths: `career-ops pdf` refuses files outside the career-ops folder. Run `career-ops cv:html <dir>/payload.json <dir>/cv-main.html`, then `career-ops cv:verify-ats <dir>/cv-main.html`, then `career-ops pdf <dir>/cv-main.html <dir>/cv-main.pdf`, where `<dir>` is that output folder. The pdf step checks the facts against `cv.md`; fix the payload when it reports a difference, never the check. For a Word CV that isn't the main one, `cv.md` is another CV, so compare the payload with that CV's markdown yourself and add `--skip-fact-check`.
 4. Save it with `jobs cv_save {id, pdfFile: "<absolute path of cv.pdf>"}`.
 
 ## Tailored CVs
