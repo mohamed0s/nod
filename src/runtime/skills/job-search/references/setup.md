@@ -1,6 +1,6 @@
 # Set up the job search
 
-The owner does nothing by hand outside LinkedIn. Nod converts each CV, drafts the profile from it and asks at most one short question.
+Nod converts each CV and drafts the profile from it, so the owner only adds the file. Ask at most one short question, and only for what needs the owner.
 
 ## Convert a CV
 
@@ -11,8 +11,8 @@ A chat that starts with "Convert the CV I just added for job search" has the CV 
    - PDF: `pdftotext -layout <file> -`. If that gives no text, the PDF is scanned: run `pdftoppm -r 300 -png` and `tesseract` on the pages.
    - DOCX: read paragraphs and tables with python-docx (`import docx`).
 3. Write the CV as clean Markdown in the layout of `/opt/career-ops/examples/cv-example.md`, which career-ops' checks read: a `#` heading with the name, one `**Label:** value` line per contact detail, then each section as `##` in the CV's own order. Start each job with `### Company -- Location`, then the title in bold on its own line, then the dates line, then its bullets, newest first as the CV has them. Keep every fact, date and link exactly as written. Fix only broken line wraps and bullets from the extraction. Never add, merge or improve content.
-4. Save it with `jobs cv_save {id, markdown}`.
-5. For a DOCX, make its PDF as [cv-pdf.md](cv-pdf.md) describes and save it with `jobs cv_save {id, pdfFile}`. A PDF upload keeps its original file as its PDF.
+4. Save it with `jobs cv_save {id, markdown}`. Only work started by an owner message can save CV text or change the profile, so do this in the conversion chat or a task it starts, never in a schedule.
+5. For a DOCX, make its PDF as [cv-pdf.md](cv-pdf.md) describes. A PDF upload keeps its original file as its PDF.
 6. Draft the profile from this CV when it is the main CV and `profileRevision` is 0, or when the owner asks: `jobs profile_update {profile}` with what the CV shows:
    - `name`: the name the owner uses in messages;
    - `intro`: one short line, as they'd introduce themselves in a referral request, such as "a data analyst with three years in retail";
@@ -34,4 +34,4 @@ When the owner asks to use another CV, call `jobs cv_main {label}` (or `{id}` fr
 
 ## Change the profile
 
-When the owner tells you something for the job profile (a region, a programme and its tracks, how many invites a day), call `jobs profile_update` with only those fields. `noLuck` holds how many days without an accepted invite (`noAcceptDays`) or a reply (`noReplyDays`) count as no luck at a company.
+When the owner tells you something for the job profile (a region, a programme and its tracks, how many invites a day), call `jobs profile_update` with only those fields. `noLuck` holds how many days without an accepted invite (`noAcceptDays`) or a reply (`noReplyDays`) count as no luck at a company. A change to `inviteLimits` or `noLuck` runs only when the owner's words ask for it; otherwise Nod asks them to approve it. Never change these on your own initiative.
