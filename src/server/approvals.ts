@@ -686,7 +686,9 @@ export async function createApprovals(
     if (!active) return undefined;
     const prompt = approved
       ? 'The user confirmed the exact saved action. The trusted worker must execute that snapshot once before continuing. Do not substitute an action or execute it yourself.'
-      : 'The user declined the saved action. Do not execute it or ask for it again. Continue only other already-authorized work, or finish quietly.';
+      : input.clicked
+        ? 'The user declined the saved action. Do not execute it or ask for it again. Continue only other already-authorized work, or finish quietly.'
+        : `The user declined the saved action with the reply below. Do not execute it or ask for it again. Their reply decides the rest of this work: when it asks you to stop, stop now and finish your task as cancelled if you are running one. A reply that only declines lets you continue other already-authorized work, or finish quietly.\nReply: ${JSON.stringify(input.text)}`;
     const background = Boolean(approval.turn_background);
     const turnId = await enqueueTurn(
       background ? `${prompt}\nThe request was: ${approval.turn_prompt}` : prompt,

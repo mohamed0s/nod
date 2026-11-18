@@ -14,7 +14,7 @@ The short version: each attempt boots its own Nod with a real model. The apps, w
 For the landing-page results, benchmark definitions, and measurement limits, read [How we evaluate Nod](/how-it-works/benchmarks/).
 
 :::caution[Evals cost money]
-They call live models. An attempt costs about $0.10 to $0.50. A full controlled run has 321 attempts before time-window skips. The unit tests never call them.
+They call live models. An attempt costs about $0.10 to $0.50. A full controlled run has 324 attempts before time-window skips. The unit tests never call them.
 :::
 
 The collector requires a captured prompt for each successful background turn that opened the agent or recorded an agent request. A recorded source-screen result with no agent start or request needs no agent prompt. Missing records alone do not prove that a source screen ran. Its source reads and model usage still count. Missing prompts from executed agent work are measurement errors.
@@ -61,7 +61,7 @@ The fake apps are hand-written approximations of Composio's responses, not recor
    pnpm run eval:capability doctor --fix
    ```
 
-3. Run all 107 controlled cases, three attempts each.
+3. Run all 108 controlled cases, three attempts each.
 
    ```sh title="Terminal"
    pnpm run eval:capability run
@@ -73,13 +73,13 @@ For a small run, add `--tier pr --repeat 1`. To cap the spend at $20, add `--bud
 
 ### Run the release suite
 
-The release suite adds 250 cases: 203 of everyday work across every connected app, the browser, computer use, Vault and payments, files, memory, schedules, background events and the trust check, and 47 generated proactivity cases: 45 stress and population cases and two attention cases. Run it on your computer before a release. CI never runs it, because a full pass is several hundred attempts.
+The release suite adds 252 cases: 205 of everyday work across every connected app, the browser, computer use, Vault and payments, files, memory, schedules, background events and the trust check, and 47 generated proactivity cases: 45 stress and population cases and two attention cases. Run it on your computer before a release. CI never runs it, because a full pass is several hundred attempts.
 
 ```sh title="Terminal"
 pnpm run eval:capability run --tier release --repeat 3 --concurrency 3 --budget 500
 ```
 
-`--tier release` runs the release cases together with every controlled case, 357 attempts per repeat before time-window skips. Each attempt starts its own workspace and browser containers; `--concurrency 6` fits in 8 GB of Docker memory. Database connections are a separate limit. Start with concurrency two when you use a standard disposable database. Each attempt starts several connection pools. Parallel campaigns add their load. Increase concurrency only when the database has spare connections. To run one area, add `--capability vault`, or name cases with `--scenario`.
+`--tier release` runs the release cases together with every controlled case, 360 attempts per repeat before time-window skips. Each attempt starts its own workspace and browser containers; `--concurrency 6` fits in 8 GB of Docker memory. Database connections are a separate limit. Start with concurrency two when you use a standard disposable database. Each attempt starts several connection pools. Parallel campaigns add their load. Increase concurrency only when the database has spare connections. To run one area, add `--capability vault`, or name cases with `--scenario`.
 
 Results go to `.local/capability-evals/<label>/`. Open `report.html` to read every transcript and check. A label never overwrites an earlier run. If a worker fails before it can save checks, its log records the phase: start, prepare, play, collect, or grade.
 
@@ -286,7 +286,7 @@ flowchart TD
 
 ## The suite
 
-The suite has 361 cases: 107 controlled cases, 250 release cases, three live web cases and the harness canary.
+The suite has 364 cases: 108 controlled cases, 252 release cases, three live web cases and the harness canary.
 
 | Status      | Meaning                                                                                                                    |
 | ----------- | -------------------------------------------------------------------------------------------------------------------------- |
@@ -330,6 +330,7 @@ Payment cases use a synthetic merchant and never a real card. They measure task 
 | `login-authenticator-key`               | Sign in with a saved authenticator key and read last month’s payouts              | vault, browser, approvals                | known gap              |
 | `memory-across-reset`                   | Remember what I told you and never ask twice                                      | memory, progress                         | scored                 |
 | `memory-explicit-request-reply`         | Answer when asked to remember a preference                                        | memory                                   | calibrating            |
+| `memory-multiline-signoff`              | Remember my email sign-offs, written on several lines                             | memory                                   | calibrating            |
 | `memory-remember-earlier-details`       | Remember the address and number I gave you two messages ago                       | memory                                   | calibrating            |
 | `memory-routine-silent`                 | Remember a routine without a memory-save question                                 | memory, browser, progress                | calibrating            |
 | `memory-routine-silent-holdout`         | Remember a different routine without a memory-save question                       | memory, browser, progress                | calibrating            |
@@ -419,6 +420,7 @@ Every release case is calibrating until it has been run and sorted. The table li
 | `csv-average-by-country`           | What's the average completed order value by country? Give me the top three                                                        | files                           |
 | `csv-upload-to-sheet`              | Add the new transactions from this file to my Transactions 2026 sheet, skip any that are already there                            | apps, files                     |
 | `daily-agenda-schedule`            | Every weekday at 8:00, send me my agenda for the day                                                                              | apps, schedules                 |
+| `decline-stops-task`               | Email three clients a reminder, ask before each; answer the first with "No, stop this task for now"                               | approvals, apps                 |
 | `dm-running-late`                  | DM Priya on Slack that I'm running 10 minutes late for our 3pm                                                                    | apps, approvals                 |
 | `docs-brief-summary`               | From the Meridian project brief, what's the deadline, the budget and who signs off?                                               | apps, files                     |
 | `docs-notes-to-doc`                | Turn these notes into a Google Doc called 'Kickoff notes: Harborline'                                                             | apps, files                     |
@@ -563,6 +565,7 @@ Every release case is calibrating until it has been run and sorted. The table li
 | `two-requests-one-message`         | Add 'buy milk' to my Notion to-do list, and tell me what's on my calendar tomorrow morning                                        | progress, apps                  |
 | `undo-last-action`                 | Archive the Figma receipt, then put it back in my inbox                                                                           | progress, apps                  |
 | `upload-cv-application`            | Apply to the Junior Designer role on careers.lumen.example.com with my CV.                                                        | browser, files                  |
+| `vault-login-profile-followers`    | How many followers does Maya Okafor have on Circlenet? Use my Vault login                                                         | vault, browser                  |
 | `weekly-invoice-report`            | Every Monday at 9:00, send me a list of my unpaid invoices from the tracker sheet                                                 | schedules, apps                 |
 | `weekly-recurring-class`           | Add yoga every Tuesday at 19:00 for an hour, starting next week                                                                   | apps                            |
 | `who-didnt-reply`                  | Which of the emails I sent over the past week still have no reply?                                                                | apps                            |

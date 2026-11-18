@@ -379,7 +379,7 @@ export const toolDefinitions = {
   ),
   sign_in: defineTool(
     'sign_in',
-    "Private sign-in on the current exact origin. Inspect the page and saved account metadata first. Use the owner's method or a unique matching saved login, which selects password sign-in. For ambiguous methods use kind:method with one {label,selector} per visible method control, by current @eN ref or CSS. Ask only for an ambiguous account. For identifier/password/otp, pass current field refs or CSS selectors and submitSelector if required; omit it for automatic submission. passwordSelector can be an ordered array for split codes. savedLoginId selects the manage_apps saved login; one matching login is used automatically. Otherwise the owner enters values privately. Use emailCode:true and the page's emailRecipient only for a code sent by email; Nod retrieves it privately. Omit emailCode for an authenticator code. Never read codes with apps or ask in chat. message describes private entry; action is its short button label; label names the login. The server checks consent, fills and submits once; the result includes the page when available. Inspect it without submitting again. Read-only scripts need no reload; reload only when entry was refused because a script changed the document.",
+    "Private sign-in on the current exact origin. Inspect the page and saved account metadata first. Use the owner's method or a unique matching saved login, which selects password sign-in. For ambiguous methods use kind:method with one {label,selector} per visible method control, by current @eN ref or CSS. Ask only for an ambiguous account. For identifier/password/otp, pass current field refs or CSS selectors and submitSelector if required; omit it for automatic submission. passwordSelector can be an ordered array for split codes. savedLoginId selects a Vault login from manage_apps list; one matching Vault login is used automatically. Otherwise the owner enters values privately. Use emailCode:true and the page's emailRecipient only for a code sent by email; Nod retrieves it privately. Omit emailCode for an authenticator code. Never read codes with apps or ask in chat. message describes private entry; action is its short button label; label names the login. The server checks consent, fills and submits once; the result includes the page when available. Inspect it without submitting again. Read-only scripts need no reload; reload only when entry was refused because a script changed the document.",
     Type.Union([
       Type.Object(
         {
@@ -472,6 +472,8 @@ export const toolDefinitions = {
         { additionalProperties: false },
       ),
     ]),
+    false,
+    ['sign_in', 'pay'],
   ),
   apps: defineTool(
     'apps',

@@ -8,6 +8,7 @@ import {
   fold,
   freeSlug,
   line,
+  lines,
   locate,
   path,
   pathOf,
@@ -25,11 +26,11 @@ const reflectOp = z.discriminatedUnion('op', [
     op: z.literal('add'),
     area,
     slug,
-    text: line(),
+    text: lines(),
     abstract: line(120).optional().catch(undefined),
     expires: z.iso.date().optional().catch(undefined),
     m: ordinals,
-    quote: line(),
+    quote: lines(),
     sensitive: z.boolean(),
     fact: factSchema.optional().catch(undefined),
     replaces: z.array(path).max(8).optional(),
@@ -39,7 +40,7 @@ const reflectOp = z.discriminatedUnion('op', [
     path,
     reason: z.enum(['obsolete', 'contradicted']),
     m: ordinals,
-    quote: line(),
+    quote: lines(),
   }),
 ]);
 
@@ -72,7 +73,13 @@ export function applyOps(
   ]) {
     const cited = op.m.flatMap((n) => messages[n - 1] ?? []);
     const quoted = cited.filter((m) => fold(m.text).includes(fold(op.quote)));
-    if (cited.length !== op.m.length || !quoted.length || unsafe(op.quote)) continue;
+    if (
+      cited.length !== op.m.length ||
+      !quoted.length ||
+      !fold(op.quote).trim() ||
+      unsafe(op.quote)
+    )
+      continue;
     const sources = union(quoted.map((m) => m.id));
     if (op.op === 'archive') {
       const entry = locate(tree, op.path);

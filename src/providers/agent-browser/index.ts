@@ -247,7 +247,12 @@ export function createAgentBrowserComputer(options: {
   const screenStatuses = new Map<string, ReturnType<NonNullable<Computer['screenStatus']>>>();
   const namespace = `sk-${createHash('sha256').update(runtimeRoot).digest('hex').slice(0, 12)}`;
   const uploadRoot = resolve('/tmp/nod-browser-uploads', namespace);
-  const cachePath = (state: BrowserState) => resolve('/tmp/nod-browser-cache', namespace, state.id);
+  const cacheRoot = resolve('/tmp/nod-browser-cache', namespace);
+  const cachePath = (state: BrowserState) => resolve(cacheRoot, state.id);
+  const internalPaths = new RegExp(
+    `(?:${[runtimeRoot, uploadRoot, cacheRoot].map((path) => path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})[^\\s'"]*`,
+    'g',
+  );
   const executable =
     options.executable ?? resolve(process.cwd(), 'node_modules/.bin/agent-browser');
   const run = options.run ?? runProcess;
@@ -598,8 +603,30 @@ export function createAgentBrowserComputer(options: {
         'The workspace browser could not respond. Restart its container and try again.',
       );
     }
+    const reason = typeof response.error === 'string' ? response.error : undefined;
+    const failed = Boolean(result.exitCode) || response.success === false;
+    const known =
+      action !== 'navigate' || response.success !== false || reason === undefined
+        ? undefined
+        : /^Navigation failed: net::ERR_[A-Z_]+/.test(reason)
+          ? new BrowserActionError('browser_navigation_failed')
+          : reason.startsWith('Operation timed out.')
+            ? new DaemonCommandError()
+            : undefined;
     if (action === 'navigate') {
-      await drainInterruptedCommand(state, 'connect', () => daemonSocket(state, options.signal));
+      await drainInterruptedCommand(state, 'connect', () =>
+        daemonSocket(state, options.signal),
+      ).catch((error: unknown) => {
+        if (!failed) throw error;
+        throw (
+          known ??
+          new BrowserActionError(
+            'browser_start_failed',
+            reason &&
+              redactBrowserText(reason, state.secrets).replace(internalPaths, '[browser data]'),
+          )
+        );
+      });
       state.recovered = false;
       state.pageSize = undefined;
       if (viewport)
@@ -609,22 +636,8 @@ export function createAgentBrowserComputer(options: {
           { signal: options.signal },
         );
     }
-    if (
-      action === 'navigate' &&
-      response.success === false &&
-      typeof response.error === 'string' &&
-      /^Navigation failed: net::ERR_[A-Z_]+/.test(response.error)
-    )
-      throw new BrowserActionError('browser_navigation_failed');
-    if (
-      action === 'navigate' &&
-      response.success === false &&
-      typeof response.error === 'string' &&
-      response.error.startsWith('Operation timed out.')
-    )
-      throw new DaemonCommandError();
-    if (result.exitCode || response.success === false)
-      throw new DaemonCommandError(typeof response.error === 'string' ? response.error : undefined);
+    if (known) throw known;
+    if (failed) throw new DaemonCommandError(reason);
     return response.data ?? {};
   }
 

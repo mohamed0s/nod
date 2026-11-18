@@ -6192,6 +6192,82 @@ test('a discovered tool schema reduces the room for its next result', async (t) 
   );
 });
 
+test('opening a website with any browser tool makes private sign-in available', async (t) => {
+  const { toolDefinitions } = await import('../src/runtime/tools.ts');
+  const browserTools = ['browser', 'browser_session', 'sign_in', 'pay'] as const;
+  const url = 'https://people.example.test/in/synthetic';
+  for (const calls of [
+    [['nod_browser', { action: 'open', url }]],
+    [
+      ['nod_tool_search', { query: 'browser_session', limit: 1 }],
+      ['browser_session', { action: 'connect', url }],
+    ],
+  ] as const) {
+    const opener = calls.at(-1)![0];
+    await t.test(opener, async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'nod-pi-browser-companions-'));
+      t.after(() => rm(directory, { recursive: true, force: true }));
+      const active: string[][] = [];
+      const agent = createPiAgent({
+        provider: 'compatible',
+        sessionRoot: directory,
+        resolve: async () => smallContextAccess('compatible', 'fixture-large', 131_072),
+        createSession: async (options) => {
+          const result = await createAgentSession(options);
+          result.session.agent.streamFunction = () => {
+            active.push(result.session.getActiveToolNames());
+            const call = calls[active.length - 1];
+            const message = fauxAssistantMessage(
+              call
+                ? [
+                    {
+                      type: 'toolCall',
+                      id: `call-${active.length}`,
+                      name: call[0],
+                      arguments: call[1],
+                    },
+                  ]
+                : 'Synthetic answer',
+              { stopReason: call ? 'toolUse' : 'stop' },
+            );
+            const stream = createAssistantMessageEventStream();
+            stream.push({ type: 'start', partial: message });
+            stream.push({ type: 'done', reason: call ? 'toolUse' : 'stop', message });
+            return stream;
+          };
+          return result;
+        },
+      });
+      t.after(() => agent.dispose());
+      const session = await agent.open({
+        ...fakeExecution(randomUUID()),
+        systemPrompt: 'Synthetic fixture instructions.',
+        workspace: recordingWorkspace().workspace,
+        runTool: async (_name, _params, run) => run(),
+        tools: browserTools.map((name) => ({
+          ...toolDefinitions[name],
+          parameters: toolDefinitions[name].parameters as Record<string, unknown>,
+          execute: async () => ({
+            content: [{ type: 'text' as const, text: 'Synthetic sign-in page.' }],
+          }),
+        })),
+        shouldStop: () => false,
+        onEvent: () => {},
+      });
+      await session.prompt('Use my saved login to open the synthetic profile.', []);
+      await session.dispose();
+      assert.equal(active.length, calls.length + 1);
+      for (const companion of ['sign_in', 'pay']) {
+        assert.ok(!active.at(-2)!.includes(companion));
+        assert.ok(
+          active.at(-1)!.includes(companion),
+          `${opener} opened a page without loading ${companion}: ${active.at(-1)!.join(', ')}`,
+        );
+      }
+    });
+  }
+});
+
 test('model requests repair incomplete assistant blocks for both OpenRouter APIs', async (t) => {
   const { createPiModelRuntime } = await import('../src/providers/pi/models.ts');
   for (const api of ['anthropic-messages', 'openai-completions'] as const)

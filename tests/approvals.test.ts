@@ -4292,6 +4292,64 @@ test(
         assert.equal(error.body.includes('fixture-private-key'), false);
       });
 
+      await t.test('a written no carries the owner words to the resumed turn', async () => {
+        const reply = 'No, stop this task for now';
+        replyAnswers[reply.toLowerCase()] = 'no';
+        const pending = async (channel?: string) => {
+          const turn = await begin('Synthetic paperwork comparison', { channel });
+          const id = await propose(turn, 'NOD_notification_preferences_update', {
+            notificationRule: 'Synthetic declined change',
+          });
+          await finish(turn.turnId);
+          return id;
+        };
+        const resumed = async (id: string) => {
+          const approval = await stored(id);
+          assert.equal(approval.status, 'declined');
+          return row(approval.execution_turn_id);
+        };
+        const executed = calls.length;
+        const written = await pending('telegram:fixture-decline');
+        await messages.submit(reply, [], {
+          channel: 'telegram:fixture-decline',
+          replyToMessageId: (await stored(written)).confirmation_message_id,
+        });
+        const writtenTurn = await resumed(written);
+        assert.equal(writtenTurn.source, 'resume');
+        assert.ok(writtenTurn.prompt.includes(reply), writtenTurn.prompt);
+        aligned = true;
+        const check = await trust.check(await running(writtenTurn.id), 'GMAIL_SEND_EMAIL', {
+          recipient_email: 'synthetic@example.test',
+          body: 'Synthetic body.',
+        });
+        const said = reviews.at(-1)?.userMessages as Array<{
+          text: string;
+          canAuthorize?: boolean;
+        }>;
+        assert.equal(said.find((message) => message.text === reply)?.canAuthorize, false);
+        assert.equal(check.confirm, true);
+        aligned = false;
+        await finish(writtenTurn.id, 'succeeded');
+        const clicked = await pending();
+        const record = await stored(clicked);
+        await transaction(
+          (client) =>
+            approvals.chat.accept(client, {
+              text: 'Synthetic refusal label',
+              channel: 'web',
+              threadId: record.thread_id,
+              replyToMessageId: record.confirmation_message_id,
+              clientMessageId: randomUUID(),
+              clicked: true,
+              answer: { approvalId: clicked, approved: false },
+            }),
+          db.pool,
+        );
+        assert.doesNotMatch((await resumed(clicked)).prompt, /Synthetic refusal label/);
+        assert.equal(calls.length, executed);
+        delete replyAnswers[reply.toLowerCase()];
+      });
+
       await t.test(
         'the reply reader sees only the owner reply and its answer binds to the question it read',
         async () => {
