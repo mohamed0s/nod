@@ -38,11 +38,11 @@ The library combines task guides in [`src/runtime/skills`](https://github.com/n8
 | `family-admin`            | `customer-support`      | `data-and-spreadsheets`  |
 | `food-and-groceries`      | `ecommerce-operations`  | `documents-and-forms`    |
 | `health-admin`            | `hiring-and-career`     | `files-and-knowledge`    |
-| `home-services`           | `project-operations`    | `inbox`                  |
-| `learning-and-study`      | `sales-and-crm`         | `research`               |
-| `personal-finance`        | `software-and-websites` | `writing-and-content`    |
-| `privacy-and-accounts`    | `n8n`                   | `visual-replies`         |
-| `shopping`                | `job-search`            |                          |
+| `home-services`           | `job-search`            | `inbox`                  |
+| `learning-and-study`      | `project-operations`    | `research`               |
+| `personal-finance`        | `sales-and-crm`         | `writing-and-content`    |
+| `privacy-and-accounts`    | `software-and-websites` | `visual-replies`         |
+| `shopping`                | `n8n`                   |                          |
 | `subscriptions-and-bills` |                         |                          |
 | `travel`                  |                         |                          |
 
