@@ -3837,6 +3837,7 @@ test(
         async (t) => {
           const parent = await begin(
             'Summarise the synthetic inbox and ask before sending anything.',
+            { channel: 'telegram:synthetic' },
           );
           const task = (await tasks.execute(
             parent,
@@ -3872,7 +3873,9 @@ test(
           const confirmationId = (await stored(approvalId)).confirmation_message_id;
           await finish(workerId);
 
-          const clarification = await messages.submit('wait what does that mean');
+          const clarification = await messages.submit('wait what does that mean', [], {
+            channel: 'telegram:synthetic',
+          });
           assert.equal((await row(clarification.turnId)).source, 'user');
           assert.equal((await stored(approvalId)).status, 'expired');
           assert.equal(await turnStatus(workerId), 'cancelled');

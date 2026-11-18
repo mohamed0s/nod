@@ -559,7 +559,12 @@ export function Chat({
     epoch: 0,
     messages: [],
   });
-  const [loadingHistory, setLoadingHistory] = useState(Boolean(chatId));
+  const [firstPage] = useState(
+    () =>
+      !startsChat &&
+      (Boolean(chatId) || (state.hasEarlierMessages === true && !state.messages.some(inChat))),
+  );
+  const [loadingHistory, setLoadingHistory] = useState(firstPage);
   const [historyError, setHistoryError] = useState('');
   const historyRequest = useRef<{
     version: number;
@@ -823,7 +828,7 @@ export function Chat({
     () =>
       !chatId &&
       !startsChat &&
-      allMessages.length === 0 &&
+      state.messages.length === 0 &&
       !working &&
       state.configuration.llmReady,
   );
@@ -1806,7 +1811,7 @@ export function Chat({
     return () => controller.abort();
   }, [historyEpoch, threadId]);
   useEffect(() => {
-    if (!chatId) return;
+    if (!firstPage) return;
     const controller = new AbortController();
     const epoch = historyEpoch;
     setLoadingHistory(true);
@@ -2347,6 +2352,7 @@ export function Chat({
             )}
             {visibleMessages.length === 0 &&
               !chatId &&
+              !loadingHistory &&
               !welcoming &&
               !working &&
               !sending &&

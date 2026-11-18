@@ -2413,6 +2413,29 @@ test(
           });
           assert.equal(await approvalStatus(), 'confirmed');
           await waitFor(settled(confirmed.turnId));
+          const asked = await chatMessages.submit('Synthetic chat approval', [], {
+            sessionId: randomUUID(),
+          });
+          await waitFor(settled(asked.turnId));
+          const hidden = (
+            await db.pool.query<{ id: string; confirmation_message_id: string }>(
+              'SELECT id,confirmation_message_id FROM approvals WHERE turn_id=$1',
+              [asked.turnId],
+            )
+          ).rows[0]!;
+          const hiddenStatus = async () =>
+            (await db.pool.query('SELECT status FROM approvals WHERE id=$1', [hidden.id])).rows[0]
+              .status;
+          assert.notEqual((await chatMessages.answer(consent))?.approvalId, hidden.id);
+          const plain = await chatMessages.submit(consent);
+          assert.equal(await hiddenStatus(), 'pending');
+          assert.equal(await turnStatus(asked.turnId), 'waiting');
+          await waitFor(settled(plain.turnId));
+          const answered = await chatMessages.submit(consent, [], {
+            replyToMessageId: hidden.confirmation_message_id,
+          });
+          assert.equal(await hiddenStatus(), 'confirmed');
+          await waitFor(settled(answered.turnId));
         },
       );
 
