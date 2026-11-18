@@ -1,11 +1,11 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { Artifact } from '../../shared/contracts';
 import {
-  defaultJobProfile,
   jobPlaceholders,
   type JobCv,
   type JobProfile,
   type JobProfileView,
+  type JobRevision,
   type JobSetup,
   type JobTemplate,
   type JobTemplatesView,
@@ -22,6 +22,7 @@ import { formatDateTime, useDateFormat } from '../lib/date-format';
 import './jobs.css';
 
 type View = 'cvs' | 'profile' | 'templates';
+type Message = { kind: 'info' | 'success' | 'error'; text: string } | null;
 
 const checklist: Record<JobSetup['items'][number]['key'], string> = {
   cv: 'Add your CV. Nod converts it and drafts your profile.',
@@ -64,12 +65,74 @@ function Checklist({ setup }: { setup: JobSetup }) {
   );
 }
 
-function CvCard({ cv, refresh }: { cv: JobCv; refresh(): void }) {
+function History<T>({
+  path,
+  describe,
+  onRestore,
+}: {
+  path: string;
+  describe(entry: JobRevision<T>): string;
+  onRestore(entry: JobRevision<T>): Promise<void>;
+}) {
   const format = useDateFormat();
-  const [editing, setEditing] = useState(false);
-  const [label, setLabel] = useState(cv.label);
-  const [markdown, setMarkdown] = useState(cv.markdown);
-  const [confirming, setConfirming] = useState(false);
+  const [entries, setEntries] = useState<JobRevision<T>[] | null>(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState('');
+  useEffect(() => {
+    let active = true;
+    api<JobRevision<T>[]>(path).then(
+      (value) => active && setEntries(value),
+      (cause) => active && setError(errorMessage(cause)),
+    );
+    return () => {
+      active = false;
+    };
+  }, [path]);
+  if (error) return <Notice>Could not load earlier versions. {error}</Notice>;
+  if (!entries) return <Loading label="Loading earlier versions…" />;
+  if (!entries.length) return <p className="muted">No earlier versions yet.</p>;
+  return (
+    <ol className="jobs-history" role="list">
+      {entries.map((entry, index) => (
+        <li key={entry.id}>
+          <span>
+            Version {entry.revision} · {entry.actor === 'owner' ? 'you' : 'Nod'} ·{' '}
+            <time dateTime={entry.createdAt}>{formatDateTime(entry.createdAt, format)}</time> ·{' '}
+            {describe(entry)}
+          </span>
+          {index > 0 && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={Boolean(busy)}
+              onClick={async () => {
+                setBusy(entry.id);
+                setError('');
+                try {
+                  await onRestore(entry);
+                } catch (cause) {
+                  setError(errorMessage(cause));
+                } finally {
+                  setBusy('');
+                }
+              }}
+            >
+              {busy === entry.id ? 'Restoring…' : 'Restore'}
+            </Button>
+          )}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function CvCard({ cv }: { cv: JobCv }) {
+  const format = useDateFormat();
+  const [editing, setEditing] = useState<{ base: number; label: string; markdown: string } | null>(
+    null,
+  );
+  const [history, setHistory] = useState(false);
+  const [confirming, setConfirming] = useState<'archive' | 'delete' | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const act = async (run: () => Promise<unknown>) => {
@@ -77,7 +140,7 @@ function CvCard({ cv, refresh }: { cv: JobCv; refresh(): void }) {
     setError('');
     try {
       await run();
-      refresh();
+      refreshAll();
       return true;
     } catch (cause) {
       setError(errorMessage(cause));
@@ -86,12 +149,15 @@ function CvCard({ cv, refresh }: { cv: JobCv; refresh(): void }) {
       setBusy(false);
     }
   };
+  const start = () => setEditing({ base: cv.revision, label: cv.label, markdown: cv.markdown });
   return (
     <article className="saved-plan jobs-cv">
       <div className="saved-plan-title">
         <h2>{cv.label}</h2>
         {cv.isMain && <span className="jobs-badge jobs-badge-main">Main</span>}
-        <span className="jobs-badge">{cv.status === 'ready' ? 'Ready' : 'Converting'}</span>
+        <span className="jobs-badge">
+          {cv.converting ? 'Converting' : cv.status === 'ready' ? 'Ready' : 'Not converted'}
+        </span>
       </div>
       <p className="jobs-meta">
         {cv.file ? (
@@ -117,38 +183,50 @@ function CvCard({ cv, refresh }: { cv: JobCv; refresh(): void }) {
           className="form-stack"
           onSubmit={async (event) => {
             event.preventDefault();
-            if (await act(() => send(`/api/jobs/cvs/${cv.id}`, 'PATCH', { label, markdown })))
-              setEditing(false);
+            if (
+              await act(() =>
+                send(`/api/jobs/cvs/${cv.id}`, 'PATCH', {
+                  label: editing.label,
+                  markdown: editing.markdown,
+                  revision: editing.base,
+                }),
+              )
+            )
+              setEditing(null);
           }}
         >
+          {cv.revision !== editing.base && (
+            <Notice kind="info">
+              A newer version of this CV&apos;s text was saved while you were editing.{' '}
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => setEditing({ ...editing, base: cv.revision, markdown: cv.markdown })}
+              >
+                Load the newer version
+              </Button>
+            </Notice>
+          )}
           <Field label="Name">
             <Input
-              value={label}
+              value={editing.label}
               maxLength={80}
-              onChange={(event) => setLabel(event.target.value)}
+              onChange={(event) => setEditing({ ...editing, label: event.target.value })}
             />
           </Field>
           <Field label="CV text" hint="Markdown. Nod uses this text for scoring and messages.">
             <textarea
               className="input jobs-markdown"
-              value={markdown}
-              onChange={(event) => setMarkdown(event.target.value)}
+              value={editing.markdown}
+              onChange={(event) => setEditing({ ...editing, markdown: event.target.value })}
             />
           </Field>
           <div className="jobs-actions">
-            <Button type="submit" size="sm" disabled={busy || !label.trim()}>
+            <Button type="submit" size="sm" disabled={busy || !editing.label.trim()}>
               {busy ? 'Saving…' : 'Save'}
             </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              onClick={() => {
-                setLabel(cv.label);
-                setMarkdown(cv.markdown);
-                setEditing(false);
-              }}
-            >
+            <Button type="button" size="sm" variant="ghost" onClick={() => setEditing(null)}>
               Cancel
             </Button>
           </div>
@@ -165,18 +243,18 @@ function CvCard({ cv, refresh }: { cv: JobCv; refresh(): void }) {
               Mark as main
             </Button>
           )}
+          <Button size="sm" variant="ghost" onClick={start}>
+            Edit
+          </Button>
           <Button
             size="sm"
             variant="ghost"
-            onClick={() => {
-              setLabel(cv.label);
-              setMarkdown(cv.markdown);
-              setEditing(true);
-            }}
+            aria-expanded={history}
+            onClick={() => setHistory(!history)}
           >
-            Edit
+            History
           </Button>
-          {cv.status === 'converting' && (
+          {cv.status === 'converting' && !cv.converting && (
             <Button
               size="sm"
               variant="ghost"
@@ -192,20 +270,42 @@ function CvCard({ cv, refresh }: { cv: JobCv; refresh(): void }) {
                 size="sm"
                 variant="destructive"
                 disabled={busy}
-                onClick={() => void act(() => send(`/api/jobs/cvs/${cv.id}`, 'DELETE'))}
+                onClick={() =>
+                  void act(() =>
+                    confirming === 'archive'
+                      ? post(`/api/jobs/cvs/${cv.id}/archive`)
+                      : send(`/api/jobs/cvs/${cv.id}`, 'DELETE'),
+                  )
+                }
               >
-                Archive this CV
+                {confirming === 'archive' ? 'Archive this CV' : 'Delete this CV and its files'}
               </Button>
-              <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+              <Button size="sm" variant="ghost" onClick={() => setConfirming(null)}>
                 Keep
               </Button>
             </>
           ) : (
-            <Button size="sm" variant="ghost" onClick={() => setConfirming(true)}>
-              Archive
-            </Button>
+            <>
+              <Button size="sm" variant="ghost" onClick={() => setConfirming('archive')}>
+                Archive
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setConfirming('delete')}>
+                Delete
+              </Button>
+            </>
           )}
         </div>
+      )}
+      {history && !editing && (
+        <History<{ markdown: string }>
+          key={cv.revision}
+          path={`/api/jobs/cvs/${cv.id}/revisions`}
+          describe={(entry) => `${entry.data.markdown.length} characters`}
+          onRestore={async (entry) => {
+            await post(`/api/jobs/cvs/${cv.id}/revisions/${entry.id}/restore`);
+            refreshAll();
+          }}
+        />
       )}
       {error && <Notice>{error}</Notice>}
     </article>
@@ -216,7 +316,7 @@ function Cvs() {
   const cvs = usePageData<JobCv[]>('/api/jobs/cvs');
   const input = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
-  const [message, setMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
+  const [message, setMessage] = useState<Message>(null);
   const upload = async (file: File) => {
     setUploading(true);
     setMessage(null);
@@ -273,7 +373,7 @@ function Cvs() {
       ) : cvs.data.length ? (
         <div className="saved-plan-list">
           {cvs.data.map((cv) => (
-            <CvCard key={`${cv.id}:${cv.revision}:${cv.isMain}`} cv={cv} refresh={refreshAll} />
+            <CvCard key={cv.id} cv={cv} />
           ))}
         </div>
       ) : (
@@ -373,16 +473,33 @@ function fromForm(form: ProfileForm): JobProfile {
   };
 }
 
+function useDraft<T, D>(data: T | null, revision: (value: T) => number, draft: (value: T) => D) {
+  const [state, setState] = useState<{ base: number; value: D; dirty: boolean } | null>(null);
+  useEffect(() => {
+    if (data && (!state || (!state.dirty && revision(data) !== state.base)))
+      setState({ base: revision(data), value: draft(data), dirty: false });
+  }, [data, state, revision, draft]);
+  return {
+    state,
+    stale: Boolean(data && state && revision(data) !== state.base),
+    edit: (value: D) => state && setState({ ...state, value, dirty: true }),
+    reset: () => data && setState({ base: revision(data), value: draft(data), dirty: false }),
+    replace: (value: T) => setState({ base: revision(value), value: draft(value), dirty: false }),
+  };
+}
+
+const profileRevision = (view: JobProfileView) => view.revision;
+const profileDraft = (view: JobProfileView) => toForm(view.profile);
+
 function Profile() {
   const data = usePageData<JobProfileView>('/api/jobs/profile');
-  const [form, setForm] = useState<ProfileForm | null>(null);
+  const { state, stale, edit, reset, replace } = useDraft(data.data, profileRevision, profileDraft);
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
-  useEffect(() => {
-    if (data.data && !form) setForm(toForm(data.data.profile));
-  }, [data.data, form]);
+  const [history, setHistory] = useState(false);
+  const [message, setMessage] = useState<Message>(null);
   if (data.error) return <Notice>Could not load your profile. {data.error}</Notice>;
-  if (!form || !data.data) return <Loading label="Loading profile…" />;
+  if (!state || !data.data) return <Loading label="Loading profile…" />;
+  const form = state.value;
   const field = (
     key: keyof ProfileForm,
     label: string,
@@ -393,13 +510,13 @@ function Profile() {
         <textarea
           className="input jobs-list-input"
           value={form[key]}
-          onChange={(event) => setForm({ ...form, [key]: event.target.value })}
+          onChange={(event) => edit({ ...form, [key]: event.target.value })}
         />
       ) : (
         <Input
           type={options.type}
           value={form[key]}
-          onChange={(event) => setForm({ ...form, [key]: event.target.value })}
+          onChange={(event) => edit({ ...form, [key]: event.target.value })}
         />
       )}
     </Field>
@@ -414,9 +531,11 @@ function Profile() {
         try {
           const saved = await send<JobProfileView>('/api/jobs/profile', 'PUT', {
             profile: fromForm(form),
+            revision: state.base,
           });
-          setForm(toForm(saved.profile));
           setMessage({ kind: 'success', text: 'Profile saved.' });
+          await pageDataCache.refresh('/api/jobs/profile', true);
+          replace(saved);
           refreshAll();
         } catch (cause) {
           setMessage({ kind: 'error', text: errorMessage(cause) });
@@ -428,6 +547,14 @@ function Profile() {
       <p className="muted">
         Nod drafts this from your main CV. Change anything here; nothing on this tab is required.
       </p>
+      {stale && (
+        <Notice kind="info">
+          The profile changed since you opened it.{' '}
+          <Button type="button" size="sm" variant="ghost" onClick={reset}>
+            Load the newer version
+          </Button>
+        </Notice>
+      )}
       {field('name', 'Name in messages')}
       {field('intro', 'Introduction', {
         hint: 'One line, as you’d introduce yourself.',
@@ -439,7 +566,7 @@ function Profile() {
       {field('languages', 'Languages you speak', { hint: 'One per line.', area: true })}
       {field('languageDefault', 'Message language', { hint: 'A language tag, such as en.' })}
       {field('byCountry', 'Language by country', {
-        hint: 'One per line, such as XX = ar-XX, with the company’s two-letter country code.',
+        hint: 'One per line, such as XX = fr-XX, with the company’s two-letter country code.',
         area: true,
       })}
       {field('programmes', 'Programmes and tracks', {
@@ -459,34 +586,56 @@ function Profile() {
         <Button type="submit" size="sm" disabled={saving}>
           {saving ? 'Saving…' : 'Save profile'}
         </Button>
+        <Button type="button" size="sm" variant="ghost" onClick={reset}>
+          Undo changes
+        </Button>
         <Button
           type="button"
           size="sm"
           variant="ghost"
-          onClick={() => setForm(toForm(data.data?.profile ?? defaultJobProfile))}
+          aria-expanded={history}
+          onClick={() => setHistory(!history)}
         >
-          Undo changes
+          History
         </Button>
       </div>
+      {history && (
+        <History<{ profile: JobProfile }>
+          key={data.data.revision}
+          path="/api/jobs/profile/revisions"
+          describe={(entry) => entry.data.profile.name || 'no name'}
+          onRestore={async (entry) => {
+            const restored = await post<JobProfileView>(
+              `/api/jobs/profile/revisions/${entry.id}/restore`,
+            );
+            await pageDataCache.refresh('/api/jobs/profile', true);
+            replace(restored);
+            refreshAll();
+          }}
+        />
+      )}
     </form>
   );
 }
 
+const templatesRevision = (view: JobTemplatesView) => view.revision;
+const templatesDraft = (view: JobTemplatesView): JobTemplate[] =>
+  view.templates.map(({ language, body, greetings }) => ({ language, body, greetings }));
+
 function Templates() {
   const data = usePageData<JobTemplatesView>('/api/jobs/templates');
-  const [list, setList] = useState<JobTemplate[] | null>(null);
+  const { state, stale, edit, reset, replace } = useDraft(
+    data.data,
+    templatesRevision,
+    templatesDraft,
+  );
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
-  useEffect(() => {
-    if (data.data && !list)
-      setList(
-        data.data.templates.map(({ language, body, greetings }) => ({ language, body, greetings })),
-      );
-  }, [data.data, list]);
+  const [message, setMessage] = useState<Message>(null);
   if (data.error) return <Notice>Could not load your templates. {data.error}</Notice>;
-  if (!list || !data.data) return <Loading label="Loading templates…" />;
+  if (!state || !data.data) return <Loading label="Loading templates…" />;
+  const list = state.value;
   const change = (index: number, value: Partial<JobTemplate>) =>
-    setList(list.map((entry, position) => (position === index ? { ...entry, ...value } : entry)));
+    edit(list.map((entry, position) => (position === index ? { ...entry, ...value } : entry)));
   return (
     <form
       className="jobs-panel form-stack"
@@ -497,11 +646,11 @@ function Templates() {
         try {
           const saved = await send<JobTemplatesView>('/api/jobs/templates', 'PUT', {
             templates: list,
+            revision: state.base,
           });
-          setList(
-            saved.templates.map(({ language, body, greetings }) => ({ language, body, greetings })),
-          );
           setMessage({ kind: 'success', text: 'Templates saved.' });
+          await pageDataCache.refresh('/api/jobs/templates', true);
+          replace(saved);
           refreshAll();
         } catch (cause) {
           setMessage({ kind: 'error', text: errorMessage(cause) });
@@ -515,6 +664,14 @@ function Templates() {
         person.
         {data.data.examples && ' These are examples until you save them.'}
       </p>
+      {stale && (
+        <Notice kind="info">
+          The templates changed since you opened them.{' '}
+          <Button type="button" size="sm" variant="ghost" onClick={reset}>
+            Load the newer version
+          </Button>
+        </Notice>
+      )}
       {list.map((entry, index) => (
         <fieldset key={index} className="saved-plan jobs-template">
           <div className="jobs-numbers">
@@ -546,7 +703,7 @@ function Templates() {
               type="button"
               size="sm"
               variant="ghost"
-              onClick={() => setList(list.filter((_, position) => position !== index))}
+              onClick={() => edit(list.filter((_, position) => position !== index))}
             >
               Remove
             </Button>
@@ -562,7 +719,7 @@ function Templates() {
           type="button"
           size="sm"
           variant="ghost"
-          onClick={() => setList([...list, { language: '', body: '', greetings: { default: '' } }])}
+          onClick={() => edit([...list, { language: '', body: '', greetings: { default: '' } }])}
         >
           Add a language
         </Button>
