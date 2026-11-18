@@ -2668,6 +2668,108 @@ test(
         },
       );
 
+      await t.test(
+        'a task’s bug report and browser handoff stay in its own chat and browser',
+        async (t) => {
+          const previousObserver = inspectObserver;
+          const prompt = 'Set up synthetic X access';
+          const question = 'Synthetic X needs a sign-in. Use the Browser panel below.';
+          inspectObserver = async (context) => {
+            if (context.prompt !== prompt) return;
+            if (!context.taskContext) {
+              await context.task!({
+                action: 'start',
+                title: prompt,
+                message: 'Setting up synthetic X access.',
+                doneWhen: 'Access works',
+                now: 'Opening synthetic X',
+              });
+              return { status: 'succeeded' };
+            }
+            await thread.withTurnLock(context.turnId, (client) =>
+              thread.insertBugReportDraft(
+                client,
+                { threadId: context.threadId, turnId: context.turnId },
+                '',
+                'Synthetic bug summary',
+              ),
+            );
+            return {
+              status: 'waiting_user',
+              message: question,
+              handoffBrowserId: context.sessionId,
+            };
+          };
+          t.after(() => {
+            inspectObserver = previousObserver;
+          });
+          const main = await userMessages.submit(prompt);
+          await waitFor(settled(main.turnId));
+          const task = (
+            await db.pool.query<{ id: string; message_id: string }>(
+              'SELECT id,message_id FROM tasks WHERE source_message_id=$1',
+              [main.messageId],
+            )
+          ).rows[0]!;
+          const worker = (
+            await db.pool.query<{ id: string }>(
+              "SELECT id FROM turns WHERE session_id=$1 AND source='task'",
+              [task.id],
+            )
+          ).rows[0]!.id;
+          await waitFor(settled(worker));
+          t.after(async () => {
+            await request('POST', `/api/tasks/${task.id}/stop`);
+          });
+          assert.deepEqual(
+            (
+              await db.pool.query('SELECT status,handoff_browser_id FROM turns WHERE id=$1', [
+                worker,
+              ])
+            ).rows[0],
+            { status: 'waiting', handoff_browser_id: task.id },
+          );
+          const state = (await request('GET', '/api/state')).json<{
+            messages: Array<{
+              id: string;
+              text: string;
+              turnId: string | null;
+              taskId?: string | null;
+              presentation?: { type: string };
+            }>;
+            turns: Array<{ id: string; handoffMessageId?: string | null }>;
+          }>();
+          const posted = state.messages.filter(({ turnId }) => turnId === worker);
+          assert.deepEqual(
+            posted.map(({ text, presentation, taskId }) => ({
+              text,
+              type: presentation?.type ?? null,
+              taskId,
+            })),
+            [
+              { text: '', type: 'bug-report', taskId: task.id },
+              { text: question, type: null, taskId: task.id },
+            ],
+          );
+          assert.equal(
+            state.turns.find(({ id }) => id === worker)?.handoffMessageId,
+            posted[1]!.id,
+          );
+          assert.equal(state.messages.find(({ id }) => id === task.message_id)?.taskId, null);
+          const page = async (query: string) =>
+            (await request('GET', `/api/messages?${query}`))
+              .json<{ messages: Array<{ id: string }> }>()
+              .messages.map(({ id }) => id);
+          const mainIds = await page('task=main');
+          assert.ok(mainIds.includes(task.message_id));
+          assert.ok(posted.every(({ id }) => !mainIds.includes(id)));
+          assert.deepEqual(await page(`task=${task.id}`), [
+            task.message_id,
+            ...posted.map(({ id }) => id),
+          ]);
+        },
+      );
+
       await t.test('a task resumes its own session when its next check is due', async (t) => {
         const previousObserver = inspectObserver;
         const prompt = 'Track a synthetic reply after connecting its source.';

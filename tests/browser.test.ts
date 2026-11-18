@@ -7101,6 +7101,98 @@ test('chat shows pending sends and active work before a model step', async () =>
   assert.equal(result.exitCode, 0, result.stdout + result.stderr);
 });
 
+test('a task’s bug report and browser handoff show only in its own chat', async () => {
+  const result = await runProcess(process.execPath, ['--import', 'tsx', '--input-type=module'], {
+    timeoutMs: 30_000,
+    input: String.raw`
+      import assert from 'node:assert/strict';
+      import { JSDOM } from 'jsdom';
+      const dom = new JSDOM('<!doctype html><div id="root"></div>', {
+        url: 'https://nod.fixture.invalid', pretendToBeVisual: true,
+      });
+      Object.assign(globalThis, {
+        window: dom.window, document: dom.window.document,
+        IS_REACT_ACT_ENVIRONMENT: true, localStorage: dom.window.localStorage,
+        getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
+        requestAnimationFrame: dom.window.requestAnimationFrame.bind(dom.window),
+        cancelAnimationFrame: dom.window.cancelAnimationFrame.bind(dom.window),
+      });
+      for (const name of ['Node', 'NodeFilter', 'Element', 'HTMLElement', 'HTMLInputElement',
+        'HTMLButtonElement', 'MutationObserver', 'Event', 'KeyboardEvent', 'CustomEvent', 'DOMParser'])
+        globalThis[name] = dom.window[name];
+      Object.defineProperty(globalThis, 'navigator', { configurable: true, value: dom.window.navigator });
+      window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+      HTMLElement.prototype.scrollTo = () => {};
+      HTMLElement.prototype.scrollIntoView = () => {};
+      const streams = [];
+      globalThis.fetch = async (path) => {
+        if (path === '/api/apps') return Response.json([]);
+        if (path === '/api/trust') return Response.json({});
+        if (path === '/api/speech') return Response.json({ transcription: true });
+        if (path === '/api/onboarding/introduction') return Response.json({ messageId: null });
+        if (String(path).startsWith('/api/browser-handoff/stream')) {
+          streams.push(new URL(String(path), 'https://nod.fixture.invalid').searchParams.get('turnId'));
+          return new Promise(() => {});
+        }
+        return Response.json({ messages: [], hasMore: false });
+      };
+      const { createElement, act } = await import('react');
+      const { createRoot } = await import('react-dom/client');
+      const { Chat } = await import('./src/web/pages/chat.tsx');
+      const id = (suffix) => '00000000-0000-4000-8000-0000000000' + suffix;
+      const task = {
+        id: id('a1'), title: 'Set up synthetic X access', doneWhen: '', now: 'Opening synthetic X',
+        result: '', status: 'needs_you', question: 'Synthetic X needs a sign-in.',
+        questionMessageId: id('d4'), browserHandoff: true, waitingFor: [], nextCheck: null,
+        createdAt: '2026-11-18T01:00:00Z', updatedAt: '2026-11-18T01:00:00Z', closedAt: null,
+        messageId: id('d2'),
+      };
+      const message = (suffix, role, text, taskId, extra = {}) => ({
+        id: id(suffix), role, text, taskId, attachments: [], turnId: 'turn-' + suffix,
+        createdAt: '2026-11-18T01:00:0' + suffix.at(-1) + 'Z', ...extra,
+      });
+      const state = {
+        threadId: 'synthetic-thread', activity: [], tasks: [task], verificationRequests: [],
+        configuration: { llmReady: true },
+        turns: [{ id: 'turn-d4', status: 'waiting', source: 'task',
+          createdAt: '2026-11-18T01:00:00Z', handoffMessageId: id('d4') }],
+        messages: [
+          message('d1', 'user', 'Set up synthetic X access', null),
+          message('d2', 'assistant', 'Setting up synthetic X access.', null),
+          message('d3', 'assistant', '', task.id, { presentation: { version: 1, type: 'bug-report',
+            title: 'Bug report for the Nod team', sources: [], draftId: id('f1'), summary: 'Synthetic' } }),
+          message('d4', 'assistant', 'Synthetic X needs a sign-in.', task.id),
+        ],
+      };
+      const root = createRoot(document.getElementById('root'));
+      const shown = () => [...document.querySelectorAll('[data-message-id]')]
+        .map((element) => element.getAttribute('data-message-id').slice(-2));
+      try {
+        await act(async () => root.render(createElement(Chat, {
+          key: 'main', ownerId: 'synthetic-owner', state, streams: {}, refresh: async () => {},
+        })));
+        await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+        assert.deepEqual(shown(), ['d1', 'd2']);
+        assert.equal(document.querySelector('.browser-handoff'), null);
+        assert.ok(document.querySelector('[data-task-id="' + task.id + '"][data-status="needs_you"]'));
+        assert.deepEqual(streams, []);
+        await act(async () => root.render(createElement(Chat, {
+          key: task.id, ownerId: 'synthetic-owner', state, streams: {}, refresh: async () => {},
+          chatId: task.id,
+        })));
+        await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+        assert.deepEqual(shown(), ['d2', 'd3', 'd4']);
+        assert.ok(document.querySelector('.browser-handoff'));
+        assert.deepEqual(streams, ['turn-d4']);
+      } finally {
+        await act(async () => root.unmount());
+        dom.window.close();
+      }
+    `,
+  });
+  assert.equal(result.exitCode, 0, result.stdout + result.stderr);
+});
+
 test('analytics follow visible Settings sections, Apps tabs and the Scheduled page', async () => {
   const result = await runProcess(process.execPath, ['--import', 'tsx', '--input-type=module'], {
     timeoutMs: 20_000,
