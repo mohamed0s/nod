@@ -278,7 +278,9 @@ function CvCard({ cv }: { cv: JobCv }) {
                   )
                 }
               >
-                {confirming === 'archive' ? 'Archive this CV' : 'Delete this CV and its files'}
+                {confirming === 'archive'
+                  ? 'Archive this CV'
+                  : 'Delete this CV and its PDF; the copy in the chat stays'}
               </Button>
               <Button size="sm" variant="ghost" onClick={() => setConfirming(null)}>
                 Keep
