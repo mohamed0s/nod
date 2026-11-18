@@ -7,6 +7,7 @@ ARG NOD_RUNTIME_REFRESH
 RUN apt-get update && apt-get install -y --no-install-recommends iptables python3 python-is-python3 python3-pip python3-venv python3-requests python3-bs4 pipx ffmpeg poppler-utils jq tesseract-ocr tesseract-ocr-eng tesseract-ocr-deu tesseract-ocr-por tesseract-ocr-spa tesseract-ocr-fra ca-certificates curl git unzip ripgrep libreoffice-writer-nogui libreoffice-calc-nogui libreoffice-impress-nogui fonts-liberation fonts-crosextra-carlito fonts-crosextra-caladea fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji qpdf ghostscript zip xz-utils file sqlite3 tesseract-ocr-cat tesseract-ocr-ita tesseract-ocr-nld && rm -rf /var/lib/apt/lists/*
 COPY jobs/workspace/install-career-ops.sh jobs/workspace/career-ops jobs/workspace/career-ops-lock.json /tmp/career-ops-install/
 RUN sh /tmp/career-ops-install/install-career-ops.sh && rm -rf /tmp/career-ops-install
+ARG PIP_DEFAULT_TIMEOUT=120
 COPY src/providers/docker/workspace-video.txt /tmp/workspace-video.txt
 RUN python3 -m venv /opt/yt-dlp && /opt/yt-dlp/bin/pip install --no-cache-dir --require-hashes -r /tmp/workspace-video.txt && ln -s /opt/yt-dlp/bin/yt-dlp /usr/local/bin/yt-dlp
 COPY --chmod=555 src/providers/docker/save-video.py /usr/local/bin/save-video
