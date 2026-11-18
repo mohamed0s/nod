@@ -639,18 +639,20 @@ export async function createApp(dependencies: AppDependencies = {}) {
       const payload =
         event.type === 'refresh'
           ? { type: 'refresh' }
-          : event.type === 'activity' && event.ownerId === ownerId
-            ? { type: 'activity', items: event.items }
-            : event.type === 'delta' && event.ownerId === ownerId && event.channel === 'web'
-              ? {
-                  type: 'delta',
-                  threadId: event.threadId,
-                  turnId: event.turnId,
-                  text: event.text,
-                  streamId: event.streamId,
-                  done: event.done,
-                }
-              : undefined;
+          : event.type === 'jobs' && event.ownerId === ownerId
+            ? { type: 'jobs' }
+            : event.type === 'activity' && event.ownerId === ownerId
+              ? { type: 'activity', items: event.items }
+              : event.type === 'delta' && event.ownerId === ownerId && event.channel === 'web'
+                ? {
+                    type: 'delta',
+                    threadId: event.threadId,
+                    turnId: event.turnId,
+                    text: event.text,
+                    streamId: event.streamId,
+                    done: event.done,
+                  }
+                : undefined;
       if (payload && !reply.raw.destroyed) reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
     };
     send({ type: 'refresh' });

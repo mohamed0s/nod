@@ -158,7 +158,7 @@ import { createPostgresObjectStore } from './object-storage.ts';
 import { loadPrivacyNoticeFile, registerPrivacyNotice } from './privacy.ts';
 import { createDocumentation } from './documentation.ts';
 import { initializeDatabase, pool } from './db.ts';
-import { events, refresh } from './events.ts';
+import { events, jobsChanged, refresh } from './events.ts';
 import { createIntegrations } from './integrations.ts';
 import { gmailDraftTarget, gmailMessageTarget } from './action-presentation.ts';
 import {
@@ -206,6 +206,7 @@ import {
 import type { VaultActivityReason } from '../shared/contracts.ts';
 import { createTriage, getPreferences } from './triage.ts';
 import { createTasks } from './tasks.ts';
+import { createJobs } from './jobs.ts';
 import { createActivity } from './activity.ts';
 import { checkedKeyStore, createVault, credentialOrigin, sealedDataExists } from './vault.ts';
 import { createVaultAccess } from './vault-access.ts';
@@ -1141,6 +1142,22 @@ async function initializeApplication(
       : {}),
   });
   await tasks.initialize();
+  const jobs = createJobs({
+    pool,
+    ownerId,
+    artifacts,
+    workspace: {
+      write: (threadId, path, bytes, signal) =>
+        workspace.writeArtifact(threadId, path, bytes, signal),
+      read: (threadId, path, maxBytes) =>
+        workspace.readArtifact(threadId, path, maxBytes, 'attachment'),
+    },
+    startChat: (text, attachments) =>
+      userMessages.submit(text, attachments, { channel: 'web', sessionId: randomUUID() }),
+    origin: turnOrigin,
+    withTurnLock: (turnId, operation) => withTurnLock(turnId, operation),
+    changed: () => jobsChanged(ownerId),
+  });
   async function describeModelChoice(input: Record<string, unknown>) {
     const models = adapters.models;
     if (!models) return undefined;
@@ -2393,6 +2410,7 @@ async function initializeApplication(
       speech,
       audioReplies: async () => (await speechPreferences.get()).speechReply,
       manage: async (turn, action, args, { admit, ...provenance }) => {
+        if (action === 'jobs') return jobs.execute(turn, args);
         if (action === 'prepared_list')
           return untrustedBlock('prepared work', JSON.stringify(await proactivity.prepared(args)));
         if (action === 'prepared_update') {
@@ -2955,6 +2973,7 @@ async function initializeApplication(
   onboardingSuggestions.registerRoutes(app);
   onboardingProfile.registerRoutes(app);
   tasks.registerRoutes(app);
+  jobs.registerRoutes(app);
   triage.registerRoutes(app);
   let channelSettings: Awaited<ReturnType<typeof createChannelSettings>> | undefined;
   let lastChannelObservation: { consentVersion: number; signature: string } | undefined;

@@ -2,6 +2,7 @@ import { logFailure } from './failure-log.ts';
 import pg from 'pg';
 import { databaseUrl, ownerId } from './config.ts';
 import { locksTable } from './locks.ts';
+import { jobTables } from './jobs.ts';
 import { transaction } from './transaction.ts';
 
 function poolSize(value: string | undefined, fallback: number) {
@@ -184,6 +185,7 @@ export async function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS messages_attachments ON messages USING gin (attachments jsonb_path_ops);
     CREATE INDEX IF NOT EXISTS messages_text_search ON messages USING gin (to_tsvector('english',text));
   `);
+  await pool.query(jobTables);
   await pool.query(
     `UPDATE turns SET status='cancelled',finished_at=now()
      WHERE owner_id=$1 AND source='event' AND starts_with(source_id,'activity-check:') AND status='queued'`,
