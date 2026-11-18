@@ -2450,8 +2450,18 @@ test(
           ).rows[0]!;
           assert.equal((await chatMessages.answer(consent, { channel }))?.approvalId, topic.id);
           assert.equal(
-            (await chatMessages.answer(consent, { channel, mainOnly: true }))?.approvalId,
+            (await chatMessages.answer(consent, { channel, shownMessageId: started.messageId }))
+              ?.approvalId,
             undefined,
+          );
+          assert.equal(
+            (
+              await chatMessages.answer(consent, {
+                channel,
+                shownMessageId: topic.confirmation_message_id,
+              })
+            )?.approvalId,
+            topic.id,
           );
           const topicAnswered = await chatMessages.submit(consent, [], {
             channel,

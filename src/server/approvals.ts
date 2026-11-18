@@ -69,7 +69,7 @@ export interface ChatConfirmationInput {
   clientMessageId?: string;
   sourceId?: string;
   hasAttachments?: boolean;
-  mainOnly?: boolean;
+  shownMessageId?: string;
   answer?: { approvalId: string; approved?: boolean };
   clicked?: true;
 }
@@ -573,22 +573,17 @@ export async function createApprovals(
   async function confirmationFor(input: ChatConfirmationInput) {
     const target =
       input.replyToMessageId ??
+      input.shownMessageId ??
       (
         await pool.query(
           `SELECT m.id FROM messages m JOIN turns u ON u.id=m.turn_id WHERE m.owner_id=$1 AND u.owner_id=$1 AND m.thread_id=$2 AND u.channel=$3 AND m.role='assistant' AND m.hidden_at IS NULL
-           AND (($3<>'web' AND NOT $5::boolean) OR to_jsonb(u)->>'task_id' IS NULL)
+           AND ($3<>'web' OR to_jsonb(u)->>'task_id' IS NULL)
            AND NOT EXISTS (SELECT 1 FROM messages s WHERE s.id=$4 AND s.owner_id=$1 AND s.thread_id=$2 AND date_trunc('milliseconds',s.created_at)<date_trunc('milliseconds',m.created_at))
            AND NOT EXISTS (SELECT 1 FROM messages n WHERE n.owner_id=$1 AND n.thread_id=$2 AND n.role='assistant' AND n.turn_id IS NULL AND n.delivered_channel=$3 AND n.hidden_at IS NULL
              AND (n.created_at,n.id)>(m.created_at,m.id)
              AND NOT EXISTS (SELECT 1 FROM messages s WHERE s.id=$4 AND s.owner_id=$1 AND s.thread_id=$2 AND date_trunc('milliseconds',s.created_at)<date_trunc('milliseconds',n.created_at)))
            ORDER BY m.created_at DESC,m.id DESC LIMIT 1`,
-          [
-            ownerId,
-            input.threadId,
-            input.channel,
-            input.seenMessageId ?? null,
-            input.mainOnly === true,
-          ],
+          [ownerId, input.threadId, input.channel, input.seenMessageId ?? null],
         )
       ).rows[0]?.id;
     if (!target) return undefined;

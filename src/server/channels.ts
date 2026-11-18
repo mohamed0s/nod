@@ -97,7 +97,7 @@ interface ChannelOptions {
     text: string,
     channel: string,
     replyToMessageId?: string,
-    mainOnly?: boolean,
+    shownMessageId?: string,
   ) => Promise<ChatConfirmationInput['answer']>;
   reacted?: (messageId: string, reaction: string | null) => Promise<unknown>;
   subscribe: (listener: () => void) => () => void;
@@ -142,6 +142,7 @@ interface InboxRow extends ChannelIdentity {
   thread_id: string;
   topic_id: string | null;
   provider_reply_id: string | null;
+  created_at: Date;
   text: string;
   message_id: string | null;
   attachments: Artifact[];
@@ -627,6 +628,22 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     );
   }
 
+  async function shownInGeneral(row: InboxRow) {
+    const shown = (
+      await pool.query<{ id: string; turn_id: string | null }>(
+        `SELECT m.id,m.turn_id FROM channel_outbox o JOIN channel_inbox i ON i.source_id=o.source_id
+         JOIN messages m ON m.id=o.message_id AND m.owner_id=i.owner_id
+         LEFT JOIN threads th ON th.id=m.thread_id AND th.owner_id=m.owner_id
+         WHERE i.owner_id=$1 AND i.provider=$2 AND i.account_id=$3 AND i.sender_id=$4
+           AND o.state='sent' AND o.topic_id IS NULL AND o.updated_at<=$5
+           AND m.role='assistant' AND m.hidden_at IS NULL AND (m.thread_id IS NULL OR th.archived_at IS NULL)
+         ORDER BY o.updated_at DESC,m.created_at DESC,m.id DESC LIMIT 1`,
+        [ownerId, row.provider, row.account_id, row.sender_id, row.created_at],
+      )
+    ).rows[0];
+    return shown?.turn_id ? shown.id : null;
+  }
+
   async function hiddenReplyTarget(database: Pool | PoolClient, messageId: string) {
     const result = await database.query<{ text: string }>(
       'SELECT text FROM messages WHERE id=$1 AND owner_id=$2 AND hidden_at IS NOT NULL',
@@ -1054,21 +1071,21 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
             .classifyRetiredReply?.(pending.text, hiddenBeforeAnswer.text)
             .catch(() => 'uncertain' as const)) ?? 'uncertain')
         : undefined;
+    const shown =
+      !pending.topic_id && !pending.provider_reply_id && (await topicsShown(pending))
+        ? await shownInGeneral(pending)
+        : undefined;
     const answer =
       !permittedBeforeAnswer ||
       hiddenBeforeAnswer ||
       command ||
       newChat ||
+      shown === null ||
       pending.attachments?.length ||
       (pending.provider_reply_id && !replyToMessageId)
         ? undefined
         : await options
-            .answer?.(
-              pending.text,
-              channel,
-              replyToMessageId,
-              !replyToMessageId && (await topicsShown(pending)),
-            )
+            .answer?.(pending.text, channel, replyToMessageId, shown)
             .catch(() => undefined);
     let afterCommit: (() => Promise<void>) | undefined;
     const replyTargetChanged = Symbol('reply target changed');

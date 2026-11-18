@@ -3113,8 +3113,8 @@ async function initializeApplication(
         ).turnId,
       stopSignal,
       messageAccepted: ownerMessageAccepted,
-      answer: (text, channel, replyToMessageId, mainOnly) =>
-        userMessages.answer(text, { channel, replyToMessageId, mainOnly }),
+      answer: (text, channel, replyToMessageId, shownMessageId) =>
+        userMessages.answer(text, { channel, replyToMessageId, shownMessageId }),
     });
     channels.registerRoutes(app);
     await channelSettings?.recover();

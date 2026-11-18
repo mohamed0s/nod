@@ -5223,6 +5223,7 @@ test(
     await pool.query(`ALTER TABLE turns ADD COLUMN task_id uuid;
       CREATE TABLE tasks(id uuid PRIMARY KEY,owner_id text NOT NULL,turn_id uuid,message_id uuid,title text NOT NULL)`);
     let topics = false;
+    let refuse = false;
     const gone = new Set<number>();
     const created: Record<string, unknown>[] = [];
     const sent: Record<string, unknown>[] = [];
@@ -5246,6 +5247,11 @@ test(
             },
           });
         if (method === 'createForumTopic') {
+          if (refuse)
+            return Response.json(
+              { ok: false, error_code: 429, description: 'Too Many Requests: retry after 5' },
+              { status: 429 },
+            );
           created.push(body);
           return Response.json({
             ok: true,
@@ -5276,7 +5282,7 @@ test(
       },
     );
     const submitted: Array<{ replyToMessageId?: string; sessionId?: string }> = [];
-    const answers: Array<{ replyToMessageId?: string; mainOnly?: boolean }> = [];
+    const answers: Array<{ replyToMessageId?: string; shownMessageId?: string }> = [];
     const commands: Array<{ replyToMessageId?: string; hasReply?: boolean }> = [];
     channels = await createChannels(pool, {
       ownerId,
@@ -5284,8 +5290,8 @@ test(
       present: async (_thread, input) => (input.kind === 'delivery' ? input.text : 'Synthetic'),
       subscribe: () => () => {},
       intervalMs: 600_000,
-      answer: async (_text, _channel, replyToMessageId, mainOnly) => {
-        answers.push({ replyToMessageId, mainOnly });
+      answer: async (_text, _channel, replyToMessageId, shownMessageId) => {
+        answers.push({ replyToMessageId, shownMessageId });
         return undefined;
       },
       taskCommand: async (_client, _command, replyToMessageId, hasReply) => {
@@ -5385,7 +5391,7 @@ test(
     const restart = () => service.replaceTransport(createChatSdkTransport(pool, fixtureEnv));
 
     const main = await receive('Start a synthetic report');
-    assert.deepEqual(answers.at(-1), { replyToMessageId: undefined, mainOnly: false });
+    assert.deepEqual(answers.at(-1), { replyToMessageId: undefined, shownMessageId: undefined });
     const taskId = randomUUID();
     const ack = await say(main.turn_id, 'Started the synthetic report');
     const taskTurn = await turn(main.channel, taskId);
@@ -5416,7 +5422,7 @@ test(
     const inTopic = await receive('Add a synthetic chart', 701);
     assert.deepEqual([inTopic.topic_id, inTopic.provider_reply_id], ['701', null]);
     assert.deepEqual(submitted.at(-1), { replyToMessageId: latest, sessionId: undefined });
-    assert.deepEqual(answers.at(-1), { replyToMessageId: latest, mainOnly: false });
+    assert.deepEqual(answers.at(-1), { replyToMessageId: latest, shownMessageId: undefined });
     assert.equal(
       (await pool.query('SELECT task_id FROM turns WHERE id=$1', [inTopic.turn_id])).rows[0]
         .task_id,
@@ -5425,7 +5431,7 @@ test(
     await receive('/status', 701);
     assert.deepEqual(commands.at(-1), { replyToMessageId: latest, hasReply: true });
     assert.equal(delivery('Synthetic task status').message_thread_id, 701);
-    await say(await turn(main.channel), 'Main chat reply');
+    const mainReply = await say(await turn(main.channel), 'Main chat reply');
     await service.drain();
     assert.equal(delivery('Main chat reply').message_thread_id, undefined);
 
@@ -5445,7 +5451,29 @@ test(
 
     await restart();
     await receive('yes');
-    assert.deepEqual(answers.at(-1), { replyToMessageId: undefined, mainOnly: true });
+    assert.deepEqual(answers.at(-1), { replyToMessageId: undefined, shownMessageId: mainReply });
+    refuse = true;
+    const invoiceId = randomUUID();
+    const invoiceTurn = await turn(main.channel, invoiceId);
+    await pool.query('INSERT INTO tasks(id,owner_id,turn_id,title) VALUES($1,$2,$3,$4)', [
+      invoiceId,
+      ownerId,
+      invoiceTurn,
+      'Synthetic invoice',
+    ]);
+    const invoiceQuestion = await say(invoiceTurn, 'Approve the synthetic invoice?');
+    await service.drain();
+    refuse = false;
+    assert.equal(delivery('Approve the synthetic invoice?').message_thread_id, undefined);
+    await receive('yes');
+    assert.deepEqual(answers.at(-1), {
+      replyToMessageId: undefined,
+      shownMessageId: invoiceQuestion,
+    });
+    const answeredInGeneral = answers.length;
+    await receive('/tasks');
+    await receive('yes');
+    assert.equal(answers.length, answeredInGeneral);
 
     gone.add(701);
     const lost = await say(taskTurn, 'Update after the topic was deleted');

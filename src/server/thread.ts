@@ -130,7 +130,7 @@ interface SubmitUserMessageOptions {
   replyToMessageId?: string;
   replyQuote?: string;
   seenMessageId?: string;
-  mainOnly?: boolean;
+  shownMessageId?: string;
   clientMessageId?: string;
   questionAnswer?: QuestionAnswer;
   approvalAnswer?: { approvalId: string; approved: boolean };
@@ -615,7 +615,7 @@ async function readAnswer(
     threadId: options.threadId ?? (await activeThread(pool)).id,
     replyToMessageId: options.replyToMessageId,
     seenMessageId: options.seenMessageId,
-    mainOnly: options.mainOnly,
+    shownMessageId: options.shownMessageId,
     hasAttachments,
   });
 }
