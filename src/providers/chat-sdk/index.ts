@@ -110,7 +110,10 @@ class Telegram extends TelegramAdapter {
       'createForumTopic',
       { chat_id: this.decodeThreadId(threadId).chatId, name },
       { signal },
-    );
+    ).catch((cause: unknown) => {
+      this.topicState = undefined;
+      throw cause;
+    });
     return String(z.number().int().positive().parse(topic.message_thread_id));
   }
 

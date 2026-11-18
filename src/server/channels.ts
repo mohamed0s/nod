@@ -415,6 +415,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
   let receiving = new AbortController();
   const pendingMedia = new Map<string, Promise<void>>();
   const topicsOn = new Map<string, boolean>();
+  const createdTopics = new Map<string, string>();
   async function saveReply(
     client: PoolClient,
     sourceId: string,
@@ -1423,20 +1424,16 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       await block('channel_access_changed');
       return true;
     }
-    const topicId = await topicFor(row).catch((cause) => {
-      logFailure('channel_topic_failed', cause);
-      return undefined;
-    });
     const sending = await transaction(async (client) => {
       const result = await client.query(
-        `UPDATE channel_outbox o SET state='sending',topic_id=$5,updated_at=now() FROM messages m
+        `UPDATE channel_outbox o SET state='sending',updated_at=now() FROM messages m
          WHERE o.message_id=$1 AND o.claim_id=$2 AND o.state='preparing'
            AND m.id=o.message_id AND m.owner_id=$3 AND m.hidden_at IS NULL
            AND m.thread_id IS NOT DISTINCT FROM $4::uuid
            AND (m.thread_id IS NULL OR EXISTS (
              SELECT 1 FROM threads th WHERE th.id=m.thread_id AND th.owner_id=$3 AND th.archived_at IS NULL))
          RETURNING o.message_id`,
-        [row.message_id, claimId, ownerId, row.message_thread_id, topicId ?? null],
+        [row.message_id, claimId, ownerId, row.message_thread_id],
       );
       if (!result.rowCount) {
         await block('thread_changed', 'preparing', client);
@@ -1458,7 +1455,12 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       return true;
     }
     let postStarted = false;
+    let topicId: string | undefined;
     try {
+      topicId = await topicFor(row).catch((cause) => {
+        logFailure('channel_topic_failed', cause);
+        return undefined;
+      });
       const target = row.reply_to_message_id
         ? ((
             await pool.query(
@@ -1546,7 +1548,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
         return true;
       }
       await pool.query(
-        `WITH sent AS (UPDATE channel_outbox SET state='sent',provider_message_id=$2,provider_message_ids=$3,claim_id=NULL,updated_at=now()
+        `WITH sent AS (UPDATE channel_outbox SET state='sent',provider_message_id=$2,provider_message_ids=$3,topic_id=$7,claim_id=NULL,updated_at=now()
            WHERE message_id=$1 AND claim_id=$4 AND state='sending' RETURNING message_id)
          UPDATE messages m SET delivered_channel=$5 FROM sent WHERE m.id=sent.message_id AND m.owner_id=$6 AND m.turn_id IS NULL`,
         [
@@ -1556,17 +1558,20 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
           claimId,
           conversationChannel(row),
           ownerId,
+          topicId ?? null,
         ],
       );
     } catch (cause) {
       logFailure('channel_send_failed', cause);
       const gone = cause instanceof MessagingTopicError && Boolean(topicId);
-      if (gone)
+      if (gone) {
+        for (const [key, value] of createdTopics) if (value === topicId) createdTopics.delete(key);
         await pool.query(
           `WITH gone AS (DELETE FROM channel_topics WHERE owner_id=$1 AND provider=$2 AND account_id=$3 AND sender_id=$4 AND topic_id=$5)
-           UPDATE channel_inbox SET topic_id=NULL WHERE owner_id=$1 AND provider=$2 AND account_id=$3 AND sender_id=$4 AND topic_id=$5`,
+           UPDATE channel_inbox SET topic_id=NULL WHERE owner_id=$1 AND provider=$2 AND account_id=$3 AND sender_id=$4 AND topic_id=$5 AND state<>'pending'`,
           [ownerId, row.provider, row.account_id, row.sender_id, topicId],
         );
+      }
       const uncertain = postStarted && !gone;
       await pool.query(
         `UPDATE channel_outbox SET state=$3,reason=$4,claim_id=NULL,updated_at=now()
@@ -1595,30 +1600,33 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     topicsOn.set(`${row.provider}:${row.account_id}`, enabled);
     if (!enabled) return undefined;
     if (!row.turn_id) return wanted;
-    const identity = [ownerId, row.provider, row.account_id, row.sender_id, wanted];
+    const task = await pool.query<{ title: string; topic_id: string | null }>(
+      `SELECT t.title,c.topic_id FROM tasks t LEFT JOIN channel_topics c ON c.task_id=t.id AND c.owner_id=t.owner_id
+         AND c.provider=$3 AND c.account_id=$4 AND c.sender_id=$5
+       WHERE t.id=$1 AND t.owner_id=$2 AND t.session_id=t.id`,
+      [wanted, ownerId, row.provider, row.account_id, row.sender_id],
+    );
+    if (!task.rows[0]) return undefined;
+    if (task.rows[0].topic_id) return task.rows[0].topic_id;
+    if (!transport.createTopic) return undefined;
+    const key = JSON.stringify([row.provider, row.account_id, row.sender_id, wanted]);
+    const topicId =
+      createdTopics.get(key) ??
+      (await transport.createTopic({
+        ...target,
+        threadId: row.thread_id,
+        name: task.rows[0].title,
+      }));
+    createdTopics.set(key, topicId);
     const saved = await pool.query<{ topic_id: string }>(
-      'SELECT topic_id FROM channel_topics WHERE owner_id=$1 AND provider=$2 AND account_id=$3 AND sender_id=$4 AND task_id=$5',
-      identity,
+      `WITH added AS (INSERT INTO channel_topics(owner_id,provider,account_id,sender_id,task_id,topic_id)
+         VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING RETURNING topic_id)
+       SELECT topic_id FROM added UNION ALL SELECT topic_id FROM channel_topics
+       WHERE owner_id=$1 AND provider=$2 AND account_id=$3 AND sender_id=$4 AND task_id=$5 LIMIT 1`,
+      [ownerId, row.provider, row.account_id, row.sender_id, wanted, topicId],
     );
-    if (saved.rows[0]) return saved.rows[0].topic_id;
-    const task = (
-      await pool.query<{ title: string }>('SELECT title FROM tasks WHERE id=$1 AND owner_id=$2', [
-        wanted,
-        ownerId,
-      ])
-    ).rows[0];
-    if (!task || !transport.createTopic) return undefined;
-    const topicId = await transport.createTopic({
-      ...target,
-      threadId: row.thread_id,
-      name: task.title,
-    });
-    await pool.query(
-      `INSERT INTO channel_topics(owner_id,provider,account_id,sender_id,task_id,topic_id)
-       VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
-      [...identity, topicId],
-    );
-    return topicId;
+    createdTopics.delete(key);
+    return saved.rows[0]?.topic_id ?? topicId;
   }
 
   const presence = new Map<string, { at: number; status: string }>();

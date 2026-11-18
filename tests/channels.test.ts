@@ -5224,6 +5224,7 @@ test(
       CREATE TABLE tasks(id uuid PRIMARY KEY,owner_id text NOT NULL,turn_id uuid,session_id uuid,message_id uuid,title text NOT NULL)`);
     let topics = false;
     let refuse = false;
+    let failText: string | undefined;
     const gone = new Set<number>();
     const created: Record<string, unknown>[] = [];
     const sent: Record<string, unknown>[] = [];
@@ -5318,6 +5319,7 @@ test(
       },
       submit: async (text, sourceId, client, channel, ...rest) => {
         const [, , replyToMessageId, , , , sessionId] = rest;
+        if (text === failText) throw new Error('Synthetic turn queue failure.');
         submitted.push({ replyToMessageId, sessionId });
         const task =
           sessionId ??
@@ -5510,7 +5512,19 @@ test(
     await receive('/tasks');
     await receive('yes');
     assert.equal(answers.length, answeredInGeneral);
+    const scheduledId = randomUUID();
+    const scheduledTurn = await turn(main.channel, scheduledId);
+    await pool.query(
+      'INSERT INTO tasks(id,owner_id,turn_id,session_id,title) VALUES($1,$2,$3,$4,$5)',
+      [scheduledId, ownerId, scheduledTurn, randomUUID(), 'Synthetic scheduled task'],
+    );
+    await say(scheduledTurn, 'Scheduled run result');
+    await service.drain();
+    assert.equal(delivery('Scheduled run result').message_thread_id, undefined);
+    assert.equal(created.length, 1);
 
+    failText = 'Still writing in the old topic';
+    await receive(failText, 701);
     gone.add(701);
     const lost = await say(taskTurn, 'Update after the topic was deleted');
     await service.drain();
@@ -5519,11 +5533,11 @@ test(
         .state,
       'pending',
     );
-    assert.equal(
-      (await pool.query("SELECT count(*)::int AS count FROM channel_inbox WHERE topic_id='701'"))
-        .rows[0].count,
-      0,
+    assert.deepEqual(
+      (await pool.query("SELECT state FROM channel_inbox WHERE topic_id='701'")).rows,
+      [{ state: 'pending' }],
     );
+    failText = undefined;
     await service.drain();
     assert.equal(created.length, 2);
     assert.equal(delivery('Update after the topic was deleted').message_thread_id, 702);
