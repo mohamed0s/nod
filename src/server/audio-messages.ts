@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
@@ -35,6 +35,7 @@ export const messageInput = z
     clientMessageId: z.uuid().optional(),
     threadId: z.uuid().optional(),
     verificationRequestId: z.uuid().optional(),
+    newChat: z.literal(true).optional(),
   })
   .strict();
 
@@ -250,11 +251,13 @@ export function registerAudioMessages(app: FastifyInstance, dependencies: AppDep
         );
       signal.throwIfAborted();
       submitting = true;
+      const { newChat, ...fields } = input;
       const submitted = await (dependencies.submitMessage ?? submitUserMessage)(
         text,
         accepted.attachments,
         {
-          ...input,
+          ...fields,
+          ...(newChat ? { sessionId: randomUUID() } : {}),
           displayText,
           audioCaption: input.text,
           channel: 'web',

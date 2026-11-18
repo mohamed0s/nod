@@ -114,6 +114,7 @@ interface EnqueueTurnOptions {
 }
 interface SubmitUserMessageOptions {
   threadId?: string;
+  sessionId?: string;
   sourceId?: string;
   channel?: string;
   client?: PoolClient;
@@ -572,6 +573,7 @@ export function createUserMessageService(
   options: {
     confirmAction?: ConfirmAction;
     taskReply?: TaskReply;
+    startChat?: StartChat;
     accepted?: () => (channel: string) => void;
   } = {},
 ) {
@@ -584,6 +586,7 @@ export function createUserMessageService(
         options.confirmAction,
         options.taskReply,
         options.accepted?.(),
+        options.startChat,
       ),
     answer: (text: string, input: SubmitUserMessageOptions = {}) =>
       readAnswer(text, false, input, options.confirmAction),
@@ -615,6 +618,10 @@ type TaskReply = (
   | { id: string; session_id: string; background: boolean; record(turnId: string): Promise<void> }
   | undefined
 >;
+type StartChat = (
+  client: PoolClient,
+  chat: { turnId: string; sessionId: string; messageId: string; text: string; live: boolean },
+) => Promise<void>;
 
 export async function submitUserMessage(
   text: string,
@@ -623,10 +630,21 @@ export async function submitUserMessage(
   confirmAction?: ConfirmAction,
   taskReply?: TaskReply,
   onAccepted?: (channel: string) => void,
+  startChat?: StartChat,
 ): Promise<SubmitUserMessageResult> {
   const stop = options.stopSignal ?? stopSignal();
   validateSource(options.sourceId, options.channel);
   const channel = options.channel ?? 'web';
+  const newChat = options.sessionId !== undefined;
+  if (newChat && !startChat) throw httpError('New chats are unavailable on this server.', 503);
+  if (
+    newChat &&
+    (options.replyToMessageId ||
+      options.replyQuote !== undefined ||
+      options.questionAnswer ||
+      options.approvalAnswer)
+  )
+    throw httpError('A new chat starts without a reply. Send it as a new message.', 400);
   const confirmation = {
     text,
     displayText: options.displayText,
@@ -651,7 +669,9 @@ export async function submitUserMessage(
       ? options.approvalAnswer
       : options.client
         ? options.answer
-        : await readAnswer(text, confirmation.hasAttachments, options, confirmAction);
+        : newChat
+          ? undefined
+          : await readAnswer(text, confirmation.hasAttachments, options, confirmAction);
   let inserted = false;
   const markInserted = () => {
     inserted = true;
@@ -741,7 +761,7 @@ export async function submitUserMessage(
       throw httpError('Select a passage of 4,000 characters or fewer.');
     const live = !stop.aborted;
     const confirmed =
-      options.questionAnswer || !live
+      options.questionAnswer || !live || newChat
         ? undefined
         : await confirmAction?.accept(
             client,
@@ -769,7 +789,8 @@ export async function submitUserMessage(
       live &&
       options.replyToMessageId &&
       (await taskReply?.(client, thread.id, options.replyToMessageId));
-    const question = live
+    const routed = live && !newChat;
+    const question = routed
       ? taskTarget ||
         choiceQuestion ||
         confirmed?.waiting ||
@@ -796,8 +817,8 @@ export async function submitUserMessage(
         messageId,
         options.prompt ?? text,
         channel,
-        question?.session_id ?? thread.id,
-        question?.background ?? false,
+        options.sessionId ?? question?.session_id ?? thread.id,
+        newChat || (question?.background ?? false),
         question?.id ?? null,
         live ? 'queued' : 'cancelled',
       ],
@@ -820,6 +841,14 @@ export async function submitUserMessage(
         options.questionAnswer ? JSON.stringify(options.questionAnswer) : null,
       ],
     );
+    if (options.sessionId)
+      await startChat!(client, {
+        turnId,
+        sessionId: options.sessionId,
+        messageId,
+        text: options.prompt ?? text,
+        live,
+      });
     if (live) await sendDrain(client, thread.id);
     markInserted();
     return { threadId: thread.id, turnId, messageId };
