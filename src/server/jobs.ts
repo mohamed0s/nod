@@ -66,12 +66,29 @@ export const exampleTemplates: JobTemplate[] = [
 
 const folder = 'shared/career-ops';
 const docx = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+export const conversionRequest = 'Convert the CV I just added for job search';
+
+export function cvLabel(value: string) {
+  return [
+    ...value
+      .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim(),
+  ]
+    .slice(0, 80)
+    .join('')
+    .trim();
+}
+
 const label = z
   .string()
-  .trim()
-  .min(1)
-  .max(80)
-  .refine((value) => !/[\r\n\x00-\x1f]/.test(value), 'A CV label is one line.');
+  .max(1000)
+  .transform(cvLabel)
+  .pipe(z.string().min(1, 'A CV label needs at least one visible character.'));
+const attachedId = (path: string) =>
+  /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-/i
+    .exec(posix.basename(path))?.[1]
+    ?.toLowerCase();
 const markdown = z.string().trim().min(1).max(200_000);
 const workspacePath = z.string().trim().min(1).max(4096);
 
@@ -101,6 +118,16 @@ const toolInput = z.discriminatedUnion('action', [
     }),
   z.object({ action: z.literal('cv_file'), id: z.uuid().optional() }).strict(),
   z
+    .object({
+      action: z.literal('cv_get'),
+      id: z.uuid().optional(),
+      workspaceFile: workspacePath.optional(),
+    })
+    .strict()
+    .refine((value) => (value.id === undefined) !== (value.workspaceFile === undefined), {
+      message: 'cv_get needs id or workspaceFile.',
+    }),
+  z
     .object({ action: z.literal('cv_add'), workspaceFile: workspacePath, label: label.optional() })
     .strict(),
   z
@@ -110,7 +137,7 @@ const toolInput = z.discriminatedUnion('action', [
       message: 'cv_main needs id or label.',
     }),
 ]);
-const quietActions = new Set(['setup_status', 'cv_file', 'sync']);
+const quietActions = new Set(['setup_status', 'cv_get', 'cv_file', 'sync']);
 
 type Query = Pick<PoolClient, 'query'>;
 type TurnRef = { threadId: string; turnId: string };
@@ -441,7 +468,7 @@ export function createJobs(options: {
       [
         id,
         ownerId,
-        label.parse(name ?? (artifact.name.replace(/\.[^.]+$/, '').slice(0, 80) || 'CV')),
+        cvLabel(name ?? artifact.name.replace(/\.[^.]+$/, '')) || 'CV',
         artifact.id,
         first,
       ],
@@ -489,7 +516,7 @@ export function createJobs(options: {
   async function convert(row: CvRow) {
     if (!options.startChat) throw failure('New chats are unavailable on this server.', 503);
     if (!row.artifact_id || !row.file_name) throw failure('This CV has no file to convert.', 409);
-    await options.startChat(`Convert my CV '${row.label}' for job search`, [
+    await options.startChat(conversionRequest, [
       {
         id: row.artifact_id,
         name: row.file_name,
@@ -587,7 +614,7 @@ export function createJobs(options: {
   async function savedPdf(turn: TurnRef, row: CvRow, path: string) {
     if (!options.workspace) throw failure('The workspace is unavailable.', 503);
     if (row.file_name && cvKind(row.file_name, row.file_mime ?? '') === 'application/pdf')
-      throw failure(`The CV '${row.label}' was uploaded as a PDF, and that file stays its PDF.`);
+      throw failure('This CV was uploaded as a PDF, and that file stays its PDF.');
     const base = `/workspace/${turn.threadId}`;
     const full = posix.resolve(base, await absolutePath(turn, path));
     if (!full.startsWith(`${base}/`)) throw failure('The PDF must be a file in this workspace.');
@@ -600,9 +627,7 @@ export function createJobs(options: {
   }
 
   async function sentFile(client: Query, turn: TurnRef, path: string) {
-    const id = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-/i.exec(
-      posix.basename(path),
-    )?.[1];
+    const id = attachedId(path);
     const artifact =
       id &&
       (
@@ -610,7 +635,7 @@ export function createJobs(options: {
           `SELECT a.id,a.name,a.mime_type FROM artifacts a WHERE a.id=$1 AND a.owner_id=$2 AND a.deleting_at IS NULL
            AND EXISTS (SELECT 1 FROM messages m WHERE m.owner_id=$2 AND m.thread_id=$3 AND m.role='user'
              AND m.attachments @> jsonb_build_array(jsonb_build_object('id',a.id::text)))`,
-          [id.toLowerCase(), ownerId, turn.threadId],
+          [id, ownerId, turn.threadId],
         )
       ).rows[0];
     if (!artifact)
@@ -625,11 +650,10 @@ export function createJobs(options: {
     const wanted = input.label!.toLocaleLowerCase();
     const rows = (await cvs(client)).filter((row) => row.label.toLocaleLowerCase() === wanted);
     if (rows.length === 1) return rows[0]!;
-    const names = (await cvs(client)).map((row) => `'${row.label}'`).join(', ') || 'none';
     throw failure(
       rows.length
-        ? `More than one CV is called '${input.label}'. Use its id from setup_status.`
-        : `No CV is called '${input.label}'. The CVs are: ${names}.`,
+        ? 'More than one CV has that label. Use its id from setup_status.'
+        : 'No CV has that label. Read setup_status for the CVs and their ids.',
       404,
     );
   }
@@ -659,6 +683,18 @@ export function createJobs(options: {
         }
         case 'sync':
           return sync(turn, Boolean(request.force), signal);
+        case 'cv_get': {
+          const id = request.workspaceFile ? attachedId(request.workspaceFile) : undefined;
+          const row = request.id
+            ? await oneCv(pool, request.id)
+            : (await cvs(pool)).find((entry) => id && entry.artifact_id === id);
+          if (!row)
+            throw failure(
+              'No CV uses that file. Read setup_status for the CVs, or add the file with cv_add.',
+              404,
+            );
+          return cvView(row);
+        }
         case 'cv_file': {
           if (!options.workspace) throw failure('The workspace is unavailable.', 503);
           const row = request.id
@@ -671,7 +707,7 @@ export function createJobs(options: {
           const pdf = cvView(row).pdf;
           if (!pdf)
             throw failure(
-              `The CV '${row.label}' has no PDF yet. Make one from its markdown as the job-search guide's cv-pdf reference describes, then save it with cv_save pdfFile.`,
+              "This CV has no PDF yet. Make one from its markdown as the job-search guide's cv-pdf reference describes, then save it with cv_save pdfFile.",
             );
           const name = fileName(
             pdf.name.toLowerCase().endsWith('.pdf')
@@ -779,7 +815,7 @@ export function createJobs(options: {
         ).rows[0];
         if (!artifact) throw failure('The upload is unavailable. Choose the file again.');
         const { row, added } = await addCv(client, artifact, input.label);
-        if (!added) throw failure(`This file is already the CV '${row.label}'.`, 409);
+        if (!added) throw failure('This file is already in your CVs.', 409);
         return row;
       });
       changed();
