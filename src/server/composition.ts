@@ -1159,15 +1159,13 @@ async function initializeApplication(
           }
         : {}),
     },
-    startChat: async (text, attachments) => {
+    startChat: async (text, attachments, sessionId) => {
       if (!adapters.model.configured)
         throw Object.assign(
           new Error('Configure an agent provider before starting a conversation.'),
           { statusCode: 503 },
         );
-      const sessionId = randomUUID();
-      await userMessages.submit(text, attachments, { channel: 'web', sessionId });
-      return { sessionId };
+      return userMessages.submit(text, attachments, { channel: 'web', sessionId });
     },
     withTurnLock: (turnId, operation) => withTurnLock(turnId, operation),
     changed: () => jobsChanged(ownerId),
@@ -1546,7 +1544,9 @@ async function initializeApplication(
         action.startsWith('NOD_memory_') ||
         action === 'NOD_notification_preferences_update';
       if (action === 'NOD_jobs_limits_update') {
-        const result = await withTurnLock(turnLock, (client) => jobs.applyLimits(args, client));
+        const result = await withTurnLock(turnLock, (client) =>
+          jobs.applyLimits(args, client, provenance.details?.current),
+        );
         await ledger.action(
           provenance.turnId,
           action,

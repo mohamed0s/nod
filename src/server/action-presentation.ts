@@ -368,6 +368,20 @@ export function actionTarget(
       ]
         .filter(Boolean)
         .join(', ');
+    if (action === 'NOD_jobs_limits_update') {
+      const invites = (args.inviteLimits ?? {}) as { daily?: unknown; weekly?: unknown };
+      const luck = (args.noLuck ?? {}) as { noAcceptDays?: unknown; noReplyDays?: unknown };
+      return [
+        invites.daily !== undefined && `daily invites ${String(invites.daily)}`,
+        invites.weekly !== undefined && `weekly invites ${String(invites.weekly)}`,
+        luck.noAcceptDays !== undefined &&
+          `no luck after ${String(luck.noAcceptDays)} days without an accept`,
+        luck.noReplyDays !== undefined &&
+          `no luck after ${String(luck.noReplyDays)} days without a reply`,
+      ]
+        .filter(Boolean)
+        .join(', ');
+    }
     if (action === 'NOD_notification_preferences_update')
       return [...new Set(Object.keys(args).map((key) => settingNames[key] ?? key))].join(', ');
     if (action.startsWith('LOCAL_FILES_'))

@@ -29,6 +29,7 @@ import {
 import type { ArtifactService } from './artifacts.ts';
 import { careerOpsFiles } from './jobs-files.ts';
 import { lockKey } from './locks.ts';
+import { withdrawnSql } from './turn-chain.ts';
 import { afterCommit, transaction } from './transaction.ts';
 
 export const jobTables = `
@@ -59,6 +60,7 @@ export const jobTables = `
     actor text NOT NULL CHECK (actor IN ('owner','nod')), created_at timestamptz NOT NULL DEFAULT now()
   );
   CREATE INDEX IF NOT EXISTS job_revisions_owner ON job_revisions(owner_id,kind,cv_id,created_at DESC);
+  ALTER TABLE job_cvs ADD COLUMN IF NOT EXISTS conversion_started_at timestamptz;
 `;
 
 export const exampleTemplates: JobTemplate[] = [
@@ -90,11 +92,33 @@ export function cvLabel(value: string) {
 
 export const jobLimitsInput = z
   .object({
-    inviteLimits: jobProfileFields.inviteLimits.optional(),
-    noLuck: jobProfileFields.noLuck.optional(),
+    inviteLimits: jobProfileFields.inviteLimits.partial().optional(),
+    noLuck: jobProfileFields.noLuck.partial().optional(),
   })
-  .strict();
+  .strict()
+  .refine((value) => value.inviteLimits !== undefined || value.noLuck !== undefined, {
+    message: 'A limits change needs inviteLimits, noLuck or both.',
+  });
 type JobLimits = z.infer<typeof jobLimitsInput>;
+type JobLimitValues = Pick<JobProfile, 'inviteLimits' | 'noLuck'>;
+
+const liveLimits = (profile: JobProfile): JobLimitValues => ({
+  inviteLimits: profile.inviteLimits,
+  noLuck: profile.noLuck,
+});
+
+function limitsKey(value: unknown) {
+  const limits = (value ?? {}) as Partial<{
+    inviteLimits: Partial<JobLimitValues['inviteLimits']>;
+    noLuck: Partial<JobLimitValues['noLuck']>;
+  }>;
+  return JSON.stringify([
+    limits.inviteLimits?.daily,
+    limits.inviteLimits?.weekly,
+    limits.noLuck?.noAcceptDays,
+    limits.noLuck?.noReplyDays,
+  ]);
+}
 
 const folder = 'shared/career-ops';
 const keptRevisions = 20;
@@ -132,14 +156,12 @@ const toolInput = z.discriminatedUnion('action', [
       id: z.uuid(),
       markdown: markdown.optional(),
       pdf: z.literal(true).optional(),
-      revision: z.int().min(1).optional(),
+      revision: z.int().min(0),
     })
     .strict()
     .refine((value) => (value.markdown === undefined) !== (value.pdf === undefined), {
-      message: 'cv_save takes markdown, or pdf:true with the revision the PDF was made from.',
-    })
-    .refine((value) => !value.pdf || value.revision !== undefined, {
-      message: 'cv_save pdf:true needs the revision of the text the PDF was made from.',
+      message:
+        'cv_save takes markdown with the revision it read, or pdf:true with the revision the PDF was made from.',
     }),
   z
     .object({
@@ -276,7 +298,7 @@ export function createJobs(options: {
     read(threadId: string, path: string, maxBytes: number): Promise<Uint8Array>;
     remove?(threadId: string, path: string, signal?: AbortSignal): Promise<void>;
   };
-  startChat?: (text: string, attachments: Artifact[]) => Promise<{ sessionId: string } | void>;
+  startChat?: (text: string, attachments: Artifact[], sessionId: string) => Promise<unknown>;
   withTurnLock?: <T>(turnId: string, operation: (client: PoolClient) => Promise<T>) => Promise<T>;
   changed?: () => void;
 }) {
@@ -301,7 +323,11 @@ export function createJobs(options: {
   async function cvs(client: Query, filter: { id?: string; archived?: boolean } = {}) {
     const { rows } = await client.query<CvRow>(
       `SELECT c.*,a.name AS file_name,a.mime_type AS file_mime,p.name AS pdf_name,
-         EXISTS(SELECT 1 FROM tasks t WHERE t.owner_id=c.owner_id AND t.id=c.conversion_session AND t.state='open') AS converting
+         (c.conversion_session IS NOT NULL AND (
+           EXISTS(SELECT 1 FROM tasks t WHERE t.owner_id=c.owner_id AND t.id=c.conversion_session AND t.state='open')
+           OR (c.conversion_started_at>now()-interval '2 minutes'
+             AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.owner_id=c.owner_id AND t.id=c.conversion_session))
+         )) AS converting
        FROM job_cvs c
        LEFT JOIN artifacts a ON a.id=c.artifact_id AND a.owner_id=c.owner_id AND a.deleting_at IS NULL
        LEFT JOIN artifacts p ON p.id=c.pdf_artifact_id AND p.owner_id=c.owner_id AND p.deleting_at IS NULL
@@ -606,7 +632,9 @@ export function createJobs(options: {
     const row = await oneCv(client, id);
     if (change.revision !== undefined && change.revision !== row.revision)
       throw failure(
-        `This CV's text changed while you were editing it; it is now at version ${row.revision}. Load the newer version, then make your change again.`,
+        actor === 'owner'
+          ? `This CV's text changed while you were editing it; it is now at version ${row.revision}. Load the newer version, then make your change again.`
+          : `This CV's text changed after you read it; it is now at version ${row.revision}. Read it again with cv_get, then save your change against that version.`,
         409,
       );
     if (change.label !== undefined && change.label !== row.label)
@@ -627,31 +655,48 @@ export function createJobs(options: {
     return oneCv(client, row.id);
   }
 
-  async function convert(client: Query, row: CvRow) {
-    if (!options.startChat) throw failure('New chats are unavailable on this server.', 503);
-    if (!row.artifact_id || !row.file_name) throw failure('This CV has no file to convert.', 409);
-    if (row.converting) throw failure('This CV is already being converted in its own chat.', 409);
+  async function convert(id: string) {
+    const start = options.startChat;
+    if (!start) throw failure('New chats are unavailable on this server.', 503);
+    const sessionId = randomUUID();
+    const row = await owned(async (client) => {
+      const row = await oneCv(client, id);
+      if (!row.artifact_id || !row.file_name) throw failure('This CV has no file to convert.', 409);
+      if (row.converting) throw failure('This CV is already being converted in its own chat.', 409);
+      await client.query(
+        'UPDATE job_cvs SET conversion_session=$3,conversion_started_at=now() WHERE id=$1 AND owner_id=$2',
+        [row.id, ownerId, sessionId],
+      );
+      return row;
+    });
     const size = (
-      await client.query<{ size: number }>(
-        'SELECT size FROM artifacts WHERE id=$1 AND owner_id=$2',
-        [row.artifact_id, ownerId],
-      )
-    ).rows[0]!.size;
-    const started = await options.startChat(conversionRequest, [
-      {
-        id: row.artifact_id,
-        name: row.file_name,
-        mimeType: row.file_mime ?? 'application/octet-stream',
-        size,
-        url: `/api/artifacts/${row.artifact_id}`,
-      },
-    ]);
-    if (started)
-      await pool.query('UPDATE job_cvs SET conversion_session=$3 WHERE id=$1 AND owner_id=$2', [
-        row.id,
+      await pool.query<{ size: number }>('SELECT size FROM artifacts WHERE id=$1 AND owner_id=$2', [
+        row.artifact_id,
         ownerId,
-        started.sessionId,
-      ]);
+      ])
+    ).rows[0]!.size;
+    try {
+      await start(
+        conversionRequest,
+        [
+          {
+            id: row.artifact_id!,
+            name: row.file_name!,
+            mimeType: row.file_mime ?? 'application/octet-stream',
+            size,
+            url: `/api/artifacts/${row.artifact_id}`,
+          },
+        ],
+        sessionId,
+      );
+    } catch (error) {
+      await pool.query(
+        `UPDATE job_cvs SET conversion_session=NULL,conversion_started_at=NULL
+         WHERE id=$1 AND owner_id=$2 AND conversion_session=$3`,
+        [row.id, ownerId, sessionId],
+      );
+      throw error;
+    }
   }
 
   async function sync(turn: TurnRef, force: boolean, signal?: AbortSignal) {
@@ -764,7 +809,8 @@ export function createJobs(options: {
         await client.query<{ id: string; name: string; mime_type: string }>(
           `SELECT a.id,a.name,a.mime_type FROM artifacts a WHERE a.id=$1 AND a.owner_id=$2 AND a.deleting_at IS NULL
            AND EXISTS (SELECT 1 FROM messages m WHERE m.owner_id=$2 AND m.thread_id=$3 AND m.role='user'
-             AND m.attachments @> jsonb_build_array(jsonb_build_object('id',a.id::text)))`,
+             AND m.attachments @> jsonb_build_array(jsonb_build_object('id',a.id::text))
+             AND NOT ${withdrawnSql('m')})`,
           [id, ownerId, turn.threadId],
         )
       ).rows[0];
@@ -788,10 +834,15 @@ export function createJobs(options: {
     );
   }
 
-  async function applyLimits(raw: unknown, client: PoolClient) {
+  async function applyLimits(raw: unknown, client: PoolClient, expected: unknown) {
     const input = parse(jobLimitsInput, raw, 'The job search limits');
     await lock(client);
     const current = await profileState(client);
+    if (limitsKey(liveLimits(current.profile)) !== limitsKey(expected))
+      throw Object.assign(
+        failure('The job search limits changed after Nod asked. Ask again.', 409),
+        { notRun: true },
+      );
     const profile = parse(jobProfileSchema, merged(current.profile, input), 'The job profile');
     const revision = await saveProfile(client, { profile }, 'nod');
     afterCommit(client, changed);
@@ -801,13 +852,13 @@ export function createJobs(options: {
   async function updateProfile(
     turn: TurnRef,
     request: { profile?: z.infer<typeof jobProfilePatch>; portals?: Record<string, unknown> },
-    review?: (input: JobLimits, current: JobLimits) => Promise<unknown>,
+    review?: (input: JobLimits, current: JobLimitValues) => Promise<unknown>,
   ) {
     const patch = { ...request.profile };
-    const limits: JobLimits = {};
+    const asked: Record<string, Record<string, number>> = {};
     for (const key of jobLimitFields)
       if (patch[key] !== undefined) {
-        limits[key] = patch[key] as never;
+        asked[key] = patch[key] as Record<string, number>;
         delete patch[key];
       }
     const saved = await turnWrite(turn, async (client) => {
@@ -816,9 +867,11 @@ export function createJobs(options: {
       const profile = parse(jobProfileSchema, merged(current.profile, patch), 'The job profile');
       const change = Object.fromEntries(
         jobLimitFields.flatMap((key) => {
-          if (!limits[key]) return [];
-          const value = { ...current.profile[key], ...limits[key] };
-          return same(value, current.profile[key]) ? [] : [[key, value]];
+          const now = current.profile[key] as Record<string, number>;
+          const fields = Object.entries(asked[key] ?? {}).filter(
+            ([name, value]) => now[name] !== value,
+          );
+          return fields.length ? [[key, Object.fromEntries(fields)]] : [];
         }),
       ) as JobLimits;
       if (Object.keys(change).length && !review)
@@ -830,22 +883,20 @@ export function createJobs(options: {
         Object.keys(patch).length || request.portals
           ? await saveProfile(client, { profile, portals: request.portals }, 'nod')
           : current.revision;
-      return {
-        revision,
-        profile,
-        change,
-        current: { inviteLimits: current.profile.inviteLimits, noLuck: current.profile.noLuck },
-      };
+      return { revision, change, current: liveLimits(current.profile) };
     });
-    if (!Object.keys(saved.change).length || !review)
-      return { value: { revision: saved.revision, profile: saved.profile } };
+    const reply = async (extra: Record<string, unknown> = {}) => {
+      const { profile, revision } = await profileState(pool);
+      return { value: { revision, profile, ...extra } };
+    };
+    if (!Object.keys(saved.change).length || !review) return reply();
     const reviewed = await review(
       parse(jobLimitsInput, saved.change, 'The job search limits'),
       saved.current,
     );
     if (reviewed && typeof reviewed === 'object' && appConfirmation in reviewed)
       return { confirmation: reviewed };
-    return { value: { revision: saved.revision, profile: saved.profile, limits: reviewed } };
+    return reply({ limits: reviewed });
   }
 
   async function execute(
@@ -853,7 +904,7 @@ export function createJobs(options: {
     raw: unknown,
     context: {
       signal?: AbortSignal;
-      reviewLimits?: (input: JobLimits, current: JobLimits) => Promise<unknown>;
+      reviewLimits?: (input: JobLimits, current: JobLimitValues) => Promise<unknown>;
     } = {},
   ) {
     const request = parse(toolInput, raw, 'The jobs request');
@@ -924,18 +975,22 @@ export function createJobs(options: {
           };
         }
         case 'cv_save': {
-          if (request.pdf) return withoutText(await savePdf(turn, request.id, request.revision!));
+          if (request.pdf) return withoutText(await savePdf(turn, request.id, request.revision));
           return withoutText(
             await turnWrite(turn, async (client) => {
               await ownerOnly(client, turn, "change a CV's text");
-              return editCv(client, request.id, { markdown: request.markdown }, 'nod');
+              return editCv(
+                client,
+                request.id,
+                { markdown: request.markdown, revision: request.revision },
+                'nod',
+              );
             }),
           );
         }
         case 'profile_update': {
           const outcome = await updateProfile(turn, request, context.reviewLimits);
-          if (outcome.confirmation) return outcome.confirmation;
-          return outcome.value;
+          return 'confirmation' in outcome ? outcome.confirmation : outcome.value;
         }
         case 'cv_add': {
           const { row, added } = await turnWrite(turn, async (client) => {
@@ -962,8 +1017,8 @@ export function createJobs(options: {
       }
     };
     const value = await result();
-    if (value && typeof value === 'object' && appConfirmation in value) return value;
     if (!quietActions.has(request.action)) changed();
+    if (value && typeof value === 'object' && appConfirmation in value) return value;
     return untrustedBlock('job search records', JSON.stringify(value));
   }
 
@@ -992,7 +1047,7 @@ export function createJobs(options: {
       });
       let conversion: 'started' | string = 'started';
       try {
-        await convert(pool, row);
+        await convert(row.id);
       } catch (error) {
         conversion = error instanceof Error ? error.message : String(error);
       }
@@ -1000,7 +1055,7 @@ export function createJobs(options: {
       return { cv: cvView((await cvs(pool, { id: row.id }))[0] ?? row), conversion };
     });
     app.post<{ Params: { id: string } }>('/api/jobs/cvs/:id/convert', async (request) => {
-      await convert(pool, await oneCv(pool, request.params.id));
+      await convert(request.params.id);
       changed();
       return { ok: true };
     });
