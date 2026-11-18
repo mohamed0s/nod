@@ -1545,6 +1545,16 @@ async function initializeApplication(
         action === 'NOD_model_select' ||
         action.startsWith('NOD_memory_') ||
         action === 'NOD_notification_preferences_update';
+      if (action === 'NOD_jobs_limits_update') {
+        const result = await withTurnLock(turnLock, (client) => jobs.applyLimits(args, client));
+        await ledger.action(
+          provenance.turnId,
+          action,
+          provenance.basis ?? { kind: 'approved' },
+          actionTarget(action, args, provenance.details),
+        );
+        return result;
+      }
       const result = await (action === 'NOD_browser'
         ? replayBrowserStep(args, provenance)
         : action === 'NOD_vault_allow'
@@ -1557,202 +1567,193 @@ async function initializeApplication(
               )
             : action === 'NOD_limits_update'
               ? withTurnLock(turnLock, (client) => ledger.setLimits(args, 'agent', client))
-              : action === 'NOD_jobs_limits_update'
-                ? withTurnLock(turnLock, (client) => jobs.applyLimits(args, client))
-                : scheduleWrite
-                  ? transaction(
-                      async (client) => {
-                        if ((await lockThread(client)).id !== provenance.threadId)
-                          throw Object.assign(
-                            new Error('The instruction conversation is no longer active.'),
-                            { notRun: true },
-                          );
-                        return withTurnLock(
-                          turnLock,
-                          (locked) =>
-                            personal.manage(action.slice('NOD_'.length), args, provenance, {
-                              client: locked,
-                            }),
-                          client,
+              : scheduleWrite
+                ? transaction(
+                    async (client) => {
+                      if ((await lockThread(client)).id !== provenance.threadId)
+                        throw Object.assign(
+                          new Error('The instruction conversation is no longer active.'),
+                          { notRun: true },
                         );
-                      },
-                      pool,
-                      provenance.signal,
+                      return withTurnLock(
+                        turnLock,
+                        (locked) =>
+                          personal.manage(action.slice('NOD_'.length), args, provenance, {
+                            client: locked,
+                          }),
+                        client,
+                      );
+                    },
+                    pool,
+                    provenance.signal,
+                  )
+                : lockedWrite
+                  ? withTurnLock(turnLock, (client) =>
+                      personal.manage(action.slice('NOD_'.length), args, provenance, {
+                        client,
+                        ...(provenance.details?.currentNotificationRule === undefined
+                          ? {}
+                          : {
+                              expectedNotificationRule: String(
+                                provenance.details.currentNotificationRule,
+                              ),
+                            }),
+                        ...(provenance.details?.currentRules === undefined
+                          ? {}
+                          : { expectedRules: String(provenance.details.currentRules) }),
+                      }),
                     )
-                  : lockedWrite
-                    ? withTurnLock(turnLock, (client) =>
-                        personal.manage(action.slice('NOD_'.length), args, provenance, {
-                          client,
-                          ...(provenance.details?.currentNotificationRule === undefined
-                            ? {}
-                            : {
-                                expectedNotificationRule: String(
-                                  provenance.details.currentNotificationRule,
+                  : action.startsWith('NOD_')
+                    ? personal.manage(action.slice('NOD_'.length), args, provenance)
+                    : (async () => {
+                        integrations.serviceWait('action', action);
+                        const savedBinding = provenance.details?.verifiedBinding;
+                        const verifiedBinding =
+                          typeof savedBinding === 'string' ? savedBinding : undefined;
+                        if (action === 'GMAIL_DELETE_MESSAGE' || action === 'GMAIL_DELETE_DRAFT') {
+                          const currentBinding = await integrations
+                            .binding(String(args.connectionId ?? ''))
+                            .catch((error: unknown) => {
+                              throw Object.assign(
+                                new Error(
+                                  `Nod could not check the selected Gmail account for deletion: ${safeIntegrationFailure(error)}`,
                                 ),
-                              }),
-                          ...(provenance.details?.currentRules === undefined
-                            ? {}
-                            : { expectedRules: String(provenance.details.currentRules) }),
-                        }),
-                      )
-                    : action.startsWith('NOD_')
-                      ? personal.manage(action.slice('NOD_'.length), args, provenance)
-                      : (async () => {
-                          integrations.serviceWait('action', action);
-                          const savedBinding = provenance.details?.verifiedBinding;
-                          const verifiedBinding =
-                            typeof savedBinding === 'string' ? savedBinding : undefined;
-                          if (
-                            action === 'GMAIL_DELETE_MESSAGE' ||
-                            action === 'GMAIL_DELETE_DRAFT'
-                          ) {
-                            const currentBinding = await integrations
-                              .binding(String(args.connectionId ?? ''))
+                                { notRun: true },
+                              );
+                            });
+                          if (!verifiedBinding || currentBinding !== verifiedBinding)
+                            throw Object.assign(
+                              new Error('The selected Gmail account changed after confirmation.'),
+                              { notRun: true },
+                            );
+                          if (action === 'GMAIL_DELETE_DRAFT') {
+                            const draftId = args.draft_id;
+                            const savedMessageId = provenance.details?.verifiedDraftMessageId;
+                            if (
+                              typeof draftId !== 'string' ||
+                              !draftId.trim() ||
+                              typeof savedMessageId !== 'string' ||
+                              !savedMessageId.trim()
+                            )
+                              throw Object.assign(
+                                new Error(
+                                  'The Gmail draft confirmation is missing its verified target.',
+                                ),
+                                { notRun: true },
+                              );
+                            const readArgs = {
+                              connectionId: args.connectionId,
+                              draft_id: draftId,
+                              format: 'metadata',
+                              ...(typeof args.user_id === 'string'
+                                ? { user_id: args.user_id }
+                                : {}),
+                            };
+                            const readVerdict = await trust
+                              .check(
+                                { threadId: provenance.threadId, turnId: provenance.turnId },
+                                'GMAIL_GET_DRAFT',
+                                readArgs,
+                                provenance.signal,
+                              )
                               .catch((error: unknown) => {
                                 throw Object.assign(
                                   new Error(
-                                    `Nod could not check the selected Gmail account for deletion: ${safeIntegrationFailure(error)}`,
+                                    `Nod could not recheck permission to read the Gmail draft before deletion: ${safeIntegrationFailure(error)}`,
                                   ),
                                   { notRun: true },
                                 );
                               });
-                            if (!verifiedBinding || currentBinding !== verifiedBinding)
+                            if (readVerdict.confirm)
                               throw Object.assign(
-                                new Error('The selected Gmail account changed after confirmation.'),
+                                new Error(
+                                  'Nod could not authorize a fresh Gmail draft read before deletion.',
+                                ),
                                 { notRun: true },
                               );
-                            if (action === 'GMAIL_DELETE_DRAFT') {
-                              const draftId = args.draft_id;
-                              const savedMessageId = provenance.details?.verifiedDraftMessageId;
-                              if (
-                                typeof draftId !== 'string' ||
-                                !draftId.trim() ||
-                                typeof savedMessageId !== 'string' ||
-                                !savedMessageId.trim()
+                            const current = await integrations
+                              .execute(
+                                ownerId,
+                                'GMAIL_GET_DRAFT',
+                                readArgs,
+                                { threadId: provenance.threadId, turnId: provenance.turnId },
+                                provenance.signal,
+                                verifiedBinding,
+                                'read',
                               )
+                              .catch((error: unknown) => {
                                 throw Object.assign(
                                   new Error(
-                                    'The Gmail draft confirmation is missing its verified target.',
+                                    `Nod could not recheck the Gmail draft before deletion: ${safeIntegrationFailure(error)}`,
                                   ),
                                   { notRun: true },
                                 );
-                              const readArgs = {
-                                connectionId: args.connectionId,
-                                draft_id: draftId,
-                                format: 'metadata',
-                                ...(typeof args.user_id === 'string'
-                                  ? { user_id: args.user_id }
-                                  : {}),
-                              };
-                              const readVerdict = await trust
-                                .check(
-                                  { threadId: provenance.threadId, turnId: provenance.turnId },
-                                  'GMAIL_GET_DRAFT',
-                                  readArgs,
-                                  provenance.signal,
-                                )
-                                .catch((error: unknown) => {
-                                  throw Object.assign(
-                                    new Error(
-                                      `Nod could not recheck permission to read the Gmail draft before deletion: ${safeIntegrationFailure(error)}`,
-                                    ),
-                                    { notRun: true },
-                                  );
-                                });
-                              if (readVerdict.confirm)
+                              });
+                            await ledger
+                              .action(provenance.turnId, 'GMAIL_GET_DRAFT', readVerdict.basis)
+                              .catch((error: unknown) => {
                                 throw Object.assign(
                                   new Error(
-                                    'Nod could not authorize a fresh Gmail draft read before deletion.',
+                                    `Nod could not record the Gmail draft read before deletion: ${safeIntegrationFailure(error)}`,
                                   ),
                                   { notRun: true },
                                 );
-                              const current = await integrations
-                                .execute(
-                                  ownerId,
-                                  'GMAIL_GET_DRAFT',
-                                  readArgs,
-                                  { threadId: provenance.threadId, turnId: provenance.turnId },
-                                  provenance.signal,
-                                  verifiedBinding,
-                                  'read',
-                                )
-                                .catch((error: unknown) => {
-                                  throw Object.assign(
-                                    new Error(
-                                      `Nod could not recheck the Gmail draft before deletion: ${safeIntegrationFailure(error)}`,
-                                    ),
-                                    { notRun: true },
-                                  );
-                                });
-                              await ledger
-                                .action(provenance.turnId, 'GMAIL_GET_DRAFT', readVerdict.basis)
-                                .catch((error: unknown) => {
-                                  throw Object.assign(
-                                    new Error(
-                                      `Nod could not record the Gmail draft read before deletion: ${safeIntegrationFailure(error)}`,
-                                    ),
-                                    { notRun: true },
-                                  );
-                                });
-                              const currentTarget = gmailDraftTarget(current, draftId);
-                              if (!currentTarget)
-                                throw Object.assign(
-                                  new Error(
-                                    'Nod could not verify the Gmail draft before deletion. Ask again before deleting it.',
-                                  ),
-                                  { notRun: true },
-                                );
-                              if (currentTarget.messageId !== savedMessageId)
-                                throw Object.assign(
-                                  new Error(
-                                    'The Gmail draft changed after confirmation. Ask again before deleting it.',
-                                  ),
-                                  { notRun: true },
-                                );
-                            }
+                              });
+                            const currentTarget = gmailDraftTarget(current, draftId);
+                            if (!currentTarget)
+                              throw Object.assign(
+                                new Error(
+                                  'Nod could not verify the Gmail draft before deletion. Ask again before deleting it.',
+                                ),
+                                { notRun: true },
+                              );
+                            if (currentTarget.messageId !== savedMessageId)
+                              throw Object.assign(
+                                new Error(
+                                  'The Gmail draft changed after confirmation. Ask again before deleting it.',
+                                ),
+                                { notRun: true },
+                              );
                           }
-                          const turn = { threadId: provenance.threadId, turnId: provenance.turnId };
-                          const ready = hasWorkspaceFiles(args)
-                            ? await integrations
-                                .prepare(ownerId, action, args, turn, provenance.signal)
-                                .catch((error: unknown) => {
-                                  throw Object.assign(
-                                    error instanceof Error ? error : new Error(String(error)),
-                                    { notRun: true },
-                                  );
-                                })
-                            : args;
-                          const result = await integrations.executeApproved(
-                            ownerId,
-                            action,
-                            ready,
-                            turn,
-                            provenance.signal,
-                            action === 'GMAIL_DELETE_MESSAGE' || action === 'GMAIL_DELETE_DRAFT'
-                              ? verifiedBinding
-                              : undefined,
-                          );
-                          await ledger.action(
-                            provenance.turnId,
-                            action,
-                            provenance.basis ?? { kind: 'approved' },
-                            actionTarget(action, args, provenance.details),
-                          );
-                          return privateEmailResult(
-                            (
-                              await saveIntegrationFiles(result, async (file) => {
-                                const name = `${randomUUID()}-${basename(file.name)}`;
-                                await workspace.writeArtifact(
-                                  provenance.threadId,
-                                  name,
-                                  file.bytes,
+                        }
+                        const turn = { threadId: provenance.threadId, turnId: provenance.turnId };
+                        const ready = hasWorkspaceFiles(args)
+                          ? await integrations
+                              .prepare(ownerId, action, args, turn, provenance.signal)
+                              .catch((error: unknown) => {
+                                throw Object.assign(
+                                  error instanceof Error ? error : new Error(String(error)),
+                                  { notRun: true },
                                 );
-                                return name;
                               })
-                            ).value,
-                            mailCheck,
-                          );
-                        })());
+                          : args;
+                        const result = await integrations.executeApproved(
+                          ownerId,
+                          action,
+                          ready,
+                          turn,
+                          provenance.signal,
+                          action === 'GMAIL_DELETE_MESSAGE' || action === 'GMAIL_DELETE_DRAFT'
+                            ? verifiedBinding
+                            : undefined,
+                        );
+                        await ledger.action(
+                          provenance.turnId,
+                          action,
+                          provenance.basis ?? { kind: 'approved' },
+                          actionTarget(action, args, provenance.details),
+                        );
+                        return privateEmailResult(
+                          (
+                            await saveIntegrationFiles(result, async (file) => {
+                              const name = `${randomUUID()}-${basename(file.name)}`;
+                              await workspace.writeArtifact(provenance.threadId, name, file.bytes);
+                              return name;
+                            })
+                          ).value,
+                          mailCheck,
+                        );
+                      })());
       if (action.startsWith('NOD_') && action !== 'NOD_vault_allow')
         await ledger.action(
           provenance.turnId,
