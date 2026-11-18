@@ -15,4 +15,3 @@ PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright node node_modules/playwright/cli.js 
 rm -rf /root/.npm /root/.cache /var/lib/apt/lists/*
 chown -R root:root /opt/career-ops /opt/ms-playwright
 chmod -R a+rX,go-w /opt/career-ops /opt/ms-playwright
-install -m 555 "$here/career-ops" /usr/local/bin/career-ops
