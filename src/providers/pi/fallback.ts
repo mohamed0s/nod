@@ -80,6 +80,7 @@ export function createTurnFallback(options: {
   let at = Math.min(options.start, candidates.length - 1);
   let failures = 0;
   const handled = new WeakSet<AssistantMessage>();
+  const unsent = new WeakSet<AssistantMessage>();
   let wait = 0;
   let exhausted = false;
   let failed = at;
@@ -197,6 +198,7 @@ export function createTurnFallback(options: {
       };
       void (async () => {
         let result: AssistantMessage;
+        let sent = false;
         try {
           if (wait) {
             const delay = wait;
@@ -207,6 +209,7 @@ export function createTurnFallback(options: {
             index = next;
             model = chosen;
           });
+          sent = true;
           for await (const event of upstream) {
             if (event.type === 'done') finish(event.message);
             if (event.type === 'error') finish(event.error);
@@ -216,6 +219,7 @@ export function createTurnFallback(options: {
           finish(result);
         } catch (error) {
           result = failedRequest(model, error, Boolean(streamOptions?.signal?.aborted));
+          if (!sent) unsent.add(result);
           finish(result);
           out.push({
             type: 'error',
@@ -227,6 +231,7 @@ export function createTurnFallback(options: {
       })();
       return out;
     },
+    sent: (message: AssistantMessage) => !unsent.has(message),
     retries(message: AssistantMessage) {
       return handled.has(message) && unavailable(message) ? !exhausted : undefined;
     },

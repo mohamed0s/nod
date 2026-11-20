@@ -1350,7 +1350,7 @@ export function createPiAgent(options: {
             settings.applyOverrides({ compaction: { keepRecentTokens: 0 } });
           }
           const usage = observeUsage(event.message);
-          if (usage) input.onEvent(usage);
+          if (usage && fallback?.sent(event.message) !== false) input.onEvent(usage);
           if (event.message.stopReason === 'error')
             input.onEvent({
               type: 'error',

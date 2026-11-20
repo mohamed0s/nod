@@ -9527,6 +9527,46 @@ test('a busy work model hands the same request to a backup and records each atte
     requests.map(({ model }) => model),
     ['fixture-primary'],
   );
+  assert.deepEqual(
+    stopped.events.flatMap((event) => (event.type === 'model_usage' ? [event.status] : [])),
+    ['failed'],
+  );
+
+  requests.length = 0;
+  answers['fixture-primary'] = () => ({ status: 429, headers: { 'retry-after-ms': '5' } });
+  const tiny = access('fixture-tiny');
+  tiny.definition = {
+    choice: { ...tiny.definition.choice, contextWindow: 64 },
+    spec: { ...tiny.definition.spec, contextWindow: 64, maxTokens: 32 },
+  };
+  const small = createPiAgent({
+    provider: 'compatible',
+    resolve: async () => [access('fixture-primary'), tiny],
+    sessionRoot: directory,
+  });
+  t.after(() => small.dispose());
+  const skipped: AgentEvent[] = [];
+  const unsent = await small.open({
+    ...fakeExecution(randomUUID()),
+    ...sandbox,
+    systemPrompt: 'Synthetic fixture',
+    tools: [],
+    shouldStop: () => false,
+    onEvent: (event) => skipped.push(event),
+  });
+  await unsent.prompt('Synthetic question.', []);
+  await unsent.dispose();
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-primary', 'fixture-primary'],
+  );
+  assert.deepEqual(
+    skipped.flatMap((event) => (event.type === 'model_usage' ? [event.model] : [])),
+    ['fixture-primary', 'fixture-primary'],
+  );
+  const reason = skipped.filter((event) => event.type === 'error').at(-1);
+  assert.ok(reason?.type === 'error');
+  assert.match(reason.message, /fixture-tiny can't take this conversation/);
 });
 
 test('action review failures identify the task, model, provider, and bounded provider reason', async (t) => {
