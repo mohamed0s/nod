@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import type { Artifact } from '../../shared/contracts';
 import {
   jobPlaceholders,
+  unknownPlaceholders,
   type JobCv,
   type JobProfile,
   type JobProfileView,
@@ -43,6 +44,79 @@ const lines = (value: string) =>
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean);
+
+const languageOptions = [
+  'en',
+  'ar',
+  'ar-EG',
+  'fr',
+  'de',
+  'es',
+  'pt',
+  'it',
+  'nl',
+  'tr',
+  'ru',
+  'hi',
+  'ur',
+  'zh',
+  'ja',
+];
+const languageNames = new Intl.DisplayNames(['en'], { type: 'language' });
+const languageName = (tag: string) => {
+  try {
+    return languageNames.of(tag) ?? tag;
+  } catch {
+    return tag;
+  }
+};
+const rtlLanguages = new Set(['ar', 'ckb', 'dv', 'fa', 'he', 'ps', 'sd', 'ug', 'ur', 'yi']);
+const textDirection = (tag: string) =>
+  !tag.trim() ? 'auto' : rtlLanguages.has(tag.trim().split('-')[0]!.toLowerCase()) ? 'rtl' : 'ltr';
+
+function languageSelect(
+  value: string,
+  custom: boolean,
+  taken: string[],
+  onPick: (tag: string | null) => void,
+) {
+  return (
+    <select
+      className="input"
+      value={custom ? 'other' : value}
+      onChange={(event) => onPick(event.target.value === 'other' ? null : event.target.value)}
+    >
+      {!custom && !languageOptions.includes(value) && (
+        <option value={value} disabled>
+          {value ? languageName(value) : 'Choose a language'}
+        </option>
+      )}
+      {languageOptions.map((tag) => (
+        <option key={tag} value={tag} disabled={taken.includes(tag)}>
+          {languageName(tag)}
+        </option>
+      ))}
+      <option value="other">Other language…</option>
+    </select>
+  );
+}
+
+const placeholderLabels: Record<(typeof jobPlaceholders)[number], string> = {
+  greeting: 'Greeting',
+  first_name: 'First name',
+  company: 'Company',
+  programme: 'Programme',
+  track: 'Track',
+  role: 'Role',
+  my_name: 'My name',
+  my_intro: 'My intro',
+};
+
+const greetingFields = [
+  { key: 'morning', label: 'Morning greeting' },
+  { key: 'evening', label: 'Evening greeting' },
+  { key: 'default', label: 'Any time' },
+] as const;
 
 function Checklist({ setup }: { setup: JobSetup }) {
   if (setup.items.every((item) => item.done)) return null;
@@ -218,6 +292,7 @@ function CvCard({ cv }: { cv: JobCv }) {
           <Field label="CV text" hint="Markdown. Nod uses this text for scoring and messages.">
             <textarea
               className="input jobs-markdown"
+              dir="auto"
               value={editing.markdown}
               onChange={(event) => setEditing({ ...editing, markdown: event.target.value })}
             />
@@ -499,9 +574,13 @@ function Profile() {
   const [saving, setSaving] = useState(false);
   const [history, setHistory] = useState(false);
   const [message, setMessage] = useState<Message>(null);
+  const [otherLanguage, setOtherLanguage] = useState(false);
   if (data.error) return <Notice>Could not load your profile. {data.error}</Notice>;
   if (!state || !data.data) return <Loading label="Loading profile…" />;
   const form = state.value;
+  const customLanguage =
+    otherLanguage ||
+    (Boolean(form.languageDefault) && !languageOptions.includes(form.languageDefault));
   const field = (
     key: keyof ProfileForm,
     label: string,
@@ -511,12 +590,14 @@ function Profile() {
       {options.area ? (
         <textarea
           className="input jobs-list-input"
+          dir="auto"
           value={form[key]}
           onChange={(event) => edit({ ...form, [key]: event.target.value })}
         />
       ) : (
         <Input
           type={options.type}
+          dir={options.type ? undefined : 'auto'}
           value={form[key]}
           onChange={(event) => edit({ ...form, [key]: event.target.value })}
         />
@@ -566,7 +647,14 @@ function Profile() {
       {field('targetRoles', 'Target roles', { hint: 'One per line.', area: true })}
       {field('regions', 'Regions', { hint: 'One per line.', area: true })}
       {field('languages', 'Languages you speak', { hint: 'One per line.', area: true })}
-      {field('languageDefault', 'Message language', { hint: 'A language tag, such as en.' })}
+      <Field label="Message language" hint="Used when no country rule below matches.">
+        {languageSelect(form.languageDefault, customLanguage, [], (tag) => {
+          setOtherLanguage(tag === null);
+          if (tag !== null) edit({ ...form, languageDefault: tag });
+        })}
+      </Field>
+      {customLanguage &&
+        field('languageDefault', 'Language tag', { hint: 'Such as en, fr or pt-BR.' })}
       {field('byCountry', 'Language by country', {
         hint: 'One per line, such as XX = fr-XX, with the company’s two-letter country code.',
         area: true,
@@ -620,9 +708,25 @@ function Profile() {
   );
 }
 
+type TemplateDraft = JobTemplate & { custom: boolean };
+
 const templatesRevision = (view: JobTemplatesView) => view.revision;
-const templatesDraft = (view: JobTemplatesView): JobTemplate[] =>
-  view.templates.map(({ language, body, greetings }) => ({ language, body, greetings }));
+const templatesDraft = (view: JobTemplatesView): TemplateDraft[] =>
+  view.templates.map(({ language, body, greetings }) => ({
+    language,
+    body,
+    greetings,
+    custom: !languageOptions.includes(language),
+  }));
+const savedTemplate = ({ language, body, greetings }: TemplateDraft): JobTemplate => ({
+  language: language.trim(),
+  body,
+  greetings: Object.fromEntries(
+    Object.entries(greetings)
+      .map(([key, value]) => [key, value.trim()] as const)
+      .filter(([, value]) => value),
+  ),
+});
 
 function Templates() {
   const data = usePageData<JobTemplatesView>('/api/jobs/templates');
@@ -633,11 +737,24 @@ function Templates() {
   );
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<Message>(null);
+  const areas = useRef<Array<HTMLTextAreaElement | null>>([]);
   if (data.error) return <Notice>Could not load your templates. {data.error}</Notice>;
   if (!state || !data.data) return <Loading label="Loading templates…" />;
   const list = state.value;
-  const change = (index: number, value: Partial<JobTemplate>) =>
+  const change = (index: number, value: Partial<TemplateDraft>) =>
     edit(list.map((entry, position) => (position === index ? { ...entry, ...value } : entry)));
+  const insert = (index: number, name: string) => {
+    const area = areas.current[index];
+    const body = list[index]!.body;
+    const token = `{${name}}`;
+    const start = area?.selectionStart ?? body.length;
+    const end = area?.selectionEnd ?? body.length;
+    change(index, { body: body.slice(0, start) + token + body.slice(end) });
+    requestAnimationFrame(() => {
+      area?.focus();
+      area?.setSelectionRange(start + token.length, start + token.length);
+    });
+  };
   return (
     <form
       className="jobs-panel form-stack"
@@ -647,7 +764,7 @@ function Templates() {
         setMessage(null);
         try {
           const saved = await send<JobTemplatesView>('/api/jobs/templates', 'PUT', {
-            templates: list,
+            templates: list.map(savedTemplate),
             revision: state.base,
           });
           setMessage({ kind: 'success', text: 'Templates saved.' });
@@ -662,9 +779,8 @@ function Templates() {
       }}
     >
       <p className="muted">
-        Referral messages. Nod fills {jobPlaceholders.map((name) => `{${name}}`).join(' ')} for each
-        person.
-        {data.data.examples && ' These are examples until you save them.'}
+        Referral messages, one per language. Nod fills the fields in braces for each person.
+        {data.data.examples && ' These are examples until you save your own.'}
       </p>
       {stale && (
         <Notice kind="info">
@@ -674,44 +790,91 @@ function Templates() {
           </Button>
         </Notice>
       )}
-      {list.map((entry, index) => (
-        <fieldset key={index} className="saved-plan jobs-template">
-          <div className="jobs-numbers">
-            <Field label="Language">
-              <Input
-                value={entry.language}
-                onChange={(event) => change(index, { language: event.target.value })}
+      {list.map((entry, index) => {
+        const dir = textDirection(entry.language);
+        const taken = list
+          .filter((_, position) => position !== index)
+          .map((other) => other.language);
+        const unknown = unknownPlaceholders(entry.body);
+        return (
+          <fieldset key={index} className="saved-plan jobs-template">
+            <div className="jobs-numbers">
+              <Field label="Language">
+                {languageSelect(entry.language, entry.custom, taken, (tag) =>
+                  change(index, tag === null ? { custom: true } : { language: tag, custom: false }),
+                )}
+              </Field>
+              {entry.custom && (
+                <Field label="Language tag" hint="Such as en, fr or pt-BR.">
+                  <Input
+                    value={entry.language}
+                    onChange={(event) => change(index, { language: event.target.value })}
+                  />
+                </Field>
+              )}
+            </div>
+            <div className="jobs-numbers">
+              {greetingFields.map(({ key, label }) => (
+                <Field key={key} label={label}>
+                  <Input
+                    dir={dir}
+                    value={entry.greetings[key] ?? ''}
+                    onChange={(event) =>
+                      change(index, {
+                        greetings: { ...entry.greetings, [key]: event.target.value },
+                      })
+                    }
+                  />
+                </Field>
+              ))}
+            </div>
+            <p className="field-hint">
+              Nod uses the morning greeting before noon and the evening one after, in your time
+              zone, and Any time when that one is empty.
+            </p>
+            <Field label="Message">
+              <textarea
+                ref={(element) => {
+                  areas.current[index] = element;
+                }}
+                className="input jobs-message"
+                dir={dir}
+                value={entry.body}
+                onChange={(event) => change(index, { body: event.target.value })}
               />
             </Field>
-            <Field label="Greeting">
-              <Input
-                value={entry.greetings.default ?? ''}
-                onChange={(event) =>
-                  change(index, { greetings: { ...entry.greetings, default: event.target.value } })
-                }
-              />
-            </Field>
-          </div>
-          <Field label="Message">
-            <textarea
-              className="input jobs-markdown"
-              dir="auto"
-              value={entry.body}
-              onChange={(event) => change(index, { body: event.target.value })}
-            />
-          </Field>
-          <div className="jobs-actions">
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              onClick={() => edit(list.filter((_, position) => position !== index))}
-            >
-              Remove
-            </Button>
-          </div>
-        </fieldset>
-      ))}
+            <div className="jobs-chips" role="group" aria-label="Insert a field">
+              {jobPlaceholders.map((name) => (
+                <button
+                  key={name}
+                  type="button"
+                  className="jobs-chip"
+                  title={`Insert {${name}}`}
+                  onClick={() => insert(index, name)}
+                >
+                  {placeholderLabels[name]}
+                </button>
+              ))}
+            </div>
+            {unknown.length > 0 && (
+              <Notice>
+                Nod can&apos;t fill {unknown.map((name) => `{${name}}`).join(', ')}. Use the fields
+                above.
+              </Notice>
+            )}
+            <div className="jobs-actions">
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => edit(list.filter((_, position) => position !== index))}
+              >
+                Remove
+              </Button>
+            </div>
+          </fieldset>
+        );
+      })}
       {message && <Notice kind={message.kind}>{message.text}</Notice>}
       <div className="jobs-actions">
         <Button type="submit" size="sm" disabled={saving}>
@@ -721,7 +884,7 @@ function Templates() {
           type="button"
           size="sm"
           variant="ghost"
-          onClick={() => edit([...list, { language: '', body: '', greetings: { default: '' } }])}
+          onClick={() => edit([...list, { language: '', body: '', greetings: {}, custom: false }])}
         >
           Add a language
         </Button>

@@ -67,12 +67,12 @@ export const exampleTemplates: JobTemplate[] = [
   {
     language: 'en',
     body: "{greeting} {first_name},\n\nI'm {my_name}, {my_intro}. I'm applying for the {role} role at {company} through {programme} ({track}), and I'd be grateful for a referral if you're comfortable giving one.\n\nI can send my CV whenever it helps. Thank you for your time.",
-    greetings: { default: 'Hi' },
+    greetings: { morning: 'Good morning', evening: 'Good evening', default: 'Hi' },
   },
   {
     language: 'ar',
     body: '{greeting} {first_name}،\n\nأنا {my_name}، {my_intro}. أتقدم لوظيفة {role} في {company} ضمن {programme} (مسار {track})، وسيسعدني كثيرًا ترشيحكم لي إن كان ذلك مناسبًا.\n\nيمكنني إرسال سيرتي الذاتية في أي وقت. شكرًا جزيلًا على وقتكم.',
-    greetings: { default: 'أهلاً' },
+    greetings: { morning: 'صباح الخير', evening: 'مساء الخير', default: 'أهلاً' },
   },
 ];
 

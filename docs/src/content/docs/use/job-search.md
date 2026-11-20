@@ -53,7 +53,13 @@ Nothing here is required. Change a field and select **Save profile**, or tell No
 
 ## Message templates
 
-The **Templates** tab has one referral message per language. Nod fills these placeholders for each person: `{greeting}`, `{first_name}`, `{company}`, `{programme}`, `{track}`, `{role}`, `{my_name}` and `{my_intro}`. A template with any other placeholder isn't saved. The examples are used until you save your own.
+The **Templates** tab has one referral message per language. Pick the language from the list, or **Other language** to type a tag such as `pt-BR`. Arabic and other right-to-left languages are shown right to left.
+
+Nod fills these placeholders for each person: `{greeting}`, `{first_name}`, `{company}`, `{programme}`, `{track}`, `{role}`, `{my_name}` and `{my_intro}`. Select a field under the message to insert it where the cursor is. A template with any other placeholder isn't saved.
+
+`{greeting}` comes from the template's greetings: the morning one before noon and the evening one after, in your time zone, or **Any time** when that one is empty.
+
+The examples are used until you save your own.
 
 ## Who can change job records
 
