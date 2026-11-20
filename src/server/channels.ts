@@ -1206,10 +1206,12 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       );
       if (newChat)
         await client.query(
-          `INSERT INTO channel_topics(owner_id,provider,account_id,sender_id,topic_id,task_id)
-           SELECT $1,$2,$3,$4,$5,(to_jsonb(u)->>'task_id')::uuid FROM turns u
-           WHERE u.id=$6 AND u.owner_id=$1 AND to_jsonb(u)->>'task_id' IS NOT NULL
-           ON CONFLICT(owner_id,provider,account_id,sender_id,topic_id) DO UPDATE SET task_id=EXCLUDED.task_id`,
+          `WITH chat AS (SELECT (to_jsonb(u)->>'task_id')::uuid AS id FROM turns u
+             WHERE u.id=$6 AND u.owner_id=$1 AND to_jsonb(u)->>'task_id' IS NOT NULL),
+           topic AS (INSERT INTO channel_topics(owner_id,provider,account_id,sender_id,topic_id,task_id)
+             SELECT $1,$2,$3,$4,$5,id FROM chat
+             ON CONFLICT(owner_id,provider,account_id,sender_id,topic_id) DO UPDATE SET task_id=EXCLUDED.task_id)
+           UPDATE tasks SET title_by='topic' WHERE id IN (SELECT id FROM chat) AND owner_id=$1 AND title_by='line'`,
           [ownerId, row.provider, row.account_id, row.sender_id, row.topic_id, turnId],
         );
       await options.attributeMediaUsage?.(client, row.media_usage_ids ?? [], turnId);

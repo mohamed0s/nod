@@ -2925,6 +2925,13 @@ test(
           await titles.name(older.turnId);
           assert.equal(await title(older.sessionId), 'Synthetic deal checks');
 
+          const topic = await start('Synthetic chat from an owner topic');
+          await db.pool.query("UPDATE tasks SET title_by='topic' WHERE id=$1", [topic.sessionId]);
+          const before = asked.length;
+          await titles.name(topic.turnId);
+          assert.equal(asked.length, before);
+          assert.equal(await title(topic.sessionId), 'Synthetic chat from an owner topic');
+
           const patched: Array<[string, string]> = [];
           const routes = Fastify();
           createTasks({

@@ -5221,7 +5221,7 @@ test(
     const ownerId = 'fixture-topic-owner';
     const threadId = await createFixtureTables(pool, ownerId);
     await pool.query(`ALTER TABLE turns ADD COLUMN task_id uuid;
-      CREATE TABLE tasks(id uuid PRIMARY KEY,owner_id text NOT NULL,turn_id uuid,session_id uuid,message_id uuid,title text NOT NULL)`);
+      CREATE TABLE tasks(id uuid PRIMARY KEY,owner_id text NOT NULL,turn_id uuid,session_id uuid,message_id uuid,title text NOT NULL,title_by text)`);
     let topics = false;
     let refuse = false;
     let refuseRename = false;
@@ -5346,7 +5346,7 @@ test(
         const turnId = randomUUID();
         if (sessionId)
           await client.query(
-            'INSERT INTO tasks(id,owner_id,turn_id,session_id,title) VALUES($1,$2,$3,$1,$4)',
+            "INSERT INTO tasks(id,owner_id,turn_id,session_id,title,title_by) VALUES($1,$2,$3,$1,$4,'line')",
             [sessionId, ownerId, turnId, text],
           );
         await client.query(
@@ -5504,6 +5504,11 @@ test(
     const chat = submitted.at(-1)!;
     assert.equal(chat.replyToMessageId, undefined);
     assert.ok(chat.sessionId);
+    assert.equal(
+      (await pool.query('SELECT title_by FROM tasks WHERE id=$1', [chat.sessionId])).rows[0]
+        .title_by,
+      'topic',
+    );
     assert.equal(answers.length, answered);
     await say(fresh.turn_id, 'Trip chat reply');
     await service.drain();
