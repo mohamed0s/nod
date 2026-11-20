@@ -609,6 +609,9 @@ export function createLedger({
           await flushUsage();
         }
       },
+      ...(base.pinned
+        ? { pinned: async () => (await base.pinned!()).map((pinned) => curator(pinned)) }
+        : {}),
     };
   }
 

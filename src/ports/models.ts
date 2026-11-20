@@ -34,6 +34,16 @@ export class ModelAuthError extends Error {
   }
 }
 
+export class ModelUnavailableError extends Error {
+  constructor(
+    message: string,
+    readonly attempts: string[],
+    readonly providerStatus?: number,
+  ) {
+    super(message);
+  }
+}
+
 export class ModelWorkspaceSelectionError extends ModelAuthError {
   constructor(readonly workspaces: ModelWorkspace[]) {
     super('Choose an Anthropic workspace to connect.');
