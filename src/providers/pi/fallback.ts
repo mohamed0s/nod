@@ -24,7 +24,7 @@ type Connection = Awaited<ReturnType<typeof createPiModelRuntime>>;
 type Stream = Connection['runtime']['streamSimple'];
 
 export function modelKey(access: ModelAccess) {
-  return `${access.provider}/${access.method}/${access.definition.choice.id}`;
+  return `${access.connectionId ?? access.provider}/${access.method}/${access.definition.choice.id}`;
 }
 
 function failedRequest(model: Model<Api>, error: unknown, aborted: boolean): AssistantMessage {

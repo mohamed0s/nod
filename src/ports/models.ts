@@ -57,6 +57,7 @@ export interface ModelDefinition {
 }
 
 export interface ModelAccess {
+  connectionId?: string;
   provider: ModelProvider;
   method: ModelMethod;
   definition: ModelDefinition;

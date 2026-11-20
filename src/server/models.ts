@@ -665,6 +665,7 @@ export function createModelService(options: {
     textModel?: { definition: ModelDefinition; effort: ModelEffort },
   ): ModelAccess {
     return {
+      connectionId: row.id,
       provider: row.provider,
       method: row.method,
       definition,

@@ -9050,17 +9050,25 @@ test('task and batch classification have a small request budget and never retrie
 
 async function fallbackServer(
   t: TestContext,
-  answer: (model: string, attempt: number) => { status: number; headers?: object; text?: string },
+  answer: (
+    model: string,
+    attempt: number,
+    path: string,
+  ) => { status: number; headers?: object; text?: string },
 ) {
   const { createServer } = await import('node:http');
-  const requests: Array<{ model: string; at: number }> = [];
+  const requests: Array<{ model: string; at: number; path?: string }> = [];
   const server = createServer((request, response) => {
     const parts: Buffer[] = [];
     request.on('data', (part) => parts.push(part));
     request.on('end', () => {
       const { model } = JSON.parse(Buffer.concat(parts).toString()) as { model: string };
-      requests.push({ model, at: performance.now() });
-      const reply = answer(model, requests.filter((item) => item.model === model).length);
+      requests.push({ model, at: performance.now(), path: request.url });
+      const reply = answer(
+        model,
+        requests.filter((item) => item.model === model).length,
+        request.url ?? '',
+      );
       if (reply.status !== 200) {
         response.writeHead(reply.status, {
           'content-type': 'application/json',
@@ -9082,11 +9090,12 @@ async function fallbackServer(
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
   const url = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/v1`;
-  const access = (id: string): ModelAccess => {
+  const access = (id: string, path = '/v1'): ModelAccess => {
     const value = smallContextAccess('compatible', id, 131_072);
-    value.definition.spec = { ...value.definition.spec, baseUrl: url };
-    value.read = async () => ({ type: 'endpoint', url, key: 'fixture-key' });
-    return value;
+    const endpoint = url.replace(/\/v1$/, path);
+    value.definition.spec = { ...value.definition.spec, baseUrl: endpoint };
+    value.read = async () => ({ type: 'endpoint', url: endpoint, key: 'fixture-key' });
+    return { ...value, connectionId: path };
   };
   return { requests, access };
 }
@@ -9368,6 +9377,56 @@ test('errors the fallback does not handle keep Pi backoff instead of a fast retr
   await pending;
   await session.dispose();
   assert.equal(requests.length, 1);
+});
+
+test('helpers in a turn start on the backup the turn moved to, even when two backups share a model', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-fallback-helper-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { requests, access } = await fallbackServer(t, (_model, _attempt, path) =>
+    path.startsWith('/free/')
+      ? { status: 200, text: 'Synthetic answer.' }
+      : { status: 429, headers: { 'retry-after-ms': '5' }, text: 'Model is at capacity' },
+  );
+  const agent = createPiAgent({
+    provider: 'compatible',
+    resolve: async () => [
+      access('fixture-primary'),
+      access('fixture-shared', '/busy/v1'),
+      access('fixture-shared', '/free/v1'),
+    ],
+    sessionRoot: directory,
+  });
+  t.after(() => agent.dispose());
+  const execution = fakeExecution(randomUUID());
+  const open = (extra: object) =>
+    agent.open({
+      ...execution,
+      ...extra,
+      ...sandbox,
+      systemPrompt: 'Synthetic fixture',
+      tools: [],
+      shouldStop: () => false,
+      onEvent: () => {},
+    });
+  const main = await open({});
+  await main.prompt('Synthetic question.', []);
+  assert.deepEqual(
+    requests.map(({ path }) => path?.split('/chat')[0]),
+    ['/v1', '/v1', '/busy/v1', '/busy/v1', '/free/v1'],
+  );
+  requests.length = 0;
+  const helper = await open({
+    sessionId: randomUUID(),
+    runId: randomUUID(),
+    parentRunId: execution.runId,
+  });
+  await helper.prompt('Synthetic helper question.', []);
+  await helper.dispose();
+  await main.dispose();
+  assert.deepEqual(
+    requests.map(({ path }) => path?.split('/chat')[0]),
+    ['/free/v1'],
+  );
 });
 
 test('a busy work model hands the same request to a backup and records each attempt', async (t) => {
