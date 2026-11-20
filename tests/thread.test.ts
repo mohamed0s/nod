@@ -2670,7 +2670,7 @@ test(
 
       await t.test(
         'each chat reads only its own conversation and names another chat when one is searched',
-        async () => {
+        async (t) => {
           const { captureOwnerInstructions } = await import('../src/server/owner-instructions.ts');
           const { createCommunication } = await import('../src/server/communication.ts');
           const current = (await thread.activeThread(db.pool)).id;
@@ -2799,6 +2799,34 @@ test(
           const mainChecked = await checked(mainAgain.turnId, mainAgain.messageId, null);
           assert.ok(mainChecked.includes('Synthetic main chat follow-up'));
           assert.ok(!mainChecked.some((text) => /bicycles|canoes/.test(text)));
+          const [runSession, runTurn, runTask, runMessage] = [
+            randomUUID(),
+            randomUUID(),
+            randomUUID(),
+            randomUUID(),
+          ];
+          t.after(async () => {
+            await db.pool.query('UPDATE turns SET task_id=NULL WHERE id=$1', [runTurn]);
+            await db.pool.query('DELETE FROM tasks WHERE id=$1', [runTask]);
+            await db.pool.query('DELETE FROM messages WHERE id=$1', [runMessage]);
+            await db.pool.query('DELETE FROM turns WHERE id=$1', [runTurn]);
+          });
+          await db.pool.query(
+            "INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,background) VALUES($1,$2,$3,$4,'user','Synthetic reply inside a run','succeeded',true)",
+            [runTurn, ownerId, current, runSession],
+          );
+          await db.pool.query(
+            "INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id) VALUES($1,$2,'user','Synthetic reply inside a run',$3,$4)",
+            [runMessage, ownerId, current, runTurn],
+          );
+          await db.pool.query(
+            "INSERT INTO tasks(id,owner_id,turn_id,session_id,source_message_id,title,done_when,now_text) VALUES($1,$2,$3,$4,$5,'Synthetic run task','Checked','Checking')",
+            [runTask, ownerId, runTurn, runSession, runMessage],
+          );
+          await db.pool.query('UPDATE turns SET task_id=$1 WHERE id=$2', [runTask, runTurn]);
+          const runChecked = await checked(runTurn, runMessage, runTask);
+          assert.ok(runChecked.includes('Synthetic reply inside a run'));
+          assert.ok(runChecked.includes('Synthetic main chat follow-up'));
           const languages: string[][] = [];
           const communication = createCommunication({
             pool: db.pool,
