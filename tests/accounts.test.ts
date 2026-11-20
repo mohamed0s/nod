@@ -4590,7 +4590,18 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
       restarted.setBackups([{ connectionId: local, modelId: 'fixture-missing', effort: 'off' }]),
       /Choose an available text model/,
     );
-    await restarted.setBackups([]);
+    const retired = { connectionId: local, modelId: 'fixture-retired', effort: 'off' as const };
+    const sol = { connectionId: global.id, modelId: 'gpt-6.1-sol', effort: 'high' as const };
+    await f.database.query('UPDATE model_settings SET backups=$2 WHERE owner_id=$1', [
+      ownerId,
+      JSON.stringify([retired]),
+    ]);
+    const stale = await f.create(ownerId, backend);
+    await stale.setBackups([retired, sol]);
+    assert.deepEqual(stale.view().backups, [retired, sol]);
+    await stale.setBackups([sol]);
+    assert.deepEqual(stale.view().backups, [sol]);
+    await stale.setBackups([]);
     const again = await f.create(ownerId, backend);
     assert.deepEqual(again.view().backups, []);
   });

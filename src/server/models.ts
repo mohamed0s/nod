@@ -1379,12 +1379,15 @@ export function createModelService(options: {
       const list = modelBackupsInput.parse(value);
       const saved = await store.change(
         (state) => {
+          const key = (choice: ModelSelection) =>
+            `${choice.connectionId}:${choice.modelId}:${choice.effort}`;
+          const saved = new Set((state.backups ?? []).map(key));
           const seen = new Set<string>();
           state.backups = list.filter((choice) => {
-            textChoice(state.connections, choice);
-            const key = `${choice.connectionId}:${choice.modelId}`;
-            if (seen.has(key)) return false;
-            seen.add(key);
+            if (!saved.has(key(choice))) textChoice(state.connections, choice);
+            const model = `${choice.connectionId}:${choice.modelId}`;
+            if (seen.has(model)) return false;
+            seen.add(model);
             return true;
           });
           state.backupsSuggested = false;
