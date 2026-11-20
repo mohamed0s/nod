@@ -17,6 +17,7 @@ import {
 } from './owner-instructions.ts';
 
 import { createTrustReview } from './trust-review.ts';
+import { keepUnavailable, pinnedReview, type ModelReviewers } from './model-fallback.ts';
 
 export type TrustReason = 'background' | 'schedule' | 'unrequested' | 'rule';
 
@@ -50,10 +51,21 @@ export function createTrust(options: {
   pool: Pool;
   ownerId: string;
   review: ModelReview;
+  reviewers?: ModelReviewers;
   decisions?: DecisionModel;
 }) {
   const { pool, ownerId } = options;
   const review = createTrustReview(options);
+  const pinned = <T>(run: (review: ModelReview, last: boolean) => Promise<T>) =>
+    pinnedReview(
+      options.reviewers &&
+        (async () =>
+          (await options.reviewers!())?.map((reviewer) =>
+            createTrustReview({ review: reviewer, decisions: options.decisions }),
+          )),
+      review,
+      run,
+    );
 
   async function check(
     turn: TurnRef,
@@ -180,13 +192,6 @@ export function createTrust(options: {
         }
       : {};
     const confirmationReply = captured.confirmationReply;
-    const retiredReply = confirmationReply
-      ? bareConfirmationAnswer(confirmationReply.reply)
-        ? 'stale'
-        : await classifyRetiredReply(confirmationReply.reply, confirmationReply.confirmation).catch(
-            () => 'uncertain' as const,
-          )
-      : undefined;
     const rules = words.userRules;
     const encodedArgs = JSON.stringify(args);
     const input = JSON.parse(
@@ -241,14 +246,28 @@ export function createTrust(options: {
       rules || 'currentRules' in args
         ? `${checkInstructions}\n${rulesInstructions}`
         : checkInstructions;
-    let failed = false;
-    const answer = replacementNeedsApproval
-      ? { run: false }
-      : await review(instructions, input, signal).catch((error: unknown) => {
-          failed = true;
-          logFailure('trust_check_failed', error);
-          return undefined;
-        });
+    const { retiredReply, answer, failed } = await pinned(async (review, last) => {
+      const retiredReply = confirmationReply
+        ? bareConfirmationAnswer(confirmationReply.reply)
+          ? 'stale'
+          : await retired(review, confirmationReply.reply, confirmationReply.confirmation).catch(
+              (error: unknown) => {
+                keepUnavailable(last, error);
+                return 'uncertain' as const;
+              },
+            )
+        : undefined;
+      let failed = false;
+      const answer = replacementNeedsApproval
+        ? { run: false }
+        : await review(instructions, input, signal).catch((error: unknown) => {
+            logFailure('trust_check_failed', error);
+            keepUnavailable(last, error);
+            failed = true;
+            return undefined;
+          });
+      return { retiredReply, answer, failed };
+    });
     signal?.throwIfAborted();
     unchanged();
     const reviewedBasis = trustBasis(answer, {
@@ -322,21 +341,26 @@ export function createTrust(options: {
       action: { name: action, arguments: args, schema },
       ...(rules ? { userRules: rules } : {}),
     };
-    const result = await review(readInstructions, input, signal, {
-      name: 'readOnly',
-      uncertainValue: false,
-      choices: [
-        {
-          value: false,
-          description:
-            'The action can write, has an uncertain effect, or requires asking under an owner rule.',
-        },
-        {
-          value: true,
-          description: 'The complete action only reads and no owner rule requires asking.',
-        },
-      ],
-    }).catch(() => undefined);
+    const result = await pinned((review, last) =>
+      review(readInstructions, input, signal, {
+        name: 'readOnly',
+        uncertainValue: false,
+        choices: [
+          {
+            value: false,
+            description:
+              'The action can write, has an uncertain effect, or requires asking under an owner rule.',
+          },
+          {
+            value: true,
+            description: 'The complete action only reads and no owner rule requires asking.',
+          },
+        ],
+      }).catch((error: unknown) => {
+        keepUnavailable(last, error);
+        return undefined;
+      }),
+    );
     signal.throwIfAborted();
     if ((await currentRules()) !== rules) return false;
     return (result as { readOnly?: unknown } | undefined)?.readOnly === true;
@@ -358,12 +382,19 @@ export function createTrust(options: {
         },
       ],
     };
-    const result = await review(answerInstructions, { reply }, undefined, question);
+    const result = await pinned((review) =>
+      review(answerInstructions, { reply }, undefined, question),
+    );
     const value = result && typeof result === 'object' && (result as { answer?: unknown }).answer;
     return value === 'yes' ? true : value === 'no' ? false : undefined;
   }
 
-  async function classifyRetiredReply(
+  function classifyRetiredReply(reply: string, expiredConfirmation: string) {
+    return pinned((review) => retired(review, reply, expiredConfirmation));
+  }
+
+  async function retired(
+    review: ModelReview,
     reply: string,
     expiredConfirmation: string,
   ): Promise<'new' | 'stale' | 'uncertain'> {
