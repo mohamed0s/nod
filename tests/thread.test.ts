@@ -2896,6 +2896,29 @@ test(
           assert.equal(asked.length, 2);
           assert.equal(topics.length, 1);
 
+          const failing = 'Synthetic request that fails at the provider';
+          modelErrors.set(failing, 'Synthetic provider failure');
+          const failed = await start(failing);
+          modelErrors.delete(failing);
+          assert.deepEqual(
+            (await db.pool.query('SELECT status,withdrawn FROM turns WHERE id=$1', [failed.turnId]))
+              .rows[0],
+            { status: 'failed', withdrawn: true },
+          );
+          await titles.name(failed.turnId);
+          assert.equal(asked.length, 2);
+          const retried = await userMessages.submit('Synthetic retry about gardens', [], {
+            replyToMessageId: failed.messageId,
+          });
+          await waitFor(settled(retried.turnId));
+          assert.equal(ran(retried.turnId)?.sessionId, failed.sessionId);
+          await titles.name(retried.turnId);
+          assert.deepEqual(asked.at(-1), {
+            request: 'Synthetic retry about gardens',
+            reply: 'done: Synthetic retry about gardens',
+          });
+          assert.equal(await title(failed.sessionId), 'Synthetic deal checks');
+
           const older = await start('Synthetic older chat about kites');
           await db.pool.query('UPDATE tasks SET title_by=NULL WHERE id=$1', [older.sessionId]);
           await tasks.initialize();
