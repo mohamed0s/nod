@@ -135,7 +135,8 @@ export function createPiMemoryCurator(options: {
     },
     async curate({ task, instructions, input, images, automatic = true }, signal, report) {
       signal?.throwIfAborted();
-      const bounded = task === 'classify' || task === 'attention' || task === 'check';
+      const bounded =
+        task === 'classify' || task === 'attention' || task === 'check' || task === 'title';
       if (options.resolve) loaded = undefined;
       loaded ??= load(automatic).catch((error) => {
         loaded = undefined;
@@ -232,7 +233,9 @@ export function createPiMemoryCurator(options: {
                 ? 'The action review model is unavailable.'
                 : task === 'check'
                   ? 'The selected model is unavailable.'
-                  : 'The memory model is unavailable.';
+                  : task === 'title'
+                    ? 'The chat title model is unavailable.'
+                    : 'The memory model is unavailable.';
         const detail =
           reply.stopReason === 'error' && reply.errorMessage
             ? ` The provider said: ${reply.errorMessage.trim().slice(0, 300)}`
