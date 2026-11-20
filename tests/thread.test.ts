@@ -2669,6 +2669,96 @@ test(
       );
 
       await t.test(
+        'each chat reads only its own conversation and names another chat when one is searched',
+        async () => {
+          const current = (await thread.activeThread(db.pool)).id;
+          const say = async (
+            text: string,
+            options: { sessionId?: string; reply?: string } = {},
+          ) => {
+            const sent = await userMessages.submit(text, [], {
+              ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+              ...(options.reply ? { replyToMessageId: options.reply } : {}),
+            });
+            await waitFor(settled(sent.turnId));
+            return sent;
+          };
+          const replyOf = async (turnId: string) =>
+            (
+              await db.pool.query<{ id: string }>(
+                "SELECT id FROM messages WHERE turn_id=$1 AND role='assistant' ORDER BY created_at DESC,id DESC LIMIT 1",
+                [turnId],
+              )
+            ).rows[0]!.id;
+          const seen = (turnId: string) => ran(turnId)!.history.map(({ text }) => text);
+          const [bikes, boats] = [randomUUID(), randomUUID()];
+          const main = await say('Synthetic main chat about lanterns');
+          const first = await say('Synthetic first chat about bicycles', { sessionId: bikes });
+          await say('Synthetic second chat about canoes', { sessionId: boats });
+          const run = randomUUID();
+          await db.pool.query(
+            "INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,background) VALUES($1,$2,$3,$1,'schedule','Synthetic lantern schedule','succeeded',true)",
+            [run, ownerId, current],
+          );
+          await db.pool.query(
+            "INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id) VALUES($1,$2,'assistant','Synthetic schedule report about lanterns',$3,$4)",
+            [randomUUID(), ownerId, current, run],
+          );
+          const mainAgain = await say('Synthetic main chat follow-up');
+          const inMain = seen(mainAgain.turnId);
+          assert.ok(inMain.includes('Synthetic main chat about lanterns'));
+          assert.ok(inMain.includes('Synthetic schedule report about lanterns'));
+          assert.ok(!inMain.some((text) => /bicycles|canoes/.test(text)));
+          const firstAgain = await say('Synthetic first chat follow-up', {
+            reply: await replyOf(first.turnId),
+          });
+          assert.equal(ran(firstAgain.turnId)?.taskContext?.id, bikes);
+          assert.deepEqual(seen(firstAgain.turnId), [
+            'Synthetic first chat about bicycles',
+            'done: Synthetic first chat about bicycles',
+          ]);
+          const search = async (turnId: string, args: Record<string, unknown>) =>
+            (
+              (await personal.manage('history_search', args, {
+                sourceMessageId: null,
+                turnId,
+              })) as { messages: Array<{ id: string; text: string; chat?: string }> }
+            ).messages;
+          assert.ok(
+            !(await search(mainAgain.turnId, { query: 'bicycles' })).some(({ text }) =>
+              text.includes('bicycles'),
+            ),
+          );
+          const everywhere = await search(mainAgain.turnId, { query: 'bicycles', chats: 'all' });
+          assert.equal(
+            everywhere.find(({ text }) => text === 'Synthetic first chat about bicycles')?.chat,
+            'Synthetic first chat about bicycles',
+          );
+          const fromChat = await search(firstAgain.turnId, { query: 'lanterns', chats: 'all' });
+          assert.equal(
+            fromChat.find(({ text }) => text === 'Synthetic main chat about lanterns')?.chat,
+            'Main',
+          );
+          assert.equal(
+            (await search(firstAgain.turnId, { query: 'bicycles' })).find(
+              ({ text }) => text === 'Synthetic first chat about bicycles',
+            )?.chat,
+            undefined,
+          );
+          const around = await search(mainAgain.turnId, { around: first.messageId });
+          assert.ok(around.length > 1);
+          assert.ok(around.every(({ chat }) => chat === 'Synthetic first chat about bicycles'));
+          const recalled = async (chat?: string | null) =>
+            (await personal.recall('bicycles lanterns', undefined, null, chat)).map(
+              ({ text }) => text,
+            );
+          assert.ok(!(await recalled(null)).some((text) => text.includes('bicycles')));
+          assert.ok((await recalled(null)).includes('Synthetic main chat about lanterns'));
+          assert.ok(!(await recalled(bikes)).some((text) => text.includes('lanterns')));
+        },
+      );
+
+      await t.test(
         'a task’s bug report and browser handoff stay in its own chat and browser',
         async (t) => {
           const previousObserver = inspectObserver;

@@ -15,6 +15,7 @@ import type { MemoryChange } from './analytics.ts';
 import { modelSelectionInput, type createModelService } from './models.ts';
 import { defaultEffort } from '../shared/model-defaults.ts';
 import type { ModelRoute, ModelSelection } from '../shared/models.ts';
+import { messageChatSql, turnChat } from './chat-scope.ts';
 
 type ModelScope = 'chat' | 'schedules' | 'background' | 'schedule' | 'task';
 
@@ -292,17 +293,25 @@ export function createPersonalService(dependencies: PersonalDependencies) {
       remembered('forget', 'agent');
       return result;
     }
-    if (action === 'history_search') return searchHistory(args);
+    if (action === 'history_search')
+      return searchHistory(args, await turnChat(pool, ownerId, provenance?.turnId));
     throw new Error('This personal-data action is not available.');
   }
 
-  async function recall(text: string, before: Date | undefined, exclude: string | null) {
+  async function recall(
+    text: string,
+    before: Date | undefined,
+    exclude: string | null,
+    chat?: string | null,
+  ) {
+    const sameChat =
+      chat === undefined ? '' : `AND ${messageChatSql('m')} IS NOT DISTINCT FROM $5::uuid`;
     const { rows } = await pool.query(
       `WITH terms AS (SELECT replace(plainto_tsquery('english',$2)::text,'&','|')::tsquery AS q),
        docs AS (
          SELECT m.id,m.role,m.text,m.created_at,to_tsvector('english',m.text) AS v FROM messages m CROSS JOIN terms
          WHERE m.owner_id=$1 AND m.role='user' AND m.approval_answer IS NULL AND ${activeThreadSql('m')} AND m.id IS DISTINCT FROM $4::uuid AND NOT ${withdrawnSql('m')}
-           AND ($3::timestamptz IS NULL OR m.created_at<$3) AND to_tsvector('english',m.text) @@ terms.q),
+           AND ($3::timestamptz IS NULL OR m.created_at<$3) AND to_tsvector('english',m.text) @@ terms.q ${sameChat}),
        weights AS (
          SELECT w,ln(1+((SELECT count(*) FROM messages m WHERE m.owner_id=$1 AND ${activeThreadSql('m')})-count(*)+0.5)/(count(*)+0.5)) AS idf
          FROM (SELECT DISTINCT lexeme AS w FROM unnest(tsvector_to_array(to_tsvector('english',$2))) lexeme) words
@@ -314,7 +323,7 @@ export function createPersonalService(dependencies: PersonalDependencies) {
            ELSE ts_headline('english',best.text,terms.q,'StartSel="",StopSel="",MaxWords=50,MinWords=15,MaxFragments=2,FragmentDelimiter=" … "') END AS text,
          best.created_at AS "createdAt"
        FROM best CROSS JOIN terms ORDER BY best.created_at`,
-      [ownerId, text, before ?? null, exclude],
+      [ownerId, text, before ?? null, exclude, ...(chat === undefined ? [] : [chat])],
     );
     return rows as Array<{
       id: string;
