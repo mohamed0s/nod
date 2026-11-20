@@ -25,8 +25,8 @@ export const inChatSql = (turn: string, main: boolean, chat: string, owner: stri
 export const messageChatSql = (message: string) =>
   `(SELECT ${turnChatSql('w')} FROM turns w WHERE w.id=${message}.turn_id AND w.owner_id=${message}.owner_id)`;
 
-export const chatNameSql = (chat: string) =>
-  `COALESCE((SELECT k.title FROM tasks k WHERE k.id=${chat}),'Main')`;
+export const chatNameSql = (chat: string, owner: string) =>
+  `COALESCE((SELECT k.title FROM tasks k WHERE k.id=${chat} AND k.owner_id=${owner}),'Main')`;
 
 export async function chatsReady(db: Database) {
   return Boolean((await db.query("SELECT to_regclass('tasks') AS name")).rows[0]?.name);
@@ -40,7 +40,7 @@ export async function turnChat(
   if (!turnId || !(await chatsReady(db))) return undefined;
   const row = (
     await db.query<{ id: string | null; title: string }>(
-      `SELECT c.id,${chatNameSql('c.id')} AS title
+      `SELECT c.id,${chatNameSql('c.id', 'c.owner_id')} AS title
        FROM (SELECT ${turnChatSql('u')} AS id,u.owner_id FROM turns u WHERE u.id=$1 AND u.owner_id=$2) c`,
       [turnId, ownerId],
     )

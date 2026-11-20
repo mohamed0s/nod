@@ -58,7 +58,7 @@ export function createHistorySearch({
     const current = scoped && chats === 'current';
     const other = (value: string, parameter: string) =>
       scoped
-        ? `,CASE WHEN ${value} IS DISTINCT FROM ${parameter}::uuid THEN ${chatNameSql(value)} END AS chat`
+        ? `,CASE WHEN ${value} IS DISTINCT FROM ${parameter}::uuid THEN ${chatNameSql(value, '$1')} END AS chat`
         : '';
     const near = scoped
       ? ` AND ${messageChatSql('m')} IS NOT DISTINCT FROM (SELECT chat FROM place)`
