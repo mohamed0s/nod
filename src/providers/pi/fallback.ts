@@ -252,6 +252,17 @@ export function createTurnFallback(options: {
       });
       return candidates[index ?? at]!.access.method;
     },
+    model(provider: string, id: string) {
+      for (const index of new Set([at, ...ready.keys()])) {
+        const served = ready.get(index)?.model;
+        if (served?.provider === provider && served.id === id) return served;
+      }
+      for (const connection of ready.values()) {
+        const listed = connection.runtime.getModel(provider, id);
+        if (listed) return listed;
+      }
+      return undefined;
+    },
     failed: () => candidates[failed]!.access.definition.choice.name,
     switched: () => at > 0,
     size: candidates.length,

@@ -10426,6 +10426,64 @@ test('curator checks retry a busy model once, then use the next backup, and neve
   });
 });
 
+test('a turn that moves to a backup records the backup model price on its usage', async (t) => {
+  const { modelPricingSignature } = await import('../src/shared/models.ts');
+  const directory = await mkdtemp(join(tmpdir(), 'nod-fallback-price-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { access } = await fallbackServer(t, (model) =>
+    model === 'fixture-backup'
+      ? { status: 200, text: 'Synthetic backup answer.' }
+      : { status: 503, text: 'Service Unavailable' },
+  );
+  const prices = {
+    'fixture-primary': { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+    'fixture-backup': { input: 5, output: 10, cacheRead: 0, cacheWrite: 0 },
+  };
+  const priced = (id: keyof typeof prices) => {
+    const value = access(id);
+    value.definition = {
+      ...value.definition,
+      choice: { ...value.definition.choice, pricing: prices[id] },
+      spec: { ...value.definition.spec, cost: prices[id] },
+    };
+    return value;
+  };
+  const agent = createPiAgent({
+    provider: 'compatible',
+    resolve: async () => [priced('fixture-primary'), priced('fixture-backup')],
+    sessionRoot: directory,
+  });
+  t.after(() => agent.dispose());
+  const events: AgentEvent[] = [];
+  const session = await agent.open({
+    ...fakeExecution(randomUUID()),
+    ...sandbox,
+    systemPrompt: 'Synthetic fixture',
+    tools: [],
+    shouldStop: () => false,
+    onEvent: (event) => events.push(event),
+  });
+  await session.prompt('Synthetic question.', []);
+  await session.dispose();
+  const usage = events.flatMap((event) => (event.type === 'model_usage' ? [event] : []));
+  const backup = usage.find((event) => event.model === 'fixture-backup');
+  assert.ok(backup);
+  assert.equal(backup.status, 'succeeded');
+  const signature = modelPricingSignature(prices['fixture-backup'], 'openai-completions');
+  assert.ok(signature);
+  assert.equal(backup.pricingSignature, signature);
+  assert.notEqual(
+    backup.pricingSignature,
+    modelPricingSignature(prices['fixture-primary'], 'openai-completions'),
+  );
+  assert.ok(Math.abs((backup.costUsd ?? 0) - (10 * 5 + 5 * 10) / 1_000_000) < 1e-12);
+  for (const failed of usage.filter((event) => event.model === 'fixture-primary'))
+    assert.equal(
+      failed.pricingSignature,
+      modelPricingSignature(prices['fixture-primary'], 'openai-completions'),
+    );
+});
+
 test('a paused work model moves a turn and a pinned check to the backup only when the pause is an availability failure', async (t) => {
   const { ModelUnavailableError } = await import('../src/ports/models.ts');
   const { pinnedReview } = await import('../src/server/model-fallback.ts');
