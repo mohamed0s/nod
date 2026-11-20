@@ -25,6 +25,7 @@ const untraced = new Set([
   'style',
   'skill',
   'classify',
+  'title',
   'check',
 ]);
 

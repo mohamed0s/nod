@@ -19,6 +19,7 @@ export interface MemoryCurator {
         | 'vision'
         | 'classify'
         | 'attention'
+        | 'title'
         | 'check';
       instructions: string;
       input: object;

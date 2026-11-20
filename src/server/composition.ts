@@ -145,6 +145,7 @@ import { validateScheduledInstructions } from './owner-instructions.ts';
 import { localArtifacts } from './artifacts.ts';
 import { memoryFileName, memoryMarkdown } from '../shared/memory-export.ts';
 import { createChannels } from './channels.ts';
+import { createChatTitles } from './chat-titles.ts';
 import { createChannelSettings, managedChannelEnvironment } from './channel-settings.ts';
 import { createChannelMedia } from './channel-media.ts';
 import { createChannelSessionStore } from './channel-session.ts';
@@ -1143,6 +1144,12 @@ async function initializeApplication(
       : {}),
   });
   await tasks.initialize();
+  const chatTitles = createChatTitles({
+    pool,
+    ownerId,
+    curator,
+    refresh,
+  });
   const jobs = createJobs({
     pool,
     ownerId,
@@ -2211,6 +2218,9 @@ async function initializeApplication(
               void admission
                 .run(() => ledger.withTurn(turnId, () => taskClassification.run(turnId, consent)))
                 ?.catch(() => {});
+              void admission
+                .run(() => ledger.withTurn(turnId, () => chatTitles.name(turnId)))
+                ?.catch((error) => logFailure('chat_title_failed', error));
             }
           })
           .finally(() => {

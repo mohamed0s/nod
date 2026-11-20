@@ -2826,6 +2826,102 @@ test(
       );
 
       await t.test(
+        'a new chat gets one short title after its first reply and never over an owner rename',
+        async () => {
+          const { createChatTitles } = await import('../src/server/chat-titles.ts');
+          const asked: unknown[] = [];
+          const topics: Array<[string, string]> = [];
+          let during: (() => Promise<void>) | undefined;
+          const titles = createChatTitles({
+            pool: db.pool,
+            ownerId,
+            curator: {
+              id: 'fixture',
+              configured: true,
+              async curate({ task, input }) {
+                assert.equal(task, 'title');
+                asked.push(input);
+                await during?.();
+                return { title: '"Synthetic deal checks."' };
+              },
+            },
+            renamed: (id, title) => topics.push([id, title]),
+          });
+          const start = async (text: string) => {
+            const sessionId = randomUUID();
+            const sent = await userMessages.submit(text, [], { sessionId });
+            await waitFor(settled(sent.turnId));
+            return { ...sent, sessionId };
+          };
+          const title = async (id: string) =>
+            (await tasks.read()).find((task) => task.id === id)?.title;
+          const rename = (id: string, value: string) =>
+            request('PATCH', `/api/tasks/${id}`, { title: value });
+          const text = 'i want you to check for synthetic deals daily\nand tell me';
+          const named = await start(text);
+          assert.equal(
+            await title(named.sessionId),
+            'i want you to check for synthetic deals daily',
+          );
+          await titles.name(named.turnId);
+          assert.equal(await title(named.sessionId), 'Synthetic deal checks');
+          assert.deepEqual(asked, [{ request: text, reply: `done: ${text}` }]);
+          assert.deepEqual(topics, [[named.sessionId, 'Synthetic deal checks']]);
+          await titles.name(named.turnId);
+          const later = await userMessages.submit('Synthetic deal follow-up', [], {
+            replyToMessageId: (
+              await db.pool.query<{ id: string }>(
+                "SELECT id FROM messages WHERE turn_id=$1 AND role='assistant' LIMIT 1",
+                [named.turnId],
+              )
+            ).rows[0]!.id,
+          });
+          await waitFor(settled(later.turnId));
+          await titles.name(later.turnId);
+          assert.equal(asked.length, 1);
+
+          const owned = await start('Synthetic request about trains');
+          assert.equal((await rename(owned.sessionId, 'Owner train chat')).statusCode, 200);
+          await titles.name(owned.turnId);
+          assert.equal(await title(owned.sessionId), 'Owner train chat');
+          assert.equal(asked.length, 1);
+
+          const raced = await start('Synthetic request about ferries');
+          during = async () => {
+            assert.equal((await rename(raced.sessionId, 'Owner ferry chat')).statusCode, 200);
+          };
+          await titles.name(raced.turnId);
+          during = undefined;
+          assert.equal(await title(raced.sessionId), 'Owner ferry chat');
+          assert.equal(asked.length, 2);
+          assert.equal(topics.length, 1);
+
+          const older = await start('Synthetic older chat about kites');
+          await db.pool.query('UPDATE tasks SET title_by=NULL WHERE id=$1', [older.sessionId]);
+          await tasks.initialize();
+          await titles.name(older.turnId);
+          assert.equal(await title(older.sessionId), 'Synthetic deal checks');
+
+          const patched: Array<[string, string]> = [];
+          const routes = Fastify();
+          createTasks({
+            pool: db.pool,
+            ownerId,
+            renamed: (id, value) => patched.push([id, value]),
+          }).registerRoutes(routes);
+          const response = await routes.inject({
+            method: 'PATCH',
+            url: `/api/tasks/${named.sessionId}`,
+            payload: { title: 'Owner deal chat' },
+          });
+          await routes.close();
+          assert.equal(response.statusCode, 200);
+          assert.deepEqual(patched, [[named.sessionId, 'Owner deal chat']]);
+          assert.equal(await title(named.sessionId), 'Owner deal chat');
+        },
+      );
+
+      await t.test(
         'a task’s bug report and browser handoff stay in its own chat and browser',
         async (t) => {
           const previousObserver = inspectObserver;
