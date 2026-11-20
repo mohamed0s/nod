@@ -97,9 +97,22 @@
 .chat-list-dot:is([data-status='done']) {
   background: var(--success);
 }
-.chat-list .chat-list-close {
-  flex: none;
+.chat-list .chat-list-more > button {
   color: var(--muted-foreground);
+}
+@media (hover: hover) {
+  .chat-list-row:not(:hover, :focus-within) .chat-list-more:not(:has([data-state='open'])) {
+    opacity: 0;
+  }
+}
+.chat-list-rename {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+.chat-list-rename .input {
+  flex: 1;
+  min-width: 0;
 }
 .chat-task-header {
   display: flex;

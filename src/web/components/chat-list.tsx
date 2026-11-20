@@ -1,10 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Task } from '../../shared/contracts';
 import { taskLabels } from '../../shared/task-status';
 import { api, errorMessage } from '../lib/api';
 import { captureAnalytics } from '../lib/analytics';
-import { MessageCircle, Plus, X } from './icons';
-import { Button, Notice } from './ui';
+import { ActionMenu, ActionMenuItem } from './action-menu';
+import { Ellipsis, MessageCircle, Plus } from './icons';
+import { Button, Input, Notice } from './ui';
 
 const groups = [
   { label: 'Working', statuses: ['queued', 'working', 'waiting', 'scheduled'] },
@@ -30,8 +31,51 @@ export function ChatList({
   refresh(): Promise<void>;
 }) {
   const [closing, setClosing] = useState<string>();
+  const [renaming, setRenaming] = useState<string>();
+  const [draft, setDraft] = useState('');
   const [error, setError] = useState('');
+  const saving = useRef(false);
+  const editing = useRef<string | undefined>(undefined);
+  const renameNext = useRef<Task | undefined>(undefined);
+  const items = useRef(new Map<string, HTMLButtonElement>());
+  const renamed = useRef<string | undefined>(undefined);
   const open = tasks.filter((task) => !task.archivedAt);
+  useEffect(() => {
+    if (renaming || !renamed.current) return;
+    items.current.get(renamed.current)?.focus({ preventScroll: true });
+    renamed.current = undefined;
+  }, [renaming]);
+  function startRename(task: Task) {
+    setError('');
+    setDraft(task.title);
+    editing.current = task.id;
+    setRenaming(task.id);
+  }
+  function stopRename(task: Task, refocus: boolean) {
+    editing.current = undefined;
+    if (refocus) renamed.current = task.id;
+    setRenaming(undefined);
+  }
+  async function rename(task: Task, refocus: boolean) {
+    if (saving.current || editing.current !== task.id) return;
+    const title = draft.trim();
+    if (!title || title === task.title) return stopRename(task, refocus);
+    saving.current = true;
+    setError('');
+    try {
+      await api(`/api/tasks/${task.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ title }),
+      });
+      captureAnalytics('task_action', { action: 'rename_chat' });
+      await refresh();
+      stopRename(task, refocus);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      saving.current = false;
+    }
+  }
   async function close(task: Task) {
     setClosing(task.id);
     setError('');
@@ -72,48 +116,116 @@ export function ChatList({
       </button>
       {error && <Notice onDismiss={() => setError('')}>{error}</Notice>}
       {groups.map((group) => {
-        const items = open.filter((task) =>
+        const shown = open.filter((task) =>
           (group.statuses as readonly string[]).includes(task.status),
         );
-        if (!items.length) return null;
+        if (!shown.length) return null;
         return (
           <section key={group.label} className="chat-list-group" aria-label={group.label}>
             <h2>{group.label}</h2>
             <ul role="list">
-              {items.map((task) => (
+              {shown.map((task) => (
                 <li key={task.id} className="chat-list-row">
-                  <button
-                    type="button"
-                    className="chat-list-item"
-                    aria-current={chat === task.id ? 'page' : undefined}
-                    onClick={() => {
-                      captureAnalytics('task_action', { action: 'open_chat' });
-                      onChat(task.id);
+                  {renaming === task.id ? (
+                    <form
+                      className="chat-list-rename"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        void rename(task, true);
+                      }}
+                    >
+                      <Input
+                        autoFocus
+                        value={draft}
+                        maxLength={160}
+                        aria-label={`Rename ${task.title}`}
+                        onFocus={(event) => event.currentTarget.select()}
+                        onChange={(event) => setDraft(event.target.value)}
+                        onBlur={() => void rename(task, false)}
+                        onKeyDown={(event) => {
+                          if (event.key !== 'Escape') return;
+                          event.preventDefault();
+                          stopRename(task, true);
+                        }}
+                      />
+                    </form>
+                  ) : (
+                    <button
+                      ref={(node) => {
+                        if (node) items.current.set(task.id, node);
+                        else items.current.delete(task.id);
+                      }}
+                      type="button"
+                      className="chat-list-item"
+                      aria-current={chat === task.id ? 'page' : undefined}
+                      aria-keyshortcuts="F2"
+                      onClick={() => {
+                        captureAnalytics('task_action', { action: 'open_chat' });
+                        onChat(task.id);
+                      }}
+                      onDoubleClick={() => startRename(task)}
+                      onKeyDown={(event) => {
+                        if (event.key !== 'F2') return;
+                        event.preventDefault();
+                        startRename(task);
+                      }}
+                    >
+                      <span
+                        className="chat-list-dot"
+                        data-status={task.status}
+                        aria-hidden="true"
+                      />
+                      <span className="chat-list-title">{task.title}</span>
+                      <span className="sr-only">, {taskLabels[task.status]}</span>
+                      {Boolean(unread[task.id]) && chat !== task.id && (
+                        <span className="chat-list-unread">
+                          {unread[task.id]! > 99 ? '99+' : unread[task.id]}
+                          <span className="sr-only"> unread</span>
+                        </span>
+                      )}
+                    </button>
+                  )}
+                  <ActionMenu
+                    label={`Options for ${task.title}`}
+                    className="chat-list-more"
+                    contentClassName="action-menu-compact"
+                    trigger={
+                      <Button variant="ghost" size="icon" title="Chat options">
+                        <Ellipsis size={16} aria-hidden="true" />
+                      </Button>
+                    }
+                    onCloseAutoFocus={(event) => {
+                      const next = renameNext.current;
+                      if (!next) return;
+                      renameNext.current = undefined;
+                      event.preventDefault();
+                      startRename(next);
                     }}
                   >
-                    <span className="chat-list-dot" data-status={task.status} aria-hidden="true" />
-                    <span className="chat-list-title">{task.title}</span>
-                    <span className="sr-only">, {taskLabels[task.status]}</span>
-                    {Boolean(unread[task.id]) && chat !== task.id && (
-                      <span className="chat-list-unread">
-                        {unread[task.id]! > 99 ? '99+' : unread[task.id]}
-                        <span className="sr-only"> unread</span>
-                      </span>
+                    {(closeMenu) => (
+                      <>
+                        <ActionMenuItem
+                          onClick={() => {
+                            renameNext.current = task;
+                            closeMenu();
+                          }}
+                        >
+                          Rename
+                        </ActionMenuItem>
+                        {group.label === 'Done' && (
+                          <ActionMenuItem
+                            disabled={closing === task.id}
+                            onClick={() => {
+                              closeMenu();
+                              void close(task);
+                            }}
+                          >
+                            Close chat
+                          </ActionMenuItem>
+                        )}
+                      </>
                     )}
-                  </button>
-                  {group.label === 'Done' && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="chat-list-close"
-                      aria-label={`Close ${task.title}`}
-                      title="Close chat"
-                      disabled={closing === task.id}
-                      onClick={() => void close(task)}
-                    >
-                      <X size={16} aria-hidden="true" />
-                    </Button>
-                  )}
+                  </ActionMenu>
                 </li>
               ))}
             </ul>
