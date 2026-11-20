@@ -13,9 +13,9 @@ export function BrowserScreen({
 }: {
   data: { currentBrowser?: CurrentBrowser | null } | null;
   task?: string;
-  onStopped(threadId: string): void;
+  onStopped(browserId: string): void;
 }) {
-  const browserId = data?.currentBrowser?.threadId;
+  const browserId = data?.currentBrowser?.browserId;
   const activity = useRef(data?.currentBrowser?.lastActivityAt);
   activity.current = data?.currentBrowser?.lastActivityAt;
   const [error, setError] = useState('');
@@ -59,7 +59,7 @@ export function BrowserScreen({
       const requestedActivity = activity.current ?? '';
       try {
         const response = await apiResponse(
-          `/api/browser/screen?${task ? `task=${encodeURIComponent(task)}` : `threadId=${encodeURIComponent(browserId)}`}`,
+          task ? `/api/browser/screen?task=${encodeURIComponent(task)}` : '/api/browser/screen',
           {
             cache: 'no-store',
             credentials: 'same-origin',
@@ -148,7 +148,7 @@ export function BrowserScreen({
               </Button>
             )}
             {browserId &&
-              data?.currentBrowser?.threadId === browserId &&
+              data?.currentBrowser?.browserId === browserId &&
               data.currentBrowser.status === 'running' && (
                 <Button
                   variant="ghost"

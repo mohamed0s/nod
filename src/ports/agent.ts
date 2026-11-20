@@ -26,9 +26,11 @@ export interface ModelUsageObservation {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  cacheWrite1hTokens?: number;
   totalTokens: number;
   costUsd: number | null;
   estimateUsd?: number | null;
+  pricingSignature?: string;
   costSource: 'sdk_estimate' | 'unavailable';
   createdAt: string;
 }
@@ -135,6 +137,7 @@ export interface RuntimeContext {
   account?: RuntimeAccount;
   connectedApps?: ConnectedApp[];
   localFiles?: boolean;
+  computerUse?: boolean;
   mcpServers?: ConnectedMcpServer[];
   currentMessageId?: string;
   automatic?: boolean;
@@ -164,6 +167,10 @@ export interface RuntimeContext {
     shortened?: boolean;
     createdAt?: string | Date;
   }>;
+  conversationLanguage?: {
+    owner?: { at: string; text: string };
+    nod?: { at: string; text: string };
+  };
   memory?: string;
   memoryBrief?: MemoryBrief;
   learnedSkills?: Array<{ name: string; description: string }>;
@@ -173,7 +180,7 @@ export interface RuntimeContext {
   withdrawnRequest?: 'stopped' | 'failed';
   confirmedActions?: string[];
   credentialRequests?: Array<
-    Pick<CredentialRequest, 'turnId' | 'origin' | 'label' | 'kind' | 'status'>
+    Pick<CredentialRequest, 'turnId' | 'origin' | 'label' | 'kind' | 'status' | 'notEntered'>
   >;
   taskContext?: {
     id: string;
@@ -376,7 +383,7 @@ export interface AgentSessionOptions extends ExecutionScope {
   runTool(
     name: string,
     params: unknown,
-    run: () => Promise<AgentToolResult>,
+    run: (signal?: AbortSignal) => Promise<AgentToolResult>,
     options?: { nested?: boolean },
   ): Promise<AgentToolResult>;
   onEvent(event: AgentEvent): void;
@@ -404,3 +411,5 @@ export interface Agent {
 }
 export class ModelRequestError extends Error {}
 export class ContextLimitError extends ModelRequestError {}
+export class OutputLimitError extends Error {}
+export class ToolFailureError extends Error {}

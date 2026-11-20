@@ -60,12 +60,12 @@ export async function createChatVerification(
       turnId: string,
       code: string,
       requestId: string,
-    ) => Promise<{ status: VerificationStatus }>;
+    ) => Promise<{ status: VerificationStatus; notEntered?: boolean }>;
     submitPayment?: (
       turnId: string,
       code: string,
       paymentId: string,
-    ) => Promise<{ status: VerificationStatus }>;
+    ) => Promise<{ status: VerificationStatus; notEntered?: boolean }>;
     present?: (
       threadId: string,
       input: { kind: 'verification_failure'; verification: 'otp' | 'payment' },
@@ -388,7 +388,11 @@ export async function createChatVerification(
                 reserved.code,
                 reserved.requestId,
               );
-        status = result.status === 'submitted' ? 'submitted' : 'unavailable';
+        status = result.notEntered
+          ? 'cancelled'
+          : result.status === 'submitted'
+            ? 'submitted'
+            : 'unavailable';
       } catch {
         status = 'unavailable';
       }
@@ -412,7 +416,7 @@ export async function createChatVerification(
     }
     if (input.persistVerification)
       await transaction((client) => input.persistVerification!(client, response), pool);
-    if (status !== 'submitted' && !input.persistVerification) {
+    if (status === 'unavailable' && !input.persistVerification) {
       const message = await options
         .present?.(reserved.threadId, {
           kind: 'verification_failure',

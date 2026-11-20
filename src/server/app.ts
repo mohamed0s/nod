@@ -37,11 +37,14 @@ import {
   reactToAssistantMessage,
   resetThread,
   restartChatContext,
+  clearChatContext,
   resumeAfterHandoff,
   stopSignal,
+  messageIntakeSignal,
   stopThread,
   submitUserMessage,
 } from './thread.ts';
+import { reactionReplySql } from './turn-chain.ts';
 import { isMessageReaction } from '../shared/emoji.ts';
 import { accessKey, registerLocalAccess } from './access.ts';
 import { logFailure, withFailureLog, type FailureLogSink } from './failure-log.ts';
@@ -63,10 +66,6 @@ import { registerWorkAdmission, type WorkAdmission } from './work-admission.ts';
 import { registerAnalyticsRoutes, snapshotAnalytics, type CaptureAnalytics } from './analytics.ts';
 import { messagePreview } from './message-preview.ts';
 
-const reactionReplySql = (alias: 'm' | 'target') =>
-  `EXISTS (SELECT 1 FROM turns reaction_turn
-    WHERE reaction_turn.owner_id=${alias}.owner_id AND reaction_turn.message_id=${alias}.id
-      AND starts_with(reaction_turn.source_id,'reaction-reply:'))`;
 const messageTaskSql = `(SELECT k.id FROM turns w JOIN tasks k ON k.owner_id=w.owner_id
     AND (k.id=w.task_id OR (k.id=w.session_id AND k.session_id=k.id))
   WHERE w.id=m.turn_id AND w.owner_id=m.owner_id AND w.session_id<>m.thread_id ORDER BY k.created_at DESC,k.id DESC LIMIT 1)`;
@@ -74,15 +73,28 @@ const messageFields = `m.id,m.role,m.text,${messageTaskSql} AS "taskId",CASE WHE
  (m.role='user' AND (m.approval_answer IS NOT NULL OR (m.question_answer IS NOT NULL AND m.text<>'' AND jsonb_array_length(m.attachments)=0))) AS "cardAnswer",
  CASE WHEN m.role='assistant' AND m.answer_choices IS NOT NULL THEN (SELECT json_build_object('answer',a.question_answer,'text',a.text) FROM messages a
    WHERE a.reply_to_message_id=m.id AND a.owner_id=m.owner_id AND a.role='user' AND a.question_answer IS NOT NULL AND a.text<>'' AND jsonb_array_length(a.attachments)=0 ORDER BY a.created_at,a.id LIMIT 1) END AS "choiceAnswer",
- CASE WHEN m.role='assistant' THEN (SELECT json_build_object('id',a.id,'status',a.status,'action',a.action,'title',a.title,'args',a.args,'active',u.status IN ('running','waiting'),'executionActive',e.status IN ('queued','running','waiting')) FROM approvals a
+ CASE WHEN m.role='assistant' THEN (SELECT json_build_object('id',a.id,'status',a.status,'action',a.action,'title',a.title,'decline',a.decline,'args',a.args,'failure',CASE WHEN a.status IN ('expired','uncertain') AND jsonb_typeof(a.result->'error')='string' THEN a.result->>'error' END,'active',u.status IN ('running','waiting'),'executionActive',e.status IN ('queued','running','waiting')) FROM approvals a
    JOIN turns u ON u.id=a.turn_id AND u.owner_id=a.owner_id LEFT JOIN turns e ON e.id=a.execution_turn_id AND e.owner_id=a.owner_id
    WHERE a.confirmation_message_id=m.id AND a.owner_id=m.owner_id LIMIT 1) END AS "approval",
  CASE WHEN m.role='assistant' AND (m.answer_choices IS NOT NULL OR EXISTS (SELECT 1 FROM approvals a WHERE a.confirmation_message_id=m.id AND a.owner_id=m.owner_id))
    THEN (SELECT COALESCE(
      (SELECT json_build_object('kind','task','id',k.id,'title',k.title) FROM tasks k WHERE k.owner_id=m.owner_id AND k.session_id=w.session_id ORDER BY k.created_at DESC LIMIT 1),
      (SELECT json_build_object('kind','schedule','id',r.id,'title',r.title) FROM schedule_runs r WHERE r.owner_id=m.owner_id AND r.turn_id=w.session_id LIMIT 1))
-     FROM turns w WHERE w.id=m.turn_id AND w.owner_id=m.owner_id) END AS "work",
- CASE WHEN target.id IS NULL OR ${reactionReplySql('target')} THEN NULL ELSE json_build_object('id',target.id,'role',target.role,'text',COALESCE(m.reply_quote,''),'isQuote',m.reply_quote IS NOT NULL) END AS "replyTo"`;
+     FROM turns w WHERE w.id=m.turn_id AND w.owner_id=m.owner_id)
+   WHEN m.role='user' THEN (SELECT json_build_object('kind','task','id',k.id,'title',k.title,'turnId',d.id) FROM turns d
+     JOIN tasks k ON k.id=d.task_id AND k.owner_id=d.owner_id
+     WHERE d.owner_id=m.owner_id AND d.message_id=m.id AND d.task_id IS NOT NULL AND d.task_revision>1
+     ORDER BY d.created_at DESC,d.id DESC LIMIT 1) END AS "work",
+ CASE WHEN target.id IS NULL OR ${reactionReplySql('target')} THEN NULL ELSE COALESCE(
+   CASE WHEN m.role='assistant' AND target.role='assistant' THEN (SELECT json_build_object('id',o.id,'role','user','text','','isQuote',false)
+     FROM tasks k JOIN messages o ON o.owner_id=k.owner_id AND o.role='user' AND o.hidden_at IS NULL AND o.id=COALESCE(
+       (SELECT d.message_id FROM turns d WHERE d.owner_id=k.owner_id AND d.task_id=k.id AND d.task_revision>1
+         AND d.message_id IS NOT NULL AND COALESCE(d.started_at,d.finished_at)<=m.created_at
+         AND NOT starts_with(COALESCE(d.source_id,''),'reaction-reply:')
+         ORDER BY COALESCE(d.started_at,d.finished_at) DESC,d.id DESC LIMIT 1),
+       k.source_message_id)
+     WHERE k.owner_id=m.owner_id AND k.message_id=target.id LIMIT 1) END,
+   json_build_object('id',target.id,'role',target.role,'text',COALESCE(m.reply_quote,''),'isQuote',m.reply_quote IS NOT NULL)) END AS "replyTo"`;
 const chatMessageSql = `NOT ${reactionReplySql('m')}`;
 const textMessageOptions = {
   bodyLimit: 8 * 1024 * 1024,
@@ -99,8 +111,10 @@ type ApprovalRow = {
   action: string;
   args: unknown;
   title?: string | null;
+  decline?: string | null;
   active: boolean;
   executionActive: boolean | null;
+  failure?: string | null;
 };
 type ChoiceAnswerRow = { answer: unknown; text: string };
 
@@ -170,8 +184,10 @@ function messageView(row: MessageRow): Message {
           approval: {
             id: approval.id,
             state: approvalState(approval),
+            ...(approval.failure ? { failure: approval.failure } : {}),
             ...approvalTitle(approval.action),
             ...(approval.title ? { title: approval.title } : {}),
+            ...(approval.decline ? { decline: approval.decline } : {}),
             ...approvalContent(approval.action, approval.args),
           },
         }
@@ -348,10 +364,16 @@ export async function createApp(dependencies: AppDependencies = {}) {
   app.get('/api/configuration', async () => publicConfiguration());
   app.get('/api/state', async () => {
     const thread = await activeThread(pool);
+    const cleared = (
+      await pool.query<{ at: string | null }>(
+        `SELECT to_char(chat_cleared_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at FROM threads WHERE id=$1 AND owner_id=$2`,
+        [thread.id, ownerId],
+      )
+    ).rows[0]?.at;
     const messageRows = pool.query(
-      `SELECT ${messageFields} FROM (SELECT m.* FROM messages m WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL AND ${chatMessageSql} ORDER BY date_trunc('milliseconds',m.created_at) DESC,m.id DESC LIMIT 151) m
+      `SELECT ${messageFields} FROM (SELECT m.* FROM messages m WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL AND m.created_at>=COALESCE($3::timestamptz,'-infinity') AND ${chatMessageSql} ORDER BY date_trunc('milliseconds',m.created_at) DESC,m.id DESC LIMIT 151) m
          LEFT JOIN messages target ON target.id=m.reply_to_message_id AND target.owner_id=m.owner_id AND target.hidden_at IS NULL ORDER BY date_trunc('milliseconds',m.created_at),m.id`,
-      [ownerId, thread.id],
+      [ownerId, thread.id, cleared ?? null],
     );
     const hiddenMetadata = messageRows.then(({ rows }) =>
       pool.query<{ count: number; ids: string[]; visibleIds: string[] }>(
@@ -406,6 +428,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
     const planning = dependencies.planningTasks?.();
     return {
       threadId: thread.id,
+      ...(cleared ? { chatClearedAt: cleared } : {}),
       ...(recovery ? { chatRecovery: recovery } : {}),
       tasks: await dependencies.taskLedger?.(thread.id),
       hasEarlierMessages,
@@ -498,6 +521,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
       `SELECT ${messageFields} FROM messages m
       LEFT JOIN messages target ON target.id=m.reply_to_message_id AND target.owner_id=m.owner_id AND target.hidden_at IS NULL
       WHERE m.owner_id=$1 AND m.thread_id=$4 AND m.hidden_at IS NULL AND ${chatMessageSql} AND ($2::timestamptz IS NULL OR date_trunc('milliseconds',m.created_at) < $2 OR (date_trunc('milliseconds',m.created_at) = $2 AND $3::uuid IS NOT NULL AND m.id < $3))
+        AND (m.created_at>=COALESCE((SELECT chat_cleared_at FROM threads WHERE id=$4 AND owner_id=$1),'-infinity') OR ${messageTaskSql} IS NOT NULL)
         AND (NOT $6::boolean OR ${messageTaskSql} IS NULL)
         AND ($5::uuid IS NULL OR ${messageTaskSql}=$5 OR m.id=(SELECT t.message_id FROM tasks t WHERE t.id=$5 AND t.owner_id=$1))
       ORDER BY date_trunc('milliseconds',m.created_at) DESC,m.id DESC LIMIT 61`,
@@ -570,6 +594,20 @@ export async function createApp(dependencies: AppDependencies = {}) {
       )
       .parse(request.body);
     const clientMessageId = input.clientMessageId ?? randomUUID();
+    if (
+      input.text.trim().toLowerCase() === '/clear' &&
+      (!input.questionAnswer ||
+        ('custom' in input.questionAnswer && input.questionAnswer.custom === true)) &&
+      !input.approvalAnswer &&
+      !input.verificationRequestId
+    ) {
+      if (input.attachmentIds.length)
+        throw Object.assign(new Error('Send /clear as a text message without attachments.'), {
+          statusCode: 400,
+        });
+      return clearChatContext(input.threadId, clientMessageId);
+    }
+    const signal = await messageIntakeSignal(arrival, input);
     const verification =
       (input.questionAnswer && !('custom' in input.questionAnswer)) || input.approvalAnswer
         ? undefined
@@ -577,6 +615,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
             ...input,
             clientMessageId,
             channel: 'web',
+            signal,
           });
     if (verification) return verification;
     if (input.verificationRequestId)
@@ -606,6 +645,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
         replyQuote: input.replyQuote,
         seenMessageId: input.seenMessageId,
         threadId: input.threadId,
+        chatClearedAt: input.chatClearedAt,
         clientMessageId,
         questionAnswer: input.questionAnswer,
         approvalAnswer: input.approvalAnswer,
@@ -736,7 +776,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
   async function browserScope(query: unknown) {
     const { task } = z.object({ task: z.uuid().optional() }).parse(query);
     const thread = await activeThread(pool);
-    if (!task) return { threadId: thread.id, sessionId: thread.id };
+    if (!task) return { threadId: thread.id };
     const row = (
       await pool.query<{ session_id: string }>(
         'SELECT t.session_id FROM tasks t JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id WHERE t.id=$1 AND t.owner_id=$2 AND u.thread_id=$3',
@@ -746,19 +786,19 @@ export async function createApp(dependencies: AppDependencies = {}) {
     if (!row) throw Object.assign(new Error('Task not found.'), { statusCode: 404 });
     return { threadId: thread.id, sessionId: row.session_id };
   }
-  async function readCurrentBrowser(scope: { threadId: string; sessionId: string }) {
+  async function readCurrentBrowser(scope: { threadId: string; sessionId?: string }) {
     const latest = await pool.query(
-      `SELECT left(COALESCE(m.text,u.prompt),100) AS title,u.status,COALESCE(e.created_at,u.created_at) AS "lastActivityAt"
+      `SELECT u.session_id AS "browserId",left(COALESCE(m.text,u.prompt),100) AS title,u.status,COALESCE(e.created_at,u.created_at) AS "lastActivityAt"
        FROM turns u LEFT JOIN messages m ON m.id=u.message_id
        LEFT JOIN LATERAL (SELECT created_at FROM turn_events WHERE turn_id=u.id AND type IN ('tool_start','tool_complete') AND (summary='browser' OR summary LIKE 'browser %') ORDER BY created_at DESC LIMIT 1) e ON true
-       WHERE u.owner_id=$1 AND u.thread_id=$2 AND u.session_id=$3 AND e.created_at IS NOT NULL
+       WHERE u.owner_id=$1 AND u.thread_id=$2 AND ($3::uuid IS NULL OR u.session_id=$3) AND e.created_at IS NOT NULL
        ORDER BY e.created_at IS NULL,COALESCE(e.created_at,u.created_at) DESC LIMIT 1`,
-      [ownerId, scope.threadId, scope.sessionId],
+      [ownerId, scope.threadId, scope.sessionId ?? null],
     );
     const row = latest.rows[0];
     if (!row) return undefined;
     return {
-      threadId: scope.sessionId,
+      browserId: row.browserId as string,
       title: row.title,
       status: row.status,
       lastActivityAt: row.lastActivityAt,
@@ -786,12 +826,14 @@ export async function createApp(dependencies: AppDependencies = {}) {
   const handoffClosed = 'The browser opens here when Nod hands it to you.';
   async function readBrowserScreen(reply: FastifyReply, query: unknown) {
     const scope = await browserScope(query);
-    const blocked = () => credentialEntryOpen(scope.threadId, scope.sessionId);
+    const browserId =
+      scope.sessionId ?? (await readCurrentBrowser(scope))?.browserId ?? scope.threadId;
+    const blocked = () => credentialEntryOpen(scope.threadId, browserId);
     const paused = 'Browser observations are paused during credential entry.';
     if (await blocked()) return reply.code(423).send({ error: paused });
     let screen: Buffer | null | undefined;
     try {
-      screen = await dependencies.computer?.screenshot(scope.sessionId);
+      screen = await dependencies.computer?.screenshot(browserId);
     } catch (error) {
       const message =
         error instanceof BrowserActionError ? browserErrorMessage(error.code) : undefined;
@@ -804,7 +846,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
       return reply.code(409).send({ error: 'The browser session changed. Request a new view.' });
     if (await blocked()) return reply.code(423).send({ error: paused });
     if (!screen) return reply.code(404).send({ error: 'There is no browser screen yet.' });
-    const screenStatus = dependencies.computer?.screenStatus(scope.sessionId);
+    const screenStatus = dependencies.computer?.screenStatus(browserId);
     reply.header('X-Screen-State', screenStatus?.state ?? 'live');
     if (screenStatus?.capturedAt) reply.header('X-Screen-Captured-At', screenStatus.capturedAt);
     return reply.type('image/png').send(screen);

@@ -6,6 +6,7 @@ import { createPostgresState } from '@chat-adapter/state-pg';
 import type { Pool } from 'pg';
 import { z } from 'zod';
 import type {
+  InboundApproval,
   InboundMessage,
   InboundReaction,
   MessagingChannel,
@@ -15,8 +16,19 @@ import type {
 import { telegramSecret, telegramUserId } from '../../ports/channel-settings.ts';
 import { logRepeatedFailure } from '../../ports/failure-log.ts';
 import { MessagingConnectionError, MessagingTopicError } from '../../ports/messaging.ts';
-import { telegramMessage, telegramPairing, telegramAttachments } from './telegram.ts';
-import { telegramText, whatsappText } from './format.ts';
+import {
+  telegramAttachments,
+  telegramMessage,
+  telegramPairing,
+  telegramUpdateTypes,
+} from './telegram.ts';
+import { modelServiceError } from '../model-error.ts';
+import {
+  canDeliverWhatsAppLiteral,
+  hasLiteralBlock,
+  telegramText,
+  whatsappText,
+} from './format.ts';
 import { contactCards, sharedLocation } from '../../shared/channel-content.ts';
 
 type Environment = Record<string, string | undefined>;
@@ -25,6 +37,25 @@ const logger = new ConsoleLogger('silent');
 const telegramFileBytes = 50 * 1024 * 1024;
 const whatsappImageBytes = 5 * 1024 * 1024;
 const telegramTextLimit = 3500;
+const approveData = 'nod:approval:yes';
+const declineData = 'nod:approval:no';
+const approvalReplyHint = 'Reply directly to this message with yes or no.';
+const telegramId = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const telegramApproval = z.object({
+  id: z.string().min(1).max(128),
+  data: z.enum([approveData, declineData]),
+  from: z.object({ id: telegramId, is_bot: z.literal(false) }),
+  message: z.object({
+    message_id: telegramId,
+    date: telegramId,
+    from: z.object({ id: telegramId, is_bot: z.literal(true) }),
+    chat: z.object({ id: telegramId, type: z.literal('private') }),
+  }),
+});
+const telegramWebhookInfo = z.object({
+  ok: z.literal(true),
+  result: z.object({ url: z.string().min(1), allowed_updates: z.array(z.string()).optional() }),
+});
 const telegramReaction = z.object({
   message_id: z.number().int().nonnegative(),
   user: z.object({
@@ -39,6 +70,17 @@ const telegramReaction = z.object({
     .array(z.object({ type: z.string(), emoji: z.string().min(1).max(64).optional() }))
     .max(10),
 });
+function telegramRefusal(status: number, data: unknown) {
+  const body = z
+    .object({ error_code: z.number().int().optional(), description: z.string().optional() })
+    .catch({})
+    .parse(data);
+  const code = body.error_code ?? status;
+  return code >= 400 && code < 500 && ![401, 403, 404, 429].includes(code)
+    ? body.description || `Telegram refused it with status ${code}.`
+    : undefined;
+}
+
 class TelegramMarkdown extends TelegramFormatConverter {
   override fromMarkdown(markdown: string) {
     return telegramText(markdown);
@@ -69,6 +111,18 @@ class Telegram extends TelegramAdapter {
         : payload,
       request,
     );
+  }
+
+  protected override throwTelegramApiError(
+    method: string,
+    status: number,
+    data: { ok: boolean; error_code?: number; description?: string },
+  ): never {
+    try {
+      return super.throwTelegramApiError(method, status, data);
+    } catch (cause) {
+      throw Object.assign(cause as Error, { refusal: telegramRefusal(status, data) });
+    }
   }
 
   fits(text: string, limit: number) {
@@ -115,6 +169,47 @@ class Telegram extends TelegramAdapter {
       throw cause;
     });
     return String(z.number().int().positive().parse(topic.message_thread_id));
+  }
+
+  canDeliverLiteral(text: string) {
+    return (
+      this.chunks(text).length === 1 &&
+      [
+        this.formatConverter.fromMarkdown(text),
+        this.renderPlainTextMessage({ markdown: text }, null),
+      ].every((value) => convertEmojiPlaceholders(value, 'gchat') === value)
+    );
+  }
+
+  async postApproval(
+    threadId: string,
+    markdown: string,
+    labels: { approve: string; decline: string },
+    replyToMessageId?: string,
+  ) {
+    const thread = this.decodeThreadId(threadId);
+    const { text, plainText } = this.renderMessageBodies({ markdown }, null, 'MarkdownV2');
+    const sent = await this.sendRegularMessage(
+      thread,
+      text,
+      plainText,
+      'MarkdownV2',
+      {
+        inline_keyboard: [
+          [
+            { text: labels.approve, callback_data: approveData },
+            { text: labels.decline, callback_data: declineData },
+          ],
+        ],
+      },
+      threadId,
+      this.buildReplyParameters(replyToMessageId, thread.chatId),
+    );
+    return this.encodeMessageId(thread.chatId, sent.message_id);
+  }
+
+  replyParameters(replyToMessageId: string | undefined, chatId: string) {
+    return this.buildReplyParameters(replyToMessageId, chatId);
   }
 
   typing(threadId: string, signal?: AbortSignal) {
@@ -182,7 +277,9 @@ class WhatsApp extends WhatsAppAdapter {
   }
 
   chunks(text: string) {
-    return splitMessage(convertEmojiPlaceholders(whatsappText(text), 'whatsapp'));
+    return splitMessage(convertEmojiPlaceholders(whatsappText(text), 'whatsapp')).filter((part) =>
+      part.trim(),
+    );
   }
 
   async typing(messageId: string) {
@@ -315,6 +412,7 @@ export function createChatSdkTransport(
   const env = { ...environment };
   const request = options.fetch ?? fetch;
   const mediaRequest = request;
+  const telegramAccountId = env.TELEGRAM_BOT_TOKEN?.split(':')[0];
   const configuration = channelConfiguration(env);
   const configured = (provider: string) =>
     configuration.some(
@@ -353,10 +451,7 @@ export function createChatSdkTransport(
     id: channel.provider,
     status: channel.status,
     missing: channel.missing,
-    accountId:
-      channel.provider === 'telegram'
-        ? env.TELEGRAM_BOT_TOKEN?.split(':')[0]
-        : env.WHATSAPP_PHONE_NUMBER_ID,
+    accountId: channel.provider === 'telegram' ? telegramAccountId : env.WHATSAPP_PHONE_NUMBER_ID,
     allowedSenderIds: [
       channel.provider === 'telegram' ? env.TELEGRAM_ALLOWED_USER_ID : env.WHATSAPP_ALLOWED_NUMBER,
     ].filter((value): value is string => Boolean(value)),
@@ -382,12 +477,81 @@ export function createChatSdkTransport(
     messages,
     ...(reactions.length ? { reactions } : {}),
   });
+  const telegramRequest = (method: string, body: object = {}) =>
+    request(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(3000),
+      redirect: 'error',
+    });
+  let webhookCallbacks: { until: number; enabled: Promise<boolean> } | undefined;
+  async function supportsApprovalButtons() {
+    if (env.TELEGRAM_MODE === 'polling') return true;
+    if (!webhookCallbacks || Date.now() >= webhookCallbacks.until) {
+      const enabled = telegramRequest('getWebhookInfo')
+        .then(async (response) => {
+          if (!response.ok) return false;
+          const info = telegramWebhookInfo.safeParse(await response.json());
+          if (!info.success) return false;
+          const updates = info.data.result.allowed_updates;
+          return !updates?.length || updates.includes('callback_query');
+        })
+        .catch(() => false);
+      webhookCallbacks = { until: Date.now() + 60_000, enabled };
+    }
+    return webhookCallbacks.enabled;
+  }
+
+  async function acknowledgeApproval(
+    callbackId: string,
+    result: Parameters<InboundApproval['acknowledge']>[0],
+  ) {
+    const response = await telegramRequest('answerCallbackQuery', {
+      callback_query_id: callbackId,
+      text: {
+        recorded: 'Answer recorded.',
+        unavailable: 'No answer was recorded for this tap.',
+        retry: 'Nod is still processing this chat. Try tapping again.',
+      }[result],
+    }).catch(() => {
+      throw new MessagingConnectionError('Telegram could not acknowledge the approval tap.');
+    });
+    if (response.ok) {
+      const acknowledged = z.object({ ok: z.literal(true), result: z.literal(true) });
+      if (
+        acknowledged.safeParse(
+          await response
+            .clone()
+            .json()
+            .catch(() => undefined),
+        ).success
+      )
+        return;
+    }
+    throw await modelServiceError(
+      response,
+      'Telegram approval acknowledgement',
+      [env.TELEGRAM_BOT_TOKEN!, env.TELEGRAM_WEBHOOK_SECRET_TOKEN!, callbackId],
+      ['description', 'error_code'],
+    );
+  }
+
   let closed = false;
   let polling = false;
   let offsetsReady: Promise<unknown> | undefined;
   const transport: MessagingTransport = {
     channels,
-    async poll(accept, pair, react) {
+    canDeliverLiteral({ channelId, text, literal }) {
+      if (channelId === 'telegram' && telegram) {
+        return hasLiteralBlock(text, literal) && telegram.canDeliverLiteral(text);
+      }
+      if (channelId === 'whatsapp' && whatsapp) {
+        return canDeliverWhatsAppLiteral(text, literal);
+      }
+      return false;
+    },
+    async poll(accept, pair, react, approve) {
       if (closed || polling || !telegram || env.TELEGRAM_MODE !== 'polling') return;
       polling = true;
       let requesting = false;
@@ -417,7 +581,7 @@ export function createChatSdkTransport(
               offset: Number(saved.rows[0]?.next_offset ?? 0),
               limit: 100,
               timeout: 0,
-              allowed_updates: ['message', 'message_reaction'],
+              allowed_updates: telegramUpdateTypes,
             }),
             signal: AbortSignal.timeout(10_000),
           },
@@ -466,6 +630,7 @@ export function createChatSdkTransport(
             throw new Error('Telegram update could not be accepted.');
           for (const message of parsed.messages ?? []) await accept(message);
           for (const reaction of parsed.reactions ?? []) await react?.(reaction);
+          for (const approval of parsed.approvals ?? []) await approve?.(approval);
           if (parsed.pairing) await pair?.(parsed.pairing);
           await pool.query(
             `INSERT INTO channel_poll_offsets(provider,account_id,next_offset,updated_at) VALUES('telegram',$1,$2,now())
@@ -543,8 +708,35 @@ export function createChatSdkTransport(
             update_id: z.number().int().nonnegative(),
             message: z.unknown().optional(),
             message_reaction: z.unknown().optional(),
+            callback_query: z.unknown().optional(),
           })
           .safeParse(payload);
+        if (update.success && update.data.callback_query !== undefined) {
+          const callback = telegramApproval.safeParse(update.data.callback_query);
+          if (!callback.success) return accepted();
+          const { id, data, from, message } = callback.data;
+          if (
+            !telegramAccountId ||
+            String(message.from.id) !== telegramAccountId ||
+            String(from.id) !== env.TELEGRAM_ALLOWED_USER_ID ||
+            message.chat.id !== from.id
+          )
+            return accepted();
+          return {
+            ...accepted(),
+            approvals: [
+              {
+                channelId: 'telegram',
+                accountId: telegramAccountId,
+                senderId: String(from.id),
+                threadId: telegram.encodeThreadId({ chatId: String(message.chat.id) }),
+                messageId: `${message.chat.id}:${message.message_id}`,
+                approved: data === approveData,
+                acknowledge: (result) => acknowledgeApproval(id, result),
+              },
+            ],
+          };
+        }
         const reacted = telegramReaction.safeParse(
           update.success ? update.data.message_reaction : undefined,
         );
@@ -783,6 +975,38 @@ export function createChatSdkTransport(
               ),
             })
           : input.threadId;
+      let id = '';
+      const ids: string[] = [];
+      const gone = (reason: string, cause?: unknown) =>
+        !id && threadId !== input.threadId && /message thread not found/i.test(reason)
+          ? new MessagingTopicError('The Telegram topic is no longer available.', { cause })
+          : undefined;
+      const goneOr = (cause: unknown) =>
+        (cause instanceof Error && gone(cause.message, cause)) || cause;
+      const telegramParts =
+        input.channelId === 'telegram' ? telegram!.chunks(input.text) : undefined;
+      let sendApprovalHint = false;
+      if (
+        telegram &&
+        telegramParts?.length &&
+        input.approval &&
+        !attachments.length &&
+        env.TELEGRAM_ALLOWED_USER_ID &&
+        input.threadId === telegram.encodeThreadId({ chatId: env.TELEGRAM_ALLOWED_USER_ID })
+      ) {
+        if (telegramParts.length === 1 && (await supportsApprovalButtons())) {
+          const approvalId = await telegram
+            .postApproval(threadId, telegramParts[0]!, input.approval, input.replyToMessageId)
+            .catch((cause: unknown) => {
+              throw goneOr(cause);
+            });
+          return { id: approvalId, ids: [approvalId], approvalButtons: true };
+        }
+        const last = telegramParts.length - 1;
+        const [part, ...rest] = telegram.chunks(`${telegramParts[last]}\n\n${approvalReplyHint}`);
+        if (part && !rest.length) telegramParts[last] = part;
+        else sendApprovalHint = true;
+      }
       const thread = bot.thread(threadId);
       const unsent = attachments.filter((file) =>
         input.channelId === 'whatsapp'
@@ -802,34 +1026,46 @@ export function createChatSdkTransport(
         telegram!.fits(input.text, 1024)
           ? input.text
           : '';
-      let id = '';
-      const ids: string[] = [];
-      const gone = (reason: string, cause?: unknown) =>
-        !id && threadId !== input.threadId && /message thread not found/i.test(reason)
-          ? new MessagingTopicError('The Telegram topic is no longer available.', { cause })
-          : undefined;
-      const refused = async (response: Response, failure: string) => {
-        const reason = z
-          .object({ description: z.string().max(2000) })
-          .safeParse(await response.json().catch(() => undefined));
-        return (reason.success && gone(reason.data.description)) || new Error(failure);
+      const refused = (status: number, data: unknown) => {
+        const reason = z.object({ description: z.string().max(2000) }).safeParse(data);
+        const topic = reason.success ? gone(reason.data.description) : undefined;
+        if (topic) throw topic;
+        return telegramRefusal(status, data);
       };
       const post = (message: Parameters<typeof thread.reply>[1]) =>
         (input.replyToMessageId
           ? thread.reply(input.replyToMessageId, message)
           : thread.post(message)
         ).catch((cause: unknown) => {
-          throw (cause instanceof Error && gone(cause.message, cause)) || cause;
+          throw goneOr(cause);
         });
-      const messages =
-        input.channelId === 'telegram'
-          ? telegram!.chunks(caption ? '' : input.text).map((markdown) => ({ markdown }))
-          : whatsapp!.chunks(input.text).map((raw) => ({ raw }));
+      const messages = telegramParts
+        ? (caption ? [] : telegramParts).map((markdown) => ({ markdown }))
+        : whatsapp!.chunks(input.text).map((raw) => ({ raw }));
       for (const message of messages) {
         const sent = await post(message);
         id ||= sent.id;
         ids.push(sent.id);
       }
+      if (sendApprovalHint && id) {
+        try {
+          const hint = await thread.reply(id, { markdown: approvalReplyHint });
+          ids.push(hint.id);
+        } catch (cause) {
+          logRepeatedFailure('channel_approval_hint_failed', 'telegram', cause, {
+            provider: 'telegram',
+          });
+        }
+      }
+      const refusals = new Map<(typeof attachments)[number], string>();
+      const sendCaption = async () => {
+        if (caption)
+          for (const part of telegram!.chunks(input.text)) {
+            const sent = await post({ markdown: part });
+            id ||= sent.id;
+            ids.push(sent.id);
+          }
+      };
       for (const file of attachments) {
         if (unsent.includes(file)) continue;
         if (input.channelId === 'telegram' && /^audio\/(ogg|mpeg|mp4)$/.test(file.mimeType)) {
@@ -838,11 +1074,8 @@ export function createChatSdkTransport(
           body.set('chat_id', decoded.chatId);
           if (decoded.messageThreadId)
             body.set('message_thread_id', String(decoded.messageThreadId));
-          if (input.replyToMessageId)
-            body.set(
-              'reply_parameters',
-              JSON.stringify({ message_id: Number(input.replyToMessageId.split(':').at(-1)) }),
-            );
+          const replyParameters = telegram!.replyParameters(input.replyToMessageId, decoded.chatId);
+          if (replyParameters) body.set('reply_parameters', JSON.stringify(replyParameters));
           let bytes: Uint8Array;
           try {
             bytes = await file.read();
@@ -855,7 +1088,13 @@ export function createChatSdkTransport(
             `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVoice`,
             { method: 'POST', body, signal: AbortSignal.timeout(60_000), redirect: 'error' },
           );
-          if (!response.ok) throw await refused(response, 'Voice delivery was not confirmed.');
+          if (!response.ok) {
+            const refusal = refused(response.status, await response.json().catch(() => undefined));
+            if (!refusal) throw new Error('Voice delivery was not confirmed.');
+            refusals.set(file, refusal);
+            unsent.push(file);
+            continue;
+          }
           const sent = z
             .object({
               ok: z.literal(true),
@@ -871,12 +1110,7 @@ export function createChatSdkTransport(
         try {
           bytes = await file.read();
         } catch {
-          if (caption)
-            for (const part of telegram!.chunks(input.text)) {
-              const sent = await post({ markdown: part });
-              id ||= sent.id;
-              ids.push(sent.id);
-            }
+          await sendCaption();
           unsent.push(file);
           continue;
         }
@@ -972,20 +1206,26 @@ export function createChatSdkTransport(
                   ...(decoded.messageThreadId
                     ? { message_thread_id: decoded.messageThreadId }
                     : {}),
-                  ...(input.replyToMessageId
-                    ? {
-                        reply_parameters: {
-                          message_id: Number(input.replyToMessageId.split(':').at(-1)),
-                        },
-                      }
-                    : {}),
+                  reply_parameters: telegram!.replyParameters(
+                    input.replyToMessageId,
+                    decoded.chatId,
+                  ),
                   ...message.data,
                 }),
                 signal: AbortSignal.timeout(60_000),
                 redirect: 'error',
               },
             );
-            if (!response.ok) throw await refused(response, 'Message delivery was not confirmed.');
+            if (!response.ok) {
+              const refusal = refused(
+                response.status,
+                await response.json().catch(() => undefined),
+              );
+              if (!refusal) throw new Error('Message delivery was not confirmed.');
+              refusals.set(file, refusal);
+              unsent.push(file);
+              break;
+            }
             const sent = z
               .object({
                 ok: z.literal(true),
@@ -1020,16 +1260,22 @@ export function createChatSdkTransport(
             id ||= sent.id;
             ids.push(sent.id);
           },
-          (cause: unknown) => {
+          async (cause: { refusal?: string } | undefined) => {
             if (cause instanceof MessagingTopicError) throw cause;
-            if (caption) throw new Error('Media delivery was not confirmed.');
+            if (caption) {
+              if (!cause?.refusal) throw new Error('Media delivery was not confirmed.');
+              await sendCaption();
+            }
+            if (cause?.refusal) refusals.set(file, cause.refusal);
             unsent.push(file);
           },
         );
       }
       if (unsent.length) {
         const notice = await input
-          .attachmentFailure?.(unsent.map((file) => file.name))
+          .attachmentFailure?.(
+            unsent.map((file) => ({ name: file.name, reason: refusals.get(file) })),
+          )
           .catch(() => undefined);
         const notices =
           input.channelId === 'telegram'

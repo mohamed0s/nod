@@ -94,7 +94,6 @@ export function Flights({ visual, action }: { visual: FlightsVisual; action?: Re
         const hasDetails = Boolean(
           flight.label ||
           flight.bookingReference ||
-          ((booked || bookingUnknown) && flight.price) ||
           flight.baggage ||
           flight.url ||
           visual.asOf ||
@@ -136,11 +135,9 @@ export function Flights({ visual, action }: { visual: FlightsVisual; action?: Re
                       {booked ? 'Booked' : 'Booking status unknown'}
                     </span>
                   ) : (
-                    <>
-                      {flight.recommended && <span className="presentation-tag">Recommended</span>}
-                      {flight.price && <span className="flight-price">{flight.price}</span>}
-                    </>
+                    flight.recommended && <span className="presentation-tag">Recommended</span>
                   )}
+                  {flight.price && <span className="flight-price">{flight.price}</span>}
                 </div>
               </div>
               {flight.journeys.map((journey) => {
@@ -203,20 +200,12 @@ export function Flights({ visual, action }: { visual: FlightsVisual; action?: Re
                   </summary>
                   <div className="flight-details">
                     {flight.label && <p className="flight-description">{flight.label}</p>}
-                    {(flight.bookingReference ||
-                      ((booked || bookingUnknown) && flight.price) ||
-                      flight.baggage) && (
+                    {(flight.bookingReference || flight.baggage) && (
                       <dl className="flight-facts">
                         {flight.bookingReference && (
                           <div>
                             <dt>Booking reference</dt>
                             <dd>{flight.bookingReference}</dd>
-                          </div>
-                        )}
-                        {(booked || bookingUnknown) && flight.price && (
-                          <div>
-                            <dt>Price</dt>
-                            <dd>{flight.price}</dd>
                           </div>
                         )}
                         {flight.baggage && (
@@ -410,19 +399,7 @@ export function Seats({ visual }: { visual: SeatsVisual }) {
   const shown = visual.sections.filter(
     (section) => sectionFilter === null || section.id === sectionFilter,
   );
-  const rowCount = visual.sections.reduce((total, section) => total + section.rows.length, 0);
-  const shownRowCount = shown.reduce((total, section) => total + section.rows.length, 0);
-  const shownSeatCount = seats.filter(
-    ({ section }) => sectionFilter === null || section.id === sectionFilter,
-  ).length;
-  const coverage =
-    visual.coverage?.scope === 'full-aircraft'
-      ? 'Full aircraft'
-      : visual.coverage?.scope === 'cabin'
-        ? 'Cabin map'
-        : visual.coverage?.scope === 'selection'
-          ? 'Selected rows'
-          : 'Supplied rows';
+  const statuses = new Set(seats.map(({ seat }) => seat.status));
   useEffect(() => {
     const plan = planRef.current;
     const seat = plan?.querySelector<HTMLButtonElement>('.seat[aria-pressed="true"]');
@@ -454,24 +431,14 @@ export function Seats({ visual }: { visual: SeatsVisual }) {
         <div>
           <Plane size={18} aria-hidden="true" />
           <strong>{visual.aircraft || 'Seat plan'}</strong>
-          <span>Schematic</span>
         </div>
         {visual.flight && <p>{visual.flight}</p>}
       </div>
-      <div className="seat-coverage">
-        <div>
-          <strong>{coverage}</strong>
-          <span>
-            {shownRowCount}
-            {sectionFilter !== null && ` of ${rowCount}`} rows · {shownSeatCount}
-            {sectionFilter !== null && ` of ${seats.length}`} seats shown
-          </span>
-        </div>
-        <p>
-          {visual.coverage?.description ||
-            'Only the supplied rows are shown. Other rows or cabins may not be included.'}
-        </p>
-      </div>
+      <p className="seat-coverage">
+        {visual.coverage
+          ? `${{ 'full-aircraft': 'Full aircraft', cabin: 'One cabin', selection: 'Selected rows' }[visual.coverage.scope]} · ${visual.coverage.description}`
+          : 'Only the supplied rows are shown. Other rows or cabins may not be included.'}
+      </p>
       {visual.sections.length > 1 && (
         <div
           className="seat-section-controls"
@@ -502,18 +469,18 @@ export function Seats({ visual }: { visual: SeatsVisual }) {
         </div>
       )}
       <div className="seat-legend">
-        <span>
-          <i className="is-available" />
-          Available
-        </span>
-        <span>
-          <i className="is-unavailable" />
-          Unavailable
-        </span>
-        <span>
-          <i className="is-unknown" />
-          Unknown
-        </span>
+        {(['available', 'unavailable', 'unknown'] as const)
+          .filter((status) => statuses.has(status))
+          .map((status) => (
+            <span key={status}>
+              <i className={`is-${status}`} />
+              {status === 'available'
+                ? 'Available'
+                : status === 'unavailable'
+                  ? 'Unavailable'
+                  : 'Unknown'}
+            </span>
+          ))}
       </div>
       <div className="seat-layout">
         <div
@@ -534,9 +501,6 @@ export function Seats({ visual }: { visual: SeatsVisual }) {
                 <header className="seat-section-header">
                   <h4 id={`${sectionId}-${index}`}>{section.name}</h4>
                   {section.deck && <span>{section.deck}</span>}
-                  <small>
-                    {section.rows.length} {section.rows.length === 1 ? 'row' : 'rows'} shown
-                  </small>
                 </header>
                 <div className="seat-rows">
                   {section.rows.map((row) => (
@@ -603,17 +567,12 @@ export function Seats({ visual }: { visual: SeatsVisual }) {
           </div>
         </div>
         <div className="seat-inspector" id={detailId} aria-live="polite" aria-atomic="true">
-          <div className="seat-inspector-main">
-            <span className="presentation-eyebrow">
-              {recommended ? 'Recommended seat' : 'Seat details'}
-            </span>
-            <strong className="seat-number">{current.seat.label}</strong>
+          <strong className="seat-number">{current.seat.label}</strong>
+          <div className="seat-inspector-facts">
             <span className="seat-location">
-              {current.section.name}
+              {recommended ? 'Recommended' : 'Selected'} · {current.section.name}
               {current.section.deck ? ` · ${current.section.deck}` : ''}
             </span>
-          </div>
-          <div className="seat-inspector-facts">
             <span className={`seat-status is-${current.seat.status}`}>
               {current.seat.status === 'unknown'
                 ? 'Availability unknown'
@@ -624,7 +583,7 @@ export function Seats({ visual }: { visual: SeatsVisual }) {
             {current.seat.price && <strong className="seat-price">{current.seat.price}</strong>}
             {current.seat.note && <p>{current.seat.note}</p>}
           </div>
-          <p className="presentation-footnote">Inspect a seat for details. Nothing is reserved.</p>
+          <p className="presentation-footnote">Nothing is reserved.</p>
         </div>
       </div>
     </>

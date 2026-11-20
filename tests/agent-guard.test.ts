@@ -9,9 +9,16 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import type { Pool } from 'pg';
 import { Compile } from 'typebox/compile';
+import { validateToolArguments } from '@earendil-works/pi-ai';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
-import { appConfirmation, ContextLimitError, ModelRequestError } from '../src/ports/agent.ts';
+import {
+  appConfirmation,
+  ContextLimitError,
+  ModelRequestError,
+  OutputLimitError,
+  ToolFailureError,
+} from '../src/ports/agent.ts';
 import type {
   Agent,
   AgentEvent,
@@ -98,7 +105,7 @@ test('only a terminal context failure requests a chat context restart', async (t
               !(error instanceof ContextLimitError) &&
               error.message.includes(ending === 'quota' ? 'Synthetic quota exceeded.' : 'HTTP 401')
             );
-          return error instanceof Error && error.constructor === Error;
+          return error instanceof OutputLimitError && !(error instanceof ModelRequestError);
         });
     });
 });
@@ -180,6 +187,23 @@ async function fixture(
     await runtime.dispose();
     await rm(directory, { recursive: true, force: true });
   }
+}
+
+function taskFixture(...[run, overrides = {}, runtimeOptions]: Parameters<typeof fixture>) {
+  return fixture(
+    run,
+    {
+      taskContext: {
+        id: randomUUID(),
+        title: 'Synthetic task',
+        brief: 'Do the synthetic task.',
+        doneWhen: 'The synthetic task is done.',
+        revision: 1,
+      },
+      ...overrides,
+    },
+    runtimeOptions,
+  );
 }
 
 async function call(tools: Map<string, AgentTool>, name: string, args: Record<string, unknown>) {
@@ -304,7 +328,7 @@ test('command output removes whole secrets before taking a bounded tail', async 
   assert.equal(records[5]?.output, '{"name":"password","value":"[redacted]"}');
 });
 
-test('partial delivery continues across browser and app reads in chat and saved tasks', async () => {
+test('partial delivery continues across app reads in chat and browser reads in saved tasks', async () => {
   for (const task of [false, true]) {
     const delivered: string[] = [];
     const first = 'The public plan costs EUR 12 per seat. The account price is not checked yet.';
@@ -312,7 +336,8 @@ test('partial delivery continues across browser and app reads in chat and saved 
     let reads = 0;
     const { result, aborted } = await fixture(
       async (tools, _emit, options) => {
-        await call(tools, 'browser', { action: 'open', url: 'https://example.com/pricing' });
+        if (task)
+          await call(tools, 'browser', { action: 'open', url: 'https://example.com/pricing' });
         await call(tools, 'send_message', { text: first, intent: 'update' });
         assert.deepEqual(delivered, [first]);
         assert.equal(options.shouldStop(), false);
@@ -355,7 +380,7 @@ test('partial delivery continues across browser and app reads in chat and saved 
         }),
       },
     );
-    assert.equal(reads, 2);
+    assert.equal(reads, task ? 2 : 1);
     assert.deepEqual(delivered, [first, final]);
     assert.equal(result.status, 'succeeded');
     assert.equal(aborted, false);
@@ -1298,7 +1323,86 @@ test('queued mail checks preserve caller attribution, cancel without invoking pr
   assert.equal(observed.length, 26);
 });
 
-test('a mail check timeout stops the rest of its read and does not wait for an unresponsive provider', async (t) => {
+test('slow mail checks keep only their own emails private while the model still answers the others', async (t) => {
+  const timers: AbortController[] = [];
+  t.mock.method(AbortSignal, 'timeout', () => {
+    const controller = new AbortController();
+    timers.push(controller);
+    return controller.signal;
+  });
+  const pending: Array<() => void> = [];
+  const check = createMailCheck({
+    curator: {
+      id: 'fixture',
+      configured: true,
+      curate: ({ input }) =>
+        new Promise((resolve) => {
+          const { email } = input as { email: { subject: string } };
+          if (email.subject !== 'Synthetic slow') pending.push(() => resolve({ access: false }));
+        }),
+    },
+  });
+  const emails = Array.from({ length: 42 }, (_, index) => ({
+    from: 'fixture@example.test',
+    subject: index % 6 ? 'Receipt' : 'Synthetic slow',
+    text: 'Synthetic receipt',
+  }));
+  const result = check(emails);
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  await settle();
+  for (let tick = 0; tick < 60; tick++) {
+    const started = timers.splice(0);
+    pending.splice(0).forEach((finish) => finish());
+    await settle();
+    for (const timer of started) timer.abort(new DOMException('Synthetic timeout', 'TimeoutError'));
+    await settle();
+  }
+  assert.deepEqual(
+    await result,
+    emails.map((_, index) =>
+      index % 6 ? false : 'the check model did not answer within 15 seconds',
+    ),
+  );
+});
+
+test('five mail check timeouts in a row do not stop a read whose sixth check is answered', async (t) => {
+  const timers: AbortController[] = [];
+  t.mock.method(AbortSignal, 'timeout', () => {
+    const controller = new AbortController();
+    timers.push(controller);
+    return controller.signal;
+  });
+  const pending: Array<() => void> = [];
+  const check = createMailCheck({
+    curator: {
+      id: 'fixture',
+      configured: true,
+      curate: () => new Promise((resolve) => pending.push(() => resolve({ access: false }))),
+    },
+  });
+  const result = check(
+    Array.from({ length: 12 }, () => ({
+      from: 'fixture@example.test',
+      subject: 'Receipt',
+      text: 'Synthetic receipt',
+    })),
+  );
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  await settle();
+  pending.splice(0, 5);
+  for (const timer of timers.slice(0, 5))
+    timer.abort(new DOMException('Synthetic timeout', 'TimeoutError'));
+  for (let tick = 0; tick < 20; tick++) {
+    await settle();
+    pending.splice(0).forEach((finish) => finish());
+  }
+  assert.deepEqual(await result, [
+    ...Array<string>(5).fill('the check model did not answer within 15 seconds'),
+    ...Array<boolean>(7).fill(false),
+  ]);
+});
+
+test('mail check timeouts in every slot stop the rest of the read without waiting for an unresponsive provider', async (t) => {
   const timeout = new AbortController();
   let timers = 0;
   t.mock.method(AbortSignal, 'timeout', (duration: number) => {
@@ -1458,6 +1562,76 @@ test('an unchecked mail body stays private and the result names how many were wi
   assert.match(unavailable.contentWithheld.message, /Mail checks are unavailable\./);
   const checked = await privateEmailResult(thread.data.messages[0], async () => [false]);
   assert.deepEqual(checked, thread.data.messages[0]);
+});
+
+test('skill actions keep their required fields and refuse fields from other actions', async () => {
+  const managed: Array<{ action: string; args: unknown }> = [];
+  await fixture(
+    async (tools) => {
+      const skill = tools.get('skills')!;
+      const valid: Array<Record<string, string>> = [
+        { action: 'list' },
+        { action: 'read', name: 'schedules-and-watches' },
+        {
+          action: 'save',
+          name: 'synthetic-procedure',
+          description: 'A verified synthetic procedure.',
+          body: 'Read the synthetic record.',
+        },
+        {
+          action: 'patch',
+          name: 'synthetic-procedure',
+          old: 'Read the synthetic record.',
+          new: 'Read the revised synthetic record.',
+        },
+      ];
+      for (const args of valid)
+        await skill.execute(
+          validateToolArguments(skill, {
+            type: 'toolCall',
+            id: randomUUID(),
+            name: skill.name,
+            arguments: args,
+          }),
+        );
+      assert.deepEqual(
+        managed.map(({ action }) => action),
+        ['skill_save', 'skill_patch'],
+      );
+      const invalid = [
+        {},
+        { action: 'schedule_create', args: {} },
+        ...valid.flatMap((args, index) => [
+          ...Object.keys(args).map((key) =>
+            Object.fromEntries(Object.entries(args).filter(([name]) => name !== key)),
+          ),
+          { ...args, extra: true },
+          { ...args, action: valid[(index + 1) % valid.length]!.action },
+        ]),
+      ];
+      for (const args of invalid) {
+        let parsed;
+        try {
+          parsed = validateToolArguments(skill, {
+            type: 'toolCall',
+            id: randomUUID(),
+            name: skill.name,
+            arguments: args,
+          });
+        } catch {
+          continue;
+        }
+        await assert.rejects(skill.execute(parsed), /Invalid skills input/);
+      }
+      assert.equal(managed.length, 2);
+    },
+    {
+      manage: async (action, args) => {
+        managed.push({ action, args });
+        return { saved: true };
+      },
+    },
+  );
 });
 
 test('skill reads cannot escape the trusted library or load workspace instructions', async () => {
@@ -1908,7 +2082,7 @@ test('outside results reach Pi in one untrusted block, scripts get them raw, and
   const page = (body: string) => async () => ({
     content: [{ type: 'text' as const, text: body }],
   });
-  await fixture(
+  await taskFixture(
     async (tools, _emit, options) => {
       texts.push(text(await call(tools, 'apps', { action: 'GMAIL_FETCH_EMAILS', args: {} })));
       await assert.rejects(call(tools, 'apps', { action: 'CONNECTED_HTTP', args: {} }), (error) => {
@@ -2011,7 +2185,7 @@ test('outside results reach Pi in one untrusted block, scripts get them raw, and
     [{ [appConfirmation]: 'Send this email?' }, 'waiting_user'],
   ] as const) {
     let notice = '';
-    const turn = await fixture(
+    const turn = await taskFixture(
       async (tools) => {
         notice = text(
           await call(tools, 'apps', {
@@ -2031,7 +2205,7 @@ test('outside results reach Pi in one untrusted block, scripts get them raw, and
   const held = new Promise<void>((resolve) => {
     release = resolve;
   });
-  await fixture(
+  await taskFixture(
     async (tools, _emit, options) => {
       const read = options.runTool('fetch_content', { urls: [] }, async () => {
         await held;
@@ -2132,7 +2306,7 @@ test('secure credential pause prevents subsequent tools in the same execution se
   ]) {
     let managed = false;
     const requested: unknown[] = [];
-    const result = await fixture(
+    const result = await taskFixture(
       async (tools) => {
         for (const invalid of [
           { kind: 'method' },
@@ -2213,7 +2387,7 @@ test('browser checks retain successful named checkbox choices only on their page
       ],
     ],
   ]);
-  await fixture(
+  await taskFixture(
     async (tools) => {
       await call(tools, 'browser', { action: 'open', url });
       await call(tools, 'browser', { action: 'fill', selector: '@query', text: 'Synthetic query' });
@@ -2265,13 +2439,52 @@ test('browser checks retain successful named checkbox choices only on their page
   assert.deepEqual(seen.find(({ selector }) => selector === '@other-save')?.typed, []);
 });
 
+test('links navigate without a check unless they send a known form', async () => {
+  const seen: string[] = [];
+  const url = 'https://example.com/results';
+  const pages = new Map<string, Record<string, unknown>>([
+    ['@link', { controls: [{ role: 'link', name: 'Click here' }], submits: 'unknown' }],
+    [
+      '@form-link',
+      {
+        controls: [{ role: 'link', name: 'Continue' }],
+        submits: { method: 'POST', to: 'https://example.com/book' },
+      },
+    ],
+    ['@button', { controls: [{ role: 'button', name: 'Click here' }], submits: 'unknown' }],
+  ]);
+  await taskFixture(
+    async (tools) => {
+      for (const selector of pages.keys())
+        await call(tools, 'browser', { action: 'click', selector });
+    },
+    {
+      browserStep: async ({ step }) => {
+        seen.push(step.selector ?? '');
+        return 'run';
+      },
+    },
+    {
+      computer: fakeComputer({
+        currentPage: async (_id, step) => ({
+          origin: 'https://example.com',
+          url,
+          ...pages.get(step?.selector ?? ''),
+        }),
+        act: async () => ({ url, text: 'Synthetic page' }),
+      }),
+    },
+  );
+  assert.deepEqual(seen, ['@form-link', '@button']);
+});
+
 test('browser handoff requires a live page, binds its session and stops further work without a link', async () => {
   const sessionId = randomUUID();
   let opened = false;
   let pageError: Error | undefined;
   let holdFails = true;
   const held: string[] = [];
-  const result = await fixture(
+  const result = await taskFixture(
     async (tools) => {
       await assert.rejects(
         call(tools, 'browser', { action: 'handoff', text: ' ' }),
@@ -2337,7 +2550,7 @@ test('browser handoff requires a live page, binds its session and stops further 
   assert.equal(result.result.handoffBrowserId, sessionId);
   assert.equal(result.result.message, 'Complete sign-in on this page, then return control.');
   assert.deepEqual(held, [sessionId]);
-  const ordinary = await fixture(async (tools) => {
+  const ordinary = await taskFixture(async (tools) => {
     await call(tools, 'ask_user', { question: 'What did [the browser](/browser) show?' });
   });
   assert.equal(ordinary.result.handoffBrowserId, undefined);
@@ -2349,7 +2562,7 @@ test('private entry returns page data once and stops before an observation after
     let entries = 0;
     let snapshots = 0;
     const run = () =>
-      fixture(
+      taskFixture(
         async (tools) => {
           const result = await call(tools, 'sign_in', {
             origin: 'https://example.com',
@@ -2397,7 +2610,7 @@ test('private entry returns page data once and stops before an observation after
 
 test('a subagent cannot hand over its browser to the owner', async () => {
   let refused = false;
-  const result = await fixture(async (tools, emit, execution) => {
+  const result = await taskFixture(async (tools, emit, execution) => {
     if (execution.parentRunId) {
       assert.equal(tools.has('create_audio'), false);
       await assert.rejects(
@@ -3392,6 +3605,11 @@ test('repeated input, sign-in and action review failures stop while source text 
       'The action review model is unavailable. Synthetic provider failure.',
     ],
     ['apps', 'Nod could not write an accurate confirmation for this action, so it did not run.'],
+    [
+      'bash',
+      'The workspace command did not run. Trust could not verify permission for all of its effects.',
+    ],
+    ['bash', 'The workspace command did not run because its Trust check failed: HTTP 503.'],
   ]) {
     let calls = 0;
     await assert.rejects(
@@ -3404,7 +3622,8 @@ test('repeated input, sign-in and action review failures stop while source text 
           if (options.shouldStop([{ name, error: reason }])) break;
         }
       }),
-      /failed five times/,
+      (error: unknown) =>
+        error instanceof ToolFailureError && /failed five times/.test(error.message),
     );
     assert.equal(calls, 5);
   }

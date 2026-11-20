@@ -7,7 +7,7 @@ sidebar:
 
 Each task has its own chat. The chat list on the left of the web app shows **Main** and one chat per task, so you can follow and continue each piece of work on its own. The **Scheduled** page holds open tasks, schedules and their recent runs. Select **New schedule** to open chat, where Nod helps you decide what to do and when.
 
-Nod keeps quick answers, simple lookups and status questions in chat. It starts a saved task for substantial work, including multi-step work it can finish in one sitting, such as research across sources, checked comparisons or report creation, and for an outside wait, such as a person, a reply or an action elsewhere, or work you ask it to track. You never pick an execution mode: Nod starts the task itself and lets it finish the assigned work.
+Nod keeps quick answers, simple lookups and status questions in chat. It starts a saved task for substantial work, including multi-step work it can finish in one sitting, such as research across sources, checked comparisons or report creation, and for an outside wait, such as a person, a reply or an action elsewhere, or work you ask it to track. You never pick an execution mode: Nod starts the task itself and lets it finish the assigned work. Browsing a website, signing in, paying or using a desktop app always runs as its own task, with its own browser and questions.
 
 | You write                              | What Nod does                    |
 | -------------------------------------- | -------------------------------- |
@@ -71,9 +71,11 @@ Select **Rules** to ask Nod in chat to show the rules that apply to every task. 
 
 A compact task preview appears in **Main** with its title, status and current activity, and at the top of the task's own chat. While a task works, its card has its own live line: the current step, the website or app it's working in, and how long it has been quiet. The chat's status line stays with your messages. While it works, a pulsing dot just above the top-right corner of the message box stands for it, and a pink dot with a question mark shows when it needs you. Hover over or focus the dot to see the task's title, or select it to open the task's chat.
 
-The live line also shows up to four recent completed operations, with the newest first. Select the line to hide or show them. This control works separately from the task's details.
+When your message goes to a task, the status line's place shows that task's dot, title and current step under your message. This happens when you reply to one of the task's messages or answer its question, or when Nod sends your message to the task. The task's progress stays there until it posts a message, finishes or needs you. Select it to open the task. When you start a new task, its progress stays on its card.
 
-Select the preview's title to see its controls and, when it has planned steps, its plan as a checklist; select it again to close it. Inside, **Show activity** lists Nod's steps and messages with its tool steps in between, never private model reasoning.
+The live line keeps up to four recent completed steps, with the newest first. Tool calls under the same progress update share one entry; calls without a progress update appear separately. These details start closed for each turn. Select the line to show or hide them. This control works separately from the task's details.
+
+Task details start closed, including failed tasks. The title, status, and current summary stay visible. Select the preview's title to see its controls and, when it has planned steps, its plan as a checklist; select it again to close it. Inside, **Show activity** lists Nod's steps and messages with its tool steps in between, never private model reasoning.
 
 Tasks Nod starts on its own, such as a reply your notification rule asks for, show the same line on their card, with no typing indicator or chat status line. Useful, verified milestones arrive as chat messages, with what is complete and what remains.
 
@@ -84,6 +86,8 @@ The progress indicator shows the task title above its current step. Both wrap so
 ## Reply or stop one task
 
 In the web app, open the task's chat and type to continue that task. Each message there replies to the chat's latest message from Nod, so a "yes" answers that task's own question or approval. In Telegram and WhatsApp, use their reply controls on the task's first message, a question or a result. With [Telegram topics](/use/channels/#telegram-topics) on, write in the task's topic instead; it works like the task's chat in the web app. A message in **Main**, or without a reply target in a chat app, goes to the main chat. Nod can send that message to one or more open tasks when your intent is clear. If the target is unclear, Nod asks. To pick up a finished or stopped task, write in its chat, or reply to one of its messages in a chat app.
+
+Say "Try again" just after Nod reports the result of a task you requested. In the web app, say it in that task's chat. In a chat app, the result must be in that chat. Nod continues the task with your original request and checks whether an action already happened before repeating it.
 
 When a task waits for you in its browser, its preview in chat and on **Scheduled** shows **Open browser**, which takes you to the live page. See [Take over the browser](/use/browser/#take-over-the-browser).
 
@@ -133,11 +137,12 @@ Telegram and WhatsApp show each task as messages Nod writes in your language. Th
 
 Use the chat app's **Reply** control to send an update or answer to a task. Other messages go to the main chat. These commands answer from Nod's task records, and Nod words the reply:
 
-| Command   | Result                                                                                                  |
-| --------- | ------------------------------------------------------------------------------------------------------- |
-| `/tasks`  | List open tasks and their current state.                                                                |
-| `/status` | Show each open task's goal, steps and current state. Reply to a task message to see only that task.     |
-| `/stop`   | Stop all active work and close open tasks. Reply to a task message with `/stop` to stop only that task. |
+| Command   | Result                                                                                                             |
+| --------- | ------------------------------------------------------------------------------------------------------------------ |
+| `/tasks`  | List open tasks and their current state.                                                                           |
+| `/status` | Show each open task's goal, steps and current state. Reply to a task message to see only that task.                |
+| `/stop`   | Stop all active work and close open tasks. Reply to a task message with `/stop` to stop only that task.            |
+| `/clear`  | Start fresh main-chat context and a clean view. Independent tasks keep running. Previous messages stay searchable. |
 
 The task list sends one message per task. You can reply to that message, the task's first message, a question, a file, a result or a status response. If Nod cannot match a reply to a task, `/stop` asks you to select a task. It does not stop all work.
 
@@ -175,7 +180,7 @@ stateDiagram-v2
   needs --> Stopped: you move on
 ```
 
-A question stays **Needs you** until you reply to it or continue its session. An unrelated chat message does not answer it. A failed task opens its card, so **Open chat** and **Stop this task** are in view. A task that stops without a plan or a result shows **Needs you** with a note to reply to continue. A task that fails, including one Nod started on its own, says so in chat with the task's name and what stopped it. When a task reaches its spending check-in, it shows **Needs you** with the check-in question. A stopped task shows **Stopped**. Reply to the task to continue the same saved session. While a task works on your reply, the chat shows that Nod is working.
+A question stays **Needs you** until you reply to it or continue its session. An unrelated chat message does not answer it. Select a failed task's title to open its details, **Open chat** and **Stop this task**. A task that stops without a plan or a result shows **Needs you** with a note to reply to continue. A task that fails, including one Nod started on its own, says so in chat with the task's name and what stopped it. When a task reaches its spending check-in, it shows **Needs you** with the check-in question. A stopped task shows **Stopped**. Reply to the task to continue the same saved session. While a task works on your reply, the chat shows that Nod is working. In the web and desktop apps, when Main hands your message to a task, the bottom of Main shows the task's title and current step until it posts a message, finishes or needs you.
 
 In the web app, a message in **Main** never answers a question or approval that a task's chat is waiting on. Answer it in that task's chat. With Telegram topics on, a message in General answers only the latest message Nod sent there, so answer a task's approval in its topic. Otherwise, in Telegram and WhatsApp, if you ask a question in the main chat after a task's yes/no approval without replying directly, Nod closes that approval without running its action. The task remains open with a message that says its current work stopped. Reply to that message to continue what is unfinished.
 
