@@ -3,6 +3,7 @@ import {
   clampThinkingLevel,
   createAssistantMessageEventStream,
   isContextOverflow,
+  isRetryableAssistantError,
   type Api,
   type AssistantMessage,
   type Context,
@@ -87,7 +88,7 @@ export function createTurnFallback(options: {
 
   const unavailable = (message: AssistantMessage) =>
     message.stopReason === 'error' && !isContextOverflow(message, window)
-      ? modelUnavailable(message.errorMessage)
+      ? modelUnavailable(message.errorMessage, isRetryableAssistantError(message))
       : undefined;
 
   function move(next: number) {

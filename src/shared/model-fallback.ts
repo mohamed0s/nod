@@ -21,10 +21,13 @@ function httpStatus(text: string) {
   return status >= 400 ? status : undefined;
 }
 
-export function modelUnavailable(text: string | undefined): ModelUnavailable | undefined {
+export function modelUnavailable(
+  text: string | undefined,
+  retryable = false,
+): ModelUnavailable | undefined {
   if (!text || refusal.test(text)) return;
   const status = httpStatus(text);
-  if (status === 402) return 'quota';
+  if (status === 402 || (status === 400 && /credit balance is too low/i.test(text))) return 'quota';
   if (status === 408) return 'busy';
   if (status === 429)
     return quota.test(text) && !/rate.?limit|too many requests|capacity|overloaded/i.test(text)
@@ -36,7 +39,7 @@ export function modelUnavailable(text: string | undefined): ModelUnavailable | u
       : undefined;
   if (overflow.test(text) && !tokenRate.test(text)) return;
   if (quota.test(text)) return 'quota';
-  if (busy.test(text)) return 'busy';
+  if (retryable || busy.test(text)) return 'busy';
 }
 
 export function retryDelayMs(header: (name: string) => string | null | undefined, text = '') {

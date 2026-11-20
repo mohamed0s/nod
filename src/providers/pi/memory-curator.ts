@@ -3,6 +3,7 @@ import {
   InMemoryCredentialStore,
   getSupportedThinkingLevels,
   isContextOverflow,
+  isRetryableAssistantError,
   type Api,
   type AssistantMessage,
   type Context,
@@ -291,7 +292,7 @@ export function createPiMemoryCurator(options: {
           reply.stopReason === 'error' &&
           !signal?.aborted &&
           !isContextOverflow(reply, model.contextWindow)
-            ? modelUnavailable(reply.errorMessage)
+            ? modelUnavailable(reply.errorMessage, isRetryableAssistantError(reply))
             : undefined;
         let reply = await complete();
         if (

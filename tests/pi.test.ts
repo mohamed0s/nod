@@ -9110,8 +9110,31 @@ test('curator checks retry a busy model once, then use the next backup, and neve
     ['Provider finish_reason: content_filter (HTTP 200)', undefined],
     ['Context length exceeded: maximum context is 8192 tokens.', undefined],
     ['Rate limit reached for tokens per minute (TPM). Please retry after 2s.', 'busy'],
+    ['400 Your credit balance is too low to access the Anthropic API. (HTTP 400)', 'quota'],
+    ['400 Provider returned error (HTTP 400)', undefined],
   ] as const)
     assert.equal(modelUnavailable(text), expected, text);
+  const { isRetryableAssistantError } = await import('@earendil-works/pi-ai');
+  for (const text of [
+    '{"type":"error","error":{"type":"api_error","message":"Internal server error"}} (HTTP 200) [request phase: stream]',
+    'server_error: An error occurred while processing your request. You can retry your request. (HTTP 200) [request phase: stream]',
+    'Provider returned error (HTTP 200) [request phase: stream]',
+    'ResourceExhausted: The NIM worker has no free capacity [request phase: stream]',
+  ]) {
+    const reply = { ...fauxAssistantMessage(''), stopReason: 'error' as const, errorMessage: text };
+    assert.equal(modelUnavailable(text, isRetryableAssistantError(reply)), 'busy', text);
+  }
+  assert.equal(
+    modelUnavailable(
+      'Provider finish_reason: content_filter (HTTP 200)',
+      isRetryableAssistantError({
+        ...fauxAssistantMessage(''),
+        stopReason: 'error',
+        errorMessage: 'Provider finish_reason: content_filter (HTTP 200)',
+      }),
+    ),
+    undefined,
+  );
   assert.equal(
     retryDelayMs((name) => (name === 'retry-after' ? '12' : null)),
     12_000,
