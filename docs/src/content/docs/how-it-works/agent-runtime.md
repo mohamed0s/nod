@@ -272,7 +272,7 @@ For an enabled recurring schedule on its current revision, Nod chooses the stabl
 
 ## Message cadence
 
-In web and desktop, the live line shows up to four completed tool calls from its current turn, with the newest first. Select the line to hide or show them. Each entry uses the description saved before that call started in the same run, or the tool's display label. A newer owner message prevents an older description from being reused. Status updates do not appear as completed work. The server reads these entries from `turn_events`, with no extra model request. Each chat and task keeps its own list.
+In web and desktop, the live line shows up to four completed tool calls from its current turn, with the newest first. Select the line to hide or show them. Each entry uses the description saved before that call started in the same run, or the tool's display label. Consecutive entries with the same description show as one entry that lists their websites. A newer owner message prevents an older description from being reused. Status updates do not appear as completed work. The server reads these entries from `turn_events`, with no extra model request. Each chat and task keeps its own list.
 
 Nod keeps two things apart:
 

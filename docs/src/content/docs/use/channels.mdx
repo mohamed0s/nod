@@ -224,6 +224,7 @@ With topics on:
 
 - The main chat stays in **General**, with scheduled results and notifications. A task started inside a scheduled run stays there with that run.
 - Each task gets a topic named after it when its first message arrives. Its progress, questions, approvals, files and result go there. If Telegram refuses to create the topic, that message arrives in General, and Nod tries again with the task's next message.
+- When you rename a chat in the app, or a new chat gets its short title after Nod's first reply, its topic is renamed to match. If Telegram refuses, the chat keeps its new name in the app, and Nod tries again before its next message in that topic. A chat you start in a topic you made keeps your topic's name: it gets no short title, and its topic changes only when you rename the chat in the app.
 - Anything you write in a task's topic goes to that task, as a reply to its latest message. A "yes" there answers that task's approval, a sign-in code goes only to that task's sign-in, and `/status` or `/stop` there applies to that task only.
 - A message in a topic that Nod didn't create starts a new chat, like **New chat** in the app. Later messages in that topic stay in that chat. `/stop` there stops nothing, and `/tasks` and `/status` there cover all tasks.
 - In General, a "yes" without a reply answers only the latest message Nod sent in General, never an approval waiting in a task's topic. A sign-in code sent in General goes only to the main chat's sign-in; for another one, reply to its request.

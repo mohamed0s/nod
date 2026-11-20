@@ -62,14 +62,13 @@ import type { createChatVerification } from './chat-verification.ts';
 import { registerWorkAdmission, type WorkAdmission } from './work-admission.ts';
 import { registerAnalyticsRoutes, snapshotAnalytics, type CaptureAnalytics } from './analytics.ts';
 import { messagePreview } from './message-preview.ts';
+import { messageChatSql } from './chat-scope.ts';
 
 const reactionReplySql = (alias: 'm' | 'target') =>
   `EXISTS (SELECT 1 FROM turns reaction_turn
     WHERE reaction_turn.owner_id=${alias}.owner_id AND reaction_turn.message_id=${alias}.id
       AND starts_with(reaction_turn.source_id,'reaction-reply:'))`;
-const messageTaskSql = `(SELECT k.id FROM turns w JOIN tasks k ON k.owner_id=w.owner_id
-    AND (k.id=w.task_id OR (k.id=w.session_id AND k.session_id=k.id))
-  WHERE w.id=m.turn_id AND w.owner_id=m.owner_id AND w.session_id<>m.thread_id ORDER BY k.created_at DESC,k.id DESC LIMIT 1)`;
+const messageTaskSql = messageChatSql('m');
 const messageFields = `m.id,m.role,m.text,${messageTaskSql} AS "taskId",CASE WHEN m.role='user' THEN m.display_text END AS "displayText",m.audio_caption AS "audioCaption",m.turn_id AS "turnId",m.created_at AS "createdAt",m.attachments,m.stream_id AS "streamId",m.reaction,m.assistant_reaction AS "assistantReaction",m.reply_to_message_id AS "replyToMessageId",m.suggestions,m.presentation,m.answer_choices AS "answerChoices",(${pendingAnswerChoicesSql}) AS "answerChoicesPending",
  (m.role='user' AND (m.approval_answer IS NOT NULL OR (m.question_answer IS NOT NULL AND m.text<>'' AND jsonb_array_length(m.attachments)=0))) AS "cardAnswer",
  CASE WHEN m.role='assistant' AND m.answer_choices IS NOT NULL THEN (SELECT json_build_object('answer',a.question_answer,'text',a.text) FROM messages a

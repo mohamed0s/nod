@@ -232,7 +232,9 @@ export async function captureOwnerInstructions(
              AND (created_at>CASE WHEN $4::uuid IS NULL THEN $5 ELSE LEAST($5,(SELECT created_at - interval '24 hours' FROM tasks WHERE id=$4::uuid AND owner_id=$1)) END OR id=ANY($3::uuid[])) AND text NOT IN (
              SELECT task->>'title' FROM messages offer, jsonb_array_elements(offer.suggestions->'tasks') task
              WHERE offer.owner_id=$1 AND offer.thread_id=$2 AND task->>'title' IS NOT NULL)),
-         started AS (SELECT created_at FROM tasks WHERE id=$4::uuid AND owner_id=$1)
+         started AS (SELECT t.created_at FROM tasks t WHERE t.id=$4::uuid AND t.owner_id=$1
+           AND NOT EXISTS (SELECT 1 FROM messages s JOIN turns st ON st.id=s.turn_id AND st.owner_id=s.owner_id
+             WHERE s.id=t.source_message_id AND s.owner_id=t.owner_id AND st.session_id=t.id))
          (SELECT id,text,created_at,can_authorize FROM said WHERE created_at>$5
            AND CASE WHEN $4::uuid IS NULL THEN chat ELSE mine END ORDER BY created_at DESC,id DESC LIMIT 5)
          UNION (SELECT said.id,said.text,said.created_at,said.can_authorize FROM said, started WHERE said.chat

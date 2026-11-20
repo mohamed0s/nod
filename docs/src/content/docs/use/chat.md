@@ -9,7 +9,7 @@ Chat is where you give Nod work, answer its questions and get the results.
 
 Nod keeps one ongoing conversation with you. The desktop app, the web app, Telegram and WhatsApp all add to that same conversation, so Nod remembers what you said in any of them.
 
-To change topics, type your new request in this conversation. There is no **New chat** control. You do not need to delete data to change topics.
+To change topics, type your new request in this conversation, or select **New chat** in the web app to give it a chat of its own. Each chat keeps its own history, while memory, rules, Vault, connected apps and schedules are shared. See [The chat list](/use/tasks/#the-chat-list). You do not need to delete data to change topics.
 
 Nod follows your latest clear message's language, spoken or typed, including questions, confirmations and connection instructions. An explicit language request takes precedence. Only your own messages set it, never your email or other data, and before you've written anything, such as at the start of setup, Nod writes in English. Asking for an email or document in a different language applies to that output; a neutral acknowledgement such as "OK" keeps the preceding language. What Nod reads on websites, in email and in documents comes back translated. It keeps the original wording only in quotes, such as a menu or button name you need to find, with a short translation when the meaning isn't clear. Voice, region, date format and time zone are separate preferences.
 
@@ -116,7 +116,7 @@ The message box stays open while Nod works, so you can send another message at a
 
 The line describes the work instead of showing internal tool names. When Nod hasn't named a step, it names the app, website or kind of work that's active, or the model Nod is waiting for. It never counts seconds or guesses when Nod will finish. When Nod answers, the answer takes its place. It clears when Nod asks you something or stops, and hides while the app reconnects. A failed send clears the line and shows an error. Steps come from Nod's own short descriptions, which appear as soon as Nod starts the tool they describe, and, when your model shares a summary of its reasoning, from that summary's heading, such as "Researching Málaga travel ideas".
 
-After an operation finishes, up to four recent operations appear below the line, with the newest first. Select the line to hide or show them. The current activity stays visible. The list covers only the current work and clears when a new request starts. It uses saved activity records and needs no extra model request.
+After an operation finishes, up to four recent operations appear below the line, with the newest first. Operations in a row under the same step show once, with the websites they used. Select the line to hide or show them. The current activity stays visible. The list covers only the current work and clears when a new request starts. It uses saved activity records and needs no extra model request.
 
 ![The current activity above four completed operations, beside the Nod mark and above the message box.](../../../assets/screens/chat-recent-activity.png)
 

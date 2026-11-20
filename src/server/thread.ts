@@ -71,6 +71,7 @@ import type { ModelSelection, WorkKind } from '../shared/models.ts';
 import { lockKey } from './locks.ts';
 import { redactSecretText } from './redaction.ts';
 import { resemblesTaskAcknowledgement } from '../shared/task-ack.ts';
+import { inChatSql, turnChat } from './chat-scope.ts';
 
 const queue = 'thread-drain';
 const rasterTypes = new Set([
@@ -211,6 +212,7 @@ export interface ThreadDependencies {
     text: string,
     before: Date | undefined,
     exclude: string | null,
+    chat?: string | null,
   ) => Promise<NonNullable<RuntimeContext['relatedConversation']>>;
   learnedSkills?: () => Promise<RuntimeContext['learnedSkills']>;
   task?: (
@@ -1610,6 +1612,13 @@ async function loadMessage(messageId: string | null) {
 async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
   const threadId = turn.thread_id as string;
   const sourceMessageId: string | null = turn.message_id ?? null;
+  const chat = await turnChat(pool, ownerId, turn.id);
+  const sameChat = !chat
+    ? ''
+    : chat.id
+      ? `AND (u.session_id=$6 OR (m.role='user' AND m.id IN (SELECT d.message_id FROM turns d
+          WHERE d.owner_id=$1 AND d.session_id=$6 AND d.message_id IS NOT NULL)))`
+      : `AND ${inChatSql('u', true, 'NULL', '$1')}`;
   const [
     source,
     history,
@@ -1636,6 +1645,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
        WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL AND m.id IS DISTINCT FROM $3::uuid
        AND m.approval_answer IS NULL AND NOT (m.role='user' AND ${withdrawnSql('m')})
        AND ($6::uuid<>$2::uuid OR m.created_at>COALESCE(th.chat_restarted_at,'-infinity'))
+       ${sameChat}
        AND (NOT $5::boolean OR (m.created_at<=boundary.at AND
          (u.id IS NULL OR u.session_id=$6
           OR (u.status IN ('succeeded','failed','cancelled') AND u.finished_at<=boundary.at))))
@@ -1678,7 +1688,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
   const [related, credentialRequests] = await Promise.all([
     !turn.background && sourceMessageId && dependencies.recall
       ? dependencies
-          .recall(String(turn.prompt ?? ''), history.rows[0]?.createdAt, sourceMessageId)
+          .recall(String(turn.prompt ?? ''), history.rows[0]?.createdAt, sourceMessageId, chat?.id)
           .catch(() => [])
       : [],
     dependencies.credentialRequestStatuses?.(threadId, turn.session_id, historyTurnIds) ?? [],

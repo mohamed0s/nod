@@ -19,7 +19,7 @@ Nod keeps quick answers, simple lookups and status questions in chat. It starts 
 
 The main chat stays available while tasks work. Each task keeps its goal and history, and its start message is its acknowledgement. Write in the task's chat to correct it or add a related update. A question about its progress is answered in chat.
 
-Tasks share one [workspace](/use/workspace/#one-workspace-for-all-tasks), owner memory, rules, Vault and schedules. Each task has its own working folder and saved session. See [Task sessions](/how-it-works/task-sessions/) for the architecture.
+Tasks share one [workspace](/use/workspace/#one-workspace-for-all-tasks), owner memory, rules, Vault, connected apps and schedules. Each task has its own working folder and saved session. Each chat also keeps its own history: Nod reads only the chat you're writing in, and looks at another chat only when you ask it to search all your chats. See [Task sessions](/how-it-works/task-sessions/) for the architecture.
 
 ## The chat list
 
@@ -39,7 +39,7 @@ A number next to a chat counts its unread replies, and the badge on **Chat** cou
 
 ### Start a new chat
 
-Select **New chat**, then type what you want. Your first message starts a task directly, without going through the main chat. The task's title is the first line of your message. When Nod has your message, the app opens the new chat. You can start several new chats, and they run at the same time.
+Select **New chat**, then type what you want. Your first message starts a task directly, without going through the main chat. The chat is named after the first line of your message until Nod first replies; then it gets a short title of a few words in your language, unless you've already renamed it. When Nod has your message, the app opens the new chat. You can start several new chats, and they run at the same time.
 
 A new chat never answers anything outside itself. A "yes" in a new chat starts that chat. It doesn't approve an action that another chat or the main chat is waiting on.
 
@@ -47,7 +47,11 @@ A new chat never answers anything outside itself. A "yes" in a new chat starts t
 
 Finished chats stay in the list under **Done**. Open one and type to continue it in the same saved session. It reopens and moves back to **Working**.
 
-To hide a finished chat, select its **Close** button. Only finished or stopped chats can be closed, so stop a task first to close its chat. If you write to a closed chat again, for example after opening one of its messages from search, it comes back to the list.
+To hide a finished chat, open its options menu (**…**) and select **Close chat**. Only finished or stopped chats can be closed, so stop a task first to close its chat. If you write to a closed chat again, for example after opening one of its messages from search, it comes back to the list.
+
+### Rename a chat
+
+Open a chat's options menu (**…**) and select **Rename**, double-click the chat, or select it and press F2. Type the new name, then press Enter or select anywhere else to save it. Escape keeps the old name. Nod never replaces a name you chose. With [Telegram topics](/use/channels/#telegram-topics) on, the chat's topic gets the new name too.
 
 ## Scheduled work
 
@@ -95,7 +99,7 @@ A task checks in when its spending since your last message to it passes the chec
 
 ## Rename a task
 
-Open its preview and select its title in the details. Change the display name, then select **Save**. The task goal and original request stay the same. **Cancel** or Escape discards the edit.
+Open its preview and select its title in the details. Change the display name, then select **Save**. Its chat gets the same name. The task goal and original request stay the same. **Cancel** or Escape discards the edit.
 
 ## Inspect task activity
 

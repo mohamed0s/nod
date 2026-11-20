@@ -2669,6 +2669,343 @@ test(
       );
 
       await t.test(
+        'each chat reads only its own conversation and names another chat when one is searched',
+        async (t) => {
+          const { captureOwnerInstructions } = await import('../src/server/owner-instructions.ts');
+          const { createCommunication } = await import('../src/server/communication.ts');
+          const current = (await thread.activeThread(db.pool)).id;
+          const say = async (
+            text: string,
+            options: { sessionId?: string; reply?: string } = {},
+          ) => {
+            const sent = await userMessages.submit(text, [], {
+              ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+              ...(options.reply ? { replyToMessageId: options.reply } : {}),
+            });
+            await waitFor(settled(sent.turnId));
+            return sent;
+          };
+          const replyOf = async (turnId: string) =>
+            (
+              await db.pool.query<{ id: string }>(
+                "SELECT id FROM messages WHERE turn_id=$1 AND role='assistant' ORDER BY created_at DESC,id DESC LIMIT 1",
+                [turnId],
+              )
+            ).rows[0]!.id;
+          const seen = (turnId: string) => ran(turnId)!.history.map(({ text }) => text);
+          const [bikes, boats] = [randomUUID(), randomUUID()];
+          const main = await say('Synthetic main chat about lanterns');
+          const first = await say('Synthetic first chat about bicycles', { sessionId: bikes });
+          await say('Synthetic second chat about canoes', { sessionId: boats });
+          const run = randomUUID();
+          await db.pool.query(
+            "INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,background) VALUES($1,$2,$3,$1,'schedule','Synthetic lantern schedule','succeeded',true)",
+            [run, ownerId, current],
+          );
+          await db.pool.query(
+            "INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id) VALUES($1,$2,'assistant','Synthetic schedule report about lanterns',$3,$4)",
+            [randomUUID(), ownerId, current, run],
+          );
+          const mainAgain = await say('Synthetic main chat follow-up');
+          const inMain = seen(mainAgain.turnId);
+          assert.ok(inMain.includes('Synthetic main chat about lanterns'));
+          assert.ok(inMain.includes('Synthetic schedule report about lanterns'));
+          assert.ok(!inMain.some((text) => /bicycles|canoes/.test(text)));
+          const firstAgain = await say('Synthetic first chat follow-up', {
+            reply: await replyOf(first.turnId),
+          });
+          assert.equal(ran(firstAgain.turnId)?.taskContext?.id, bikes);
+          assert.deepEqual(seen(firstAgain.turnId), [
+            'Synthetic first chat about bicycles',
+            'done: Synthetic first chat about bicycles',
+          ]);
+          const search = async (turnId: string, args: Record<string, unknown>) =>
+            (
+              (await personal.manage('history_search', args, {
+                sourceMessageId: null,
+                turnId,
+              })) as { messages: Array<{ id: string; text: string; chat?: string }> }
+            ).messages;
+          assert.ok(
+            !(await search(mainAgain.turnId, { query: 'bicycles' })).some(({ text }) =>
+              text.includes('bicycles'),
+            ),
+          );
+          const everywhere = await search(mainAgain.turnId, { query: 'bicycles', chats: 'all' });
+          assert.equal(
+            everywhere.find(({ text }) => text === 'Synthetic first chat about bicycles')?.chat,
+            'Synthetic first chat about bicycles',
+          );
+          const fromChat = await search(firstAgain.turnId, { query: 'lanterns', chats: 'all' });
+          assert.equal(
+            fromChat.find(({ text }) => text === 'Synthetic main chat about lanterns')?.chat,
+            'Main',
+          );
+          assert.equal(
+            (await search(firstAgain.turnId, { query: 'bicycles' })).find(
+              ({ text }) => text === 'Synthetic first chat about bicycles',
+            )?.chat,
+            undefined,
+          );
+          const around = await search(mainAgain.turnId, { around: first.messageId });
+          assert.ok(around.length > 1);
+          assert.ok(around.every(({ chat }) => chat === 'Synthetic first chat about bicycles'));
+          const recalled = async (chat?: string | null) =>
+            (await personal.recall('bicycles lanterns', undefined, null, chat)).map(
+              ({ text }) => text,
+            );
+          assert.ok(!(await recalled(null)).some((text) => text.includes('bicycles')));
+          assert.ok((await recalled(null)).includes('Synthetic main chat about lanterns'));
+          assert.ok(!(await recalled(bikes)).some((text) => text.includes('lanterns')));
+          const inputs: Array<{ earlier: Array<{ text: string }> }> = [];
+          const learning = createMemoryLearning({
+            pool: db.pool,
+            ownerId,
+            memory: createMemoryService({ pool: db.pool, ownerId, store: memoryObjectStore() }),
+            curator: {
+              id: 'fixture',
+              configured: true,
+              async curate({ input }) {
+                inputs.push(input as (typeof inputs)[number]);
+                return { ops: [] };
+              },
+            },
+          });
+          await learning.remember({}, firstAgain.messageId);
+          assert.deepEqual(
+            inputs.at(-1)!.earlier.map(({ text }) => text),
+            ['Synthetic first chat about bicycles'],
+          );
+          await learning.remember({}, mainAgain.messageId);
+          assert.ok(inputs.at(-1)!.earlier.some(({ text }) => text.includes('lanterns')));
+          assert.ok(!inputs.at(-1)!.earlier.some(({ text }) => /bicycles|canoes/.test(text)));
+          const since = new Date(Date.now() - 60 * 60 * 1000);
+          const checked = async (turnId: string, messageId: string, task: string | null) =>
+            (
+              await captureOwnerInstructions(
+                db.pool,
+                ownerId,
+                current,
+                [messageId],
+                task,
+                since,
+                turnId,
+              )
+            )?.evidence.messages.map(({ text }) => text) ?? [];
+          assert.deepEqual(await checked(firstAgain.turnId, firstAgain.messageId, bikes), [
+            'Synthetic first chat about bicycles',
+            'Synthetic first chat follow-up',
+          ]);
+          const mainChecked = await checked(mainAgain.turnId, mainAgain.messageId, null);
+          assert.ok(mainChecked.includes('Synthetic main chat follow-up'));
+          assert.ok(!mainChecked.some((text) => /bicycles|canoes/.test(text)));
+          const [runSession, runTurn, runTask, runMessage] = [
+            randomUUID(),
+            randomUUID(),
+            randomUUID(),
+            randomUUID(),
+          ];
+          t.after(async () => {
+            await db.pool.query('UPDATE turns SET task_id=NULL WHERE id=$1', [runTurn]);
+            await db.pool.query('DELETE FROM tasks WHERE id=$1', [runTask]);
+            await db.pool.query('DELETE FROM messages WHERE id=$1', [runMessage]);
+            await db.pool.query('DELETE FROM turns WHERE id=$1', [runTurn]);
+          });
+          await db.pool.query(
+            "INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,background) VALUES($1,$2,$3,$4,'user','Synthetic reply inside a run','succeeded',true)",
+            [runTurn, ownerId, current, runSession],
+          );
+          await db.pool.query(
+            "INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id) VALUES($1,$2,'user','Synthetic reply inside a run',$3,$4)",
+            [runMessage, ownerId, current, runTurn],
+          );
+          await db.pool.query(
+            "INSERT INTO tasks(id,owner_id,turn_id,session_id,source_message_id,title,done_when,now_text) VALUES($1,$2,$3,$4,$5,'Synthetic run task','Checked','Checking')",
+            [runTask, ownerId, runTurn, runSession, runMessage],
+          );
+          await db.pool.query('UPDATE turns SET task_id=$1 WHERE id=$2', [runTask, runTurn]);
+          const runChecked = await checked(runTurn, runMessage, runTask);
+          assert.ok(runChecked.includes('Synthetic reply inside a run'));
+          assert.ok(runChecked.includes('Synthetic main chat follow-up'));
+          const languages: string[][] = [];
+          const communication = createCommunication({
+            pool: db.pool,
+            ownerId,
+            review: async (_instructions, input) => {
+              const request = input as {
+                purpose: string;
+                languageContext?: { userMessages: Array<{ text: string }> };
+              };
+              if (request.purpose === 'confirmation_review') return { valid: true };
+              languages.push(request.languageContext!.userMessages.map(({ text }) => text));
+              return { text: 'Search Gmail for synthetic receipts?', action: 'Search Gmail' };
+            },
+          });
+          await communication.describe({
+            turn: { threadId: current, turnId: firstAgain.turnId },
+            action: 'GMAIL_FETCH_EMAILS',
+            args: { query: 'Synthetic receipts' },
+          });
+          assert.deepEqual(languages.at(-1), [
+            'Synthetic first chat about bicycles',
+            'Synthetic first chat follow-up',
+          ]);
+          const note = 'Synthetic note for the bicycles chat';
+          const previousObserver = inspectObserver;
+          inspectObserver = async (context) => {
+            if (context.prompt !== note || context.taskContext) return previousObserver?.(context);
+            await context.task!({ action: 'reply', ids: [bikes] });
+            return { status: 'succeeded' };
+          };
+          try {
+            await say(note);
+            await waitFor(
+              async () =>
+                !(
+                  await db.pool.query(
+                    "SELECT 1 FROM turns WHERE session_id=$1 AND status IN ('queued','running')",
+                    [bikes],
+                  )
+                ).rowCount,
+            );
+          } finally {
+            inspectObserver = previousObserver;
+          }
+          const afterNote = await say('Synthetic first chat after the note', {
+            reply: await replyOf(firstAgain.turnId),
+          });
+          assert.ok(seen(afterNote.turnId).includes(note));
+          assert.ok(!seen(afterNote.turnId).some((text) => /lanterns|canoes/.test(text)));
+        },
+      );
+
+      await t.test(
+        'a new chat gets one short title after its first reply and never over an owner rename',
+        async () => {
+          const { createChatTitles } = await import('../src/server/chat-titles.ts');
+          const asked: unknown[] = [];
+          const topics: Array<[string, string]> = [];
+          let during: (() => Promise<void>) | undefined;
+          const titles = createChatTitles({
+            pool: db.pool,
+            ownerId,
+            curator: {
+              id: 'fixture',
+              configured: true,
+              async curate({ task, input }) {
+                assert.equal(task, 'title');
+                asked.push(input);
+                await during?.();
+                return { title: '"Synthetic deal checks."' };
+              },
+            },
+            renamed: (id, title) => topics.push([id, title]),
+          });
+          const start = async (text: string) => {
+            const sessionId = randomUUID();
+            const sent = await userMessages.submit(text, [], { sessionId });
+            await waitFor(settled(sent.turnId));
+            return { ...sent, sessionId };
+          };
+          const title = async (id: string) =>
+            (await tasks.read()).find((task) => task.id === id)?.title;
+          const rename = (id: string, value: string) =>
+            request('PATCH', `/api/tasks/${id}`, { title: value });
+          const text = 'i want you to check for synthetic deals daily\nand tell me';
+          const named = await start(text);
+          assert.equal(
+            await title(named.sessionId),
+            'i want you to check for synthetic deals daily',
+          );
+          await titles.name(named.turnId);
+          assert.equal(await title(named.sessionId), 'Synthetic deal checks');
+          assert.deepEqual(asked, [{ request: text, reply: `done: ${text}` }]);
+          assert.deepEqual(topics, [[named.sessionId, 'Synthetic deal checks']]);
+          await titles.name(named.turnId);
+          const later = await userMessages.submit('Synthetic deal follow-up', [], {
+            replyToMessageId: (
+              await db.pool.query<{ id: string }>(
+                "SELECT id FROM messages WHERE turn_id=$1 AND role='assistant' LIMIT 1",
+                [named.turnId],
+              )
+            ).rows[0]!.id,
+          });
+          await waitFor(settled(later.turnId));
+          await titles.name(later.turnId);
+          assert.equal(asked.length, 1);
+
+          const owned = await start('Synthetic request about trains');
+          assert.equal((await rename(owned.sessionId, 'Owner train chat')).statusCode, 200);
+          await titles.name(owned.turnId);
+          assert.equal(await title(owned.sessionId), 'Owner train chat');
+          assert.equal(asked.length, 1);
+
+          const raced = await start('Synthetic request about ferries');
+          during = async () => {
+            assert.equal((await rename(raced.sessionId, 'Owner ferry chat')).statusCode, 200);
+          };
+          await titles.name(raced.turnId);
+          during = undefined;
+          assert.equal(await title(raced.sessionId), 'Owner ferry chat');
+          assert.equal(asked.length, 2);
+          assert.equal(topics.length, 1);
+
+          const failing = 'Synthetic request that fails at the provider';
+          modelErrors.set(failing, 'Synthetic provider failure');
+          const failed = await start(failing);
+          modelErrors.delete(failing);
+          assert.deepEqual(
+            (await db.pool.query('SELECT status,withdrawn FROM turns WHERE id=$1', [failed.turnId]))
+              .rows[0],
+            { status: 'failed', withdrawn: true },
+          );
+          await titles.name(failed.turnId);
+          assert.equal(asked.length, 2);
+          const retried = await userMessages.submit('Synthetic retry about gardens', [], {
+            replyToMessageId: failed.messageId,
+          });
+          await waitFor(settled(retried.turnId));
+          assert.equal(ran(retried.turnId)?.sessionId, failed.sessionId);
+          await titles.name(retried.turnId);
+          assert.deepEqual(asked.at(-1), {
+            request: 'Synthetic retry about gardens',
+            reply: 'done: Synthetic retry about gardens',
+          });
+          assert.equal(await title(failed.sessionId), 'Synthetic deal checks');
+
+          const older = await start('Synthetic older chat about kites');
+          await db.pool.query('UPDATE tasks SET title_by=NULL WHERE id=$1', [older.sessionId]);
+          await tasks.initialize();
+          await titles.name(older.turnId);
+          assert.equal(await title(older.sessionId), 'Synthetic deal checks');
+
+          const topic = await start('Synthetic chat from an owner topic');
+          await db.pool.query("UPDATE tasks SET title_by='topic' WHERE id=$1", [topic.sessionId]);
+          const before = asked.length;
+          await titles.name(topic.turnId);
+          assert.equal(asked.length, before);
+          assert.equal(await title(topic.sessionId), 'Synthetic chat from an owner topic');
+
+          const patched: Array<[string, string]> = [];
+          const routes = Fastify();
+          createTasks({
+            pool: db.pool,
+            ownerId,
+            renamed: (id, value) => patched.push([id, value]),
+          }).registerRoutes(routes);
+          const response = await routes.inject({
+            method: 'PATCH',
+            url: `/api/tasks/${named.sessionId}`,
+            payload: { title: 'Owner deal chat' },
+          });
+          await routes.close();
+          assert.equal(response.statusCode, 200);
+          assert.deepEqual(patched, [[named.sessionId, 'Owner deal chat']]);
+          assert.equal(await title(named.sessionId), 'Owner deal chat');
+        },
+      );
+
+      await t.test(
         'a task’s bug report and browser handoff stay in its own chat and browser',
         async (t) => {
           const previousObserver = inspectObserver;

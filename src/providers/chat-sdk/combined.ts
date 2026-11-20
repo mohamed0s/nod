@@ -43,6 +43,11 @@ export function combineMessagingTransports(
       if (!transport?.createTopic) throw new Error('Channel topics are unavailable.');
       return transport.createTopic(input);
     },
+    async renameTopic(input) {
+      const transport = forChannel(input.channelId);
+      if (!transport?.renameTopic) throw new Error('Channel topics are unavailable.');
+      await transport.renameTopic(input);
+    },
     async react(input) {
       return (await forChannel(input.channelId)?.react?.(input)) ?? 'unsupported';
     },

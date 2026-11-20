@@ -30,6 +30,7 @@ const untraced = new Set([
   'style',
   'skill',
   'classify',
+  'title',
   'check',
 ]);
 
@@ -98,7 +99,9 @@ function failure(
           ? 'The action review model is unavailable.'
           : task === 'check'
             ? 'The selected model is unavailable.'
-            : 'The memory model is unavailable.';
+            : task === 'title'
+              ? 'The chat title model is unavailable.'
+              : 'The memory model is unavailable.';
   const detail = expired
     ? ' The request timed out.'
     : reply.stopReason === 'error' && reply.errorMessage
@@ -188,7 +191,8 @@ export function createPiMemoryCurator(options: {
       report,
     ) {
       signal?.throwIfAborted();
-      const bounded = task === 'classify' || task === 'attention' || task === 'check';
+      const bounded =
+        task === 'classify' || task === 'attention' || task === 'check' || task === 'title';
       const listed = await candidates();
       const chain = fallback === false ? listed.slice(0, 1) : listed;
       const tried: string[] = [];

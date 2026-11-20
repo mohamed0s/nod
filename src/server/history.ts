@@ -1,6 +1,14 @@
 import { z } from 'zod';
 import type { Pool } from 'pg';
 import { withdrawnSql } from './turn-chain.ts';
+import {
+  chatLabel,
+  chatNameSql,
+  inChatSql,
+  messageChatSql,
+  turnChatSql,
+  type Chat,
+} from './chat-scope.ts';
 export function activeThreadSql(alias = 'm') {
   return `${alias}.thread_id=(SELECT th.id FROM threads th WHERE th.owner_id=${alias}.owner_id AND th.archived_at IS NULL)`;
 }
@@ -14,6 +22,7 @@ const inputSchema = z
     to: z.iso.date().optional(),
     around: z.uuid().optional(),
     order: z.enum(['relevance', 'newest']).default('relevance'),
+    chats: z.enum(['current', 'all']).default('current'),
   })
   .refine((input) => input.query || input.around || input.from || input.to, {
     message: 'Search with query, from or to, or read around a result id.',
@@ -29,6 +38,7 @@ export interface HistoryMessage {
   shortened: boolean;
   created_at: Date;
   match?: boolean;
+  chat?: string;
 }
 
 export function createHistorySearch({
@@ -42,8 +52,17 @@ export function createHistorySearch({
 }) {
   const kept = (alias: string) =>
     standing ? ` AND NOT (${alias}.role='user' AND ${withdrawnSql(alias)})` : '';
-  return async function search(raw: unknown) {
-    const { query, before, cursor, from, to, around, order } = inputSchema.parse(raw);
+  return async function search(raw: unknown, chat?: Chat) {
+    const { query, before, cursor, from, to, around, order, chats } = inputSchema.parse(raw);
+    const scoped = chat !== undefined;
+    const current = scoped && chats === 'current';
+    const other = (value: string, parameter: string) =>
+      scoped
+        ? `,CASE WHEN ${value} IS DISTINCT FROM ${parameter}::uuid THEN ${chatNameSql(value, '$1')} END AS chat`
+        : '';
+    const near = scoped
+      ? ` AND ${messageChatSql('m')} IS NOT DISTINCT FROM (SELECT chat FROM place)`
+      : '';
     if (around) {
       const { rows } = await pool.query<HistoryMessage>(
         `WITH target AS (
@@ -53,16 +72,22 @@ export function createHistorySearch({
             WHERE u.id=$2 AND u.owner_id=$1 AND ${activeThreadSql('u')} AND m.hidden_at IS NULL
             ORDER BY m.created_at,m.id LIMIT 1)),
          hit AS (SELECT created_at,id FROM target LIMIT 1),
+         place AS (SELECT ${scoped ? messageChatSql('m') : 'NULL::uuid'} AS chat FROM messages m,hit WHERE m.id=hit.id),
          nearby AS (
-           (SELECT m.* FROM messages m,hit WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')} AND (m.created_at,m.id)<(hit.created_at,hit.id) ORDER BY m.created_at DESC,m.id DESC LIMIT 5)
+           (SELECT m.* FROM messages m,hit WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')} AND (m.created_at,m.id)<(hit.created_at,hit.id)${near} ORDER BY m.created_at DESC,m.id DESC LIMIT 5)
            UNION ALL (SELECT m.* FROM messages m,hit WHERE m.id=hit.id)
-           UNION ALL (SELECT m.* FROM messages m,hit WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')} AND (m.created_at,m.id)>(hit.created_at,hit.id) ORDER BY m.created_at,m.id LIMIT 5))
+           UNION ALL (SELECT m.* FROM messages m,hit WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')} AND (m.created_at,m.id)>(hit.created_at,hit.id)${near} ORDER BY m.created_at,m.id LIMIT 5))
          SELECT id,role,CASE WHEN id=(SELECT id FROM hit) THEN text ELSE left(text,6000) END AS text,
-           id<>(SELECT id FROM hit) AND length(text)>6000 AS shortened,turn_id,created_at FROM nearby ORDER BY created_at,id`,
-        [ownerId, around],
+           id<>(SELECT id FROM hit) AND length(text)>6000 AS shortened,turn_id,created_at${other('(SELECT chat FROM place)', '$3')} FROM nearby ORDER BY created_at,id`,
+        [ownerId, around, ...(scoped ? [chat.id] : [])],
       );
       if (!rows.length) throw new Error('This history result is unavailable.');
-      return { messages: rows, complete: true, totalMatches: 1, nextCursor: null };
+      return {
+        messages: rows.map(chatLabel),
+        complete: true,
+        totalMatches: 1,
+        nextCursor: null,
+      };
     }
     const boundary = before
       ? (
@@ -74,6 +99,8 @@ export function createHistorySearch({
         ).rows[0]
       : undefined;
     if (before && !boundary) throw new Error('This history result is unavailable.');
+    const inChat = (turn: string, parameter: string) =>
+      current ? ` AND ${inChatSql(turn, chat.id === null, parameter, '$1')}` : '';
     const terms = `WITH terms AS (SELECT replace(plainto_tsquery('english',coalesce($2,''))::text,'&','|')::tsquery AS q,
       coalesce((SELECT time_zone FROM preferences WHERE owner_id=$1),'UTC') AS zone)`;
     const scope = (alias: string) =>
@@ -94,15 +121,20 @@ export function createHistorySearch({
       to ?? null,
     ];
     const turns = await pool.query(
-      `${terms} SELECT u.id,left(u.prompt,200) AS title,u.status,u.source,u.created_at,split_part(u.channel,':',1) AS channel
-       FROM turns u CROSS JOIN terms WHERE ${where('u', 'u.prompt')} ORDER BY ${ordered('u', 'u.prompt')} LIMIT 15`,
-      values,
+      `${terms} SELECT u.id,left(u.prompt,200) AS title,u.status,u.source,u.created_at,split_part(u.channel,':',1) AS channel${other(turnChatSql('u'), '$7')}
+       FROM turns u CROSS JOIN terms WHERE ${where('u', 'u.prompt')}${inChat('u', '$7')} ORDER BY ${ordered('u', 'u.prompt')} LIMIT 15`,
+      scoped ? [...values, chat.id] : values,
     );
+    const matches = `SELECT corpus.* FROM corpus CROSS JOIN terms WHERE ($2::text IS NULL OR corpus.v @@ terms.q)${kept('corpus')}`;
+    const docs = current
+      ? `matched AS MATERIALIZED (${matches}), docs AS (SELECT matched.* FROM matched
+         LEFT JOIN turns u ON u.id=matched.turn_id AND u.owner_id=matched.owner_id WHERE TRUE${inChat('u', '$8')})`
+      : `docs AS (${matches})`;
     const page = await pool.query<HistoryMessage & { place: string; total: number }>(
       `${terms}, corpus AS (
          SELECT m.id,m.owner_id,m.turn_id,m.role,m.text,m.created_at,to_tsvector('english',m.text) AS v
          FROM messages m CROSS JOIN terms WHERE ${scope('m')} AND m.hidden_at IS NULL),
-       docs AS (SELECT corpus.* FROM corpus CROSS JOIN terms WHERE ($2::text IS NULL OR corpus.v @@ terms.q)${kept('corpus')}),
+       ${docs},
        weights AS (
          SELECT w,ln(1+((SELECT count(*) FROM corpus)-count(*)+0.5)/(count(*)+0.5)) AS idf
          FROM (SELECT DISTINCT lexeme AS w FROM unnest(tsvector_to_array(to_tsvector('english',coalesce($2,'')))) lexeme) words
@@ -117,12 +149,12 @@ export function createHistorySearch({
        hits AS (SELECT * FROM ranked WHERE $7::uuid IS NULL OR place>(SELECT place FROM position) ORDER BY place LIMIT 21)
        SELECT hits.id,hits.role,left(hits.text,6000) AS text,length(hits.text)>6000 AS shortened,hits.created_at,hits.place,
          (SELECT count(*)::int FROM ranked) AS total FROM hits ORDER BY place`,
-      [...values, cursor ?? null],
+      [...values, cursor ?? null, ...(current ? [chat.id] : [])],
     );
     if (cursor && !page.rows.length) {
       const { rows } = await pool.query(
-        `${terms} SELECT m.id FROM messages m CROSS JOIN terms WHERE ${where('m', 'm.text')} AND m.hidden_at IS NULL${kept('m')} AND m.id=$7::uuid`,
-        [...values, cursor],
+        `${terms} SELECT m.id FROM messages m CROSS JOIN terms WHERE ${where('m', 'm.text')} AND m.hidden_at IS NULL${kept('m')} AND m.id=$7::uuid${current ? ` AND ${messageChatSql('m')} IS NOT DISTINCT FROM $8::uuid` : ''}`,
+        [...values, cursor, ...(current ? [chat.id] : [])],
       );
       if (!rows.length) throw new Error('This history cursor does not match the search.');
     }
@@ -133,21 +165,28 @@ export function createHistorySearch({
        thread AS (
          SELECT m.id,m.owner_id,m.role,m.text,m.turn_id,m.created_at,row_number() OVER (ORDER BY m.created_at,m.id) AS n
          FROM messages m WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')}),
-       picked AS (SELECT t.n,ids.place,t.id FROM unnest($2::uuid[]) WITH ORDINALITY ids(id,place) JOIN thread t ON t.id=ids.id),
+       picked AS (SELECT t.n,ids.place,t.id${scoped ? `,${messageChatSql('t')} AS chat` : ',NULL::uuid AS chat'} FROM unnest($2::uuid[]) WITH ORDINALITY ids(id,place) JOIN thread t ON t.id=ids.id),
        shown AS (
-         SELECT t.*,bool_or(p.id=t.id) AS match,min(p.place) AS place FROM thread t
-         JOIN picked p ON t.n BETWEEN p.n-$3 AND p.n+$3 GROUP BY t.id,t.owner_id,t.role,t.text,t.turn_id,t.created_at,t.n)
+         SELECT t.*,bool_or(p.id=t.id) AS match,min(p.place) AS place,(array_agg(p.chat))[1] AS chat FROM thread t
+         JOIN picked p ON t.n BETWEEN p.n-$3 AND p.n+$3${scoped ? ` AND ${messageChatSql('t')} IS NOT DISTINCT FROM p.chat` : ''}
+         GROUP BY t.id,t.owner_id,t.role,t.text,t.turn_id,t.created_at,t.n)
        SELECT s.id,s.role,CASE WHEN length(s.text)<=1200 THEN s.text
          ELSE ts_headline('english',s.text,terms.q,'StartSel="",StopSel="",MaxWords=60,MinWords=20,MaxFragments=3,FragmentDelimiter=" … "') END AS text,
          length(s.text)>1200 AS shortened,s.turn_id,s.created_at,
-         split_part(COALESCE(u.channel,'web'),':',1) AS channel,s.match
+         split_part(COALESCE(u.channel,'web'),':',1) AS channel,s.match${other('s.chat', '$5')}
        FROM shown s CROSS JOIN terms LEFT JOIN turns u ON u.id=s.turn_id AND u.owner_id=$1
        WHERE TRUE${kept('s')} ORDER BY s.place,s.n`,
-      [ownerId, picked.map((row) => row.id), query ? 1 : 0, query ?? null],
+      [
+        ownerId,
+        picked.map((row) => row.id),
+        query ? 1 : 0,
+        query ?? null,
+        ...(scoped ? [chat.id] : []),
+      ],
     );
     return {
-      turns: turns.rows,
-      messages,
+      turns: turns.rows.map(chatLabel),
+      messages: messages.map(chatLabel),
       complete: !nextCursor,
       totalMatches: page.rows[0]?.total ?? 0,
       nextCursor,

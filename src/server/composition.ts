@@ -144,6 +144,7 @@ import { validateScheduledInstructions } from './owner-instructions.ts';
 import { localArtifacts } from './artifacts.ts';
 import { memoryFileName, memoryMarkdown } from '../shared/memory-export.ts';
 import { createChannels } from './channels.ts';
+import { createChatTitles } from './chat-titles.ts';
 import { createChannelSettings, managedChannelEnvironment } from './channel-settings.ts';
 import { createChannelMedia } from './channel-media.ts';
 import { createChannelSessionStore } from './channel-session.ts';
@@ -1133,6 +1134,10 @@ async function initializeApplication(
     watchState: async (connectionIds) => integrations.watchState(connectionIds),
   });
   await personal.initialize({ workers: options.workers });
+  const renameTopic = (id: string, title: string) =>
+    void channels
+      ?.renameTopic(id, title)
+      .catch((error) => logFailure('channel_topic_rename_failed', error));
   const tasks = createTasks({
     pool,
     ownerId,
@@ -1142,8 +1147,16 @@ async function initializeApplication(
     ...(adapters.models
       ? { validateModel: (choice: ModelSelection) => adapters.models!.validateChoice(choice) }
       : {}),
+    renamed: renameTopic,
   });
   await tasks.initialize();
+  const chatTitles = createChatTitles({
+    pool,
+    ownerId,
+    curator,
+    refresh,
+    renamed: renameTopic,
+  });
   const jobs = createJobs({
     pool,
     ownerId,
@@ -2132,7 +2145,8 @@ async function initializeApplication(
   payments = await createPayments(pool, {
     ownerId,
     analytics: captureAnalytics,
-    present: (turn, input) => communication.presentPayment(turn.threadId, input),
+    present: (turn, input) =>
+      communication.presentPayment(turn.threadId, input, undefined, turn.turnId),
     uses: vault.uses,
     page: (threadId) => computer.currentPage(threadId),
     destinations: (threadId, fields) => computer.cardDestinations(threadId, fields),
@@ -2215,6 +2229,9 @@ async function initializeApplication(
               void admission
                 .run(() => ledger.withTurn(turnId, () => taskClassification.run(turnId, consent)))
                 ?.catch(() => {});
+              void admission
+                .run(() => ledger.withTurn(turnId, () => chatTitles.name(turnId)))
+                ?.catch((error) => logFailure('chat_title_failed', error));
             }
           })
           .finally(() => {
