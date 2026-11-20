@@ -5225,6 +5225,7 @@ test(
     let topics = false;
     let refuse = false;
     let refuseRename = false;
+    let notModified = false;
     let failText: string | undefined;
     const gone = new Set<number>();
     const created: Record<string, unknown>[] = [];
@@ -5250,9 +5251,18 @@ test(
             },
           });
         if (method === 'editForumTopic') {
-          if (refuseRename)
+          if (notModified)
             return Response.json(
               { ok: false, error_code: 400, description: 'Bad Request: TOPIC_NOT_MODIFIED' },
+              { status: 400 },
+            );
+          if (refuseRename)
+            return Response.json(
+              {
+                ok: false,
+                error_code: 400,
+                description: 'Bad Request: not enough rights to manage topics',
+              },
               { status: 400 },
             );
           renamed.push(body);
@@ -5464,12 +5474,17 @@ test(
     assert.equal(delivery('First topic update').message_thread_id, 701);
     assert.equal(delivery('First topic update').reply_parameters, undefined);
     assert.equal(delivery('Second topic update').message_thread_id, 701);
+    const retitle = (title: string) =>
+      pool.query('UPDATE tasks SET title=$2 WHERE id=$1', [taskId, title]);
+    await retitle('Synthetic quarterly report');
     await service.renameTopic(taskId, 'Synthetic quarterly report');
     assert.deepEqual(renamed, [
       { chat_id: '123456', message_thread_id: 701, name: 'Synthetic quarterly report' },
     ]);
-    refuseRename = true;
     await service.renameTopic(taskId, 'Synthetic quarterly report');
+    refuseRename = true;
+    await retitle('Synthetic yearly report');
+    await service.renameTopic(taskId, 'Synthetic yearly report');
     refuseRename = false;
     await service.renameTopic(randomUUID(), 'Synthetic missing chat');
     assert.equal(renamed.length, 1);
@@ -5486,6 +5501,28 @@ test(
     await receive('/status', 701);
     assert.deepEqual(commands.at(-1), { replyToMessageId: latest, hasReply: true });
     assert.equal(delivery('Synthetic task status').message_thread_id, 701);
+    await say(taskTurn, 'Update after a refused rename');
+    await service.drain();
+    assert.deepEqual(renamed.at(-1), {
+      chat_id: '123456',
+      message_thread_id: 701,
+      name: 'Synthetic yearly report',
+    });
+    assert.equal(delivery('Update after a refused rename').message_thread_id, 701);
+    await retitle('Synthetic report of the decade');
+    await say(taskTurn, 'Update after a missed rename');
+    await service.drain();
+    assert.equal(renamed.at(-1)?.name, 'Synthetic report of the decade');
+    await say(taskTurn, 'Update with the topic name in sync');
+    await service.drain();
+    assert.equal(renamed.length, 3);
+    notModified = true;
+    await retitle('Synthetic report again');
+    await service.renameTopic(taskId, 'Synthetic report again');
+    notModified = false;
+    await say(taskTurn, 'Update after an unchanged topic name');
+    await service.drain();
+    assert.equal(renamed.length, 3);
     const mainReply = await say(await turn(main.channel), 'Main chat reply');
     await service.drain();
     assert.equal(delivery('Main chat reply').message_thread_id, undefined);
@@ -5513,6 +5550,7 @@ test(
     await say(fresh.turn_id, 'Trip chat reply');
     await service.drain();
     assert.equal(delivery('Trip chat reply').message_thread_id, 900);
+    assert.ok(renamed.every(({ message_thread_id }) => message_thread_id !== 900));
     assert.equal(created.length, 1);
     await receive('Make it a week', 900);
     assert.equal(submitted.at(-1)?.sessionId, undefined);

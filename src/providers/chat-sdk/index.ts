@@ -118,7 +118,9 @@ class Telegram extends TelegramAdapter {
         name: this.topicName(title),
       },
       { signal },
-    );
+    ).catch((cause: unknown) => {
+      if (!(cause instanceof Error && cause.message.includes('TOPIC_NOT_MODIFIED'))) throw cause;
+    });
   }
 
   async createTopic(threadId: string, title: string, signal?: AbortSignal) {

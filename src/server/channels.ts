@@ -394,6 +394,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     PRIMARY KEY(owner_id,provider,account_id,sender_id,topic_id)
   );
   CREATE UNIQUE INDEX IF NOT EXISTS channel_topics_task ON channel_topics(owner_id,provider,account_id,sender_id,task_id);
+  ALTER TABLE channel_topics ADD COLUMN IF NOT EXISTS name text;
   CREATE INDEX IF NOT EXISTS channel_inbox_pending ON channel_inbox(state,created_at);
   CREATE INDEX IF NOT EXISTS channel_outbox_pending ON channel_outbox(state,created_at);
   CREATE INDEX IF NOT EXISTS channel_inbox_turn ON channel_inbox(turn_id);
@@ -1602,14 +1603,19 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     topicsOn.set(`${row.provider}:${row.account_id}`, enabled);
     if (!enabled) return undefined;
     if (!row.turn_id) return wanted;
-    const task = await pool.query<{ title: string; topic_id: string | null }>(
-      `SELECT t.title,c.topic_id FROM tasks t LEFT JOIN channel_topics c ON c.task_id=t.id AND c.owner_id=t.owner_id
+    const task = await pool.query<{ title: string; topic_id: string | null; name: string | null }>(
+      `SELECT t.title,c.topic_id,c.name FROM tasks t LEFT JOIN channel_topics c ON c.task_id=t.id AND c.owner_id=t.owner_id
          AND c.provider=$3 AND c.account_id=$4 AND c.sender_id=$5
        WHERE t.id=$1 AND t.owner_id=$2 AND t.session_id=t.id`,
       [wanted, ownerId, row.provider, row.account_id, row.sender_id],
     );
-    if (!task.rows[0]) return undefined;
-    if (task.rows[0].topic_id) return task.rows[0].topic_id;
+    const found = task.rows[0];
+    if (!found) return undefined;
+    if (found.topic_id) {
+      if (found.name !== found.title)
+        await nameTopic(row, found.topic_id, found.title, found.name === null, target.signal);
+      return found.topic_id;
+    }
     if (!transport.createTopic) return undefined;
     const key = JSON.stringify([row.provider, row.account_id, row.sender_id, wanted]);
     const topicId =
@@ -1621,14 +1627,44 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       }));
     createdTopics.set(key, topicId);
     const saved = await pool.query<{ topic_id: string }>(
-      `WITH added AS (INSERT INTO channel_topics(owner_id,provider,account_id,sender_id,task_id,topic_id)
-         VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING RETURNING topic_id)
+      `WITH added AS (INSERT INTO channel_topics(owner_id,provider,account_id,sender_id,task_id,topic_id,name)
+         VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING RETURNING topic_id)
        SELECT topic_id FROM added UNION ALL SELECT topic_id FROM channel_topics
        WHERE owner_id=$1 AND provider=$2 AND account_id=$3 AND sender_id=$4 AND task_id=$5 LIMIT 1`,
-      [ownerId, row.provider, row.account_id, row.sender_id, wanted, topicId],
+      [ownerId, row.provider, row.account_id, row.sender_id, wanted, topicId, found.title],
     );
     createdTopics.delete(key);
     return saved.rows[0]?.topic_id ?? topicId;
+  }
+
+  async function nameTopic(
+    row: ChannelIdentity & { thread_id: string },
+    topicId: string,
+    title: string,
+    adopt: boolean,
+    signal: AbortSignal,
+  ) {
+    if (!adopt) {
+      if (!transport.renameTopic) return;
+      try {
+        await transport.renameTopic({
+          channelId: row.provider,
+          accountId: row.account_id,
+          threadId: row.thread_id,
+          topicId,
+          name: title,
+          signal,
+        });
+      } catch (cause) {
+        logFailure('channel_topic_rename_failed', cause);
+        return;
+      }
+    }
+    await pool.query(
+      `UPDATE channel_topics SET name=$6
+       WHERE owner_id=$1 AND provider=$2 AND account_id=$3 AND sender_id=$4 AND topic_id=$5`,
+      [ownerId, row.provider, row.account_id, row.sender_id, topicId, title],
+    );
   }
 
   async function renameTopic(taskId: string, title: string) {
@@ -1637,22 +1673,18 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       `SELECT c.provider,c.account_id,c.sender_id,c.topic_id,i.thread_id FROM channel_topics c
        CROSS JOIN LATERAL (SELECT i.thread_id FROM channel_inbox i WHERE i.owner_id=c.owner_id AND i.provider=c.provider
          AND i.account_id=c.account_id AND i.sender_id=c.sender_id ORDER BY i.received_at DESC LIMIT 1) i
-       WHERE c.owner_id=$1 AND c.task_id=$2`,
-      [ownerId, taskId],
+       WHERE c.owner_id=$1 AND c.task_id=$2 AND c.name IS DISTINCT FROM $3`,
+      [ownerId, taskId, title],
     );
-    for (const row of topics.rows) {
-      if (!permitted(row)) continue;
-      await transport
-        .renameTopic({
-          channelId: row.provider,
-          accountId: row.account_id,
-          threadId: row.thread_id,
-          topicId: row.topic_id,
-          name: title,
-          signal: AbortSignal.any([receiving.signal, AbortSignal.timeout(30_000)]),
-        })
-        .catch((cause: unknown) => logFailure('channel_topic_rename_failed', cause));
-    }
+    for (const row of topics.rows)
+      if (permitted(row))
+        await nameTopic(
+          row,
+          row.topic_id,
+          title,
+          false,
+          AbortSignal.any([receiving.signal, AbortSignal.timeout(30_000)]),
+        );
   }
 
   const presence = new Map<string, { at: number; status: string }>();
