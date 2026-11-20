@@ -15,6 +15,7 @@ import { ModelUnavailableError, type ModelAccess } from '../../ports/models.ts';
 import {
   fallbackWait,
   modelUnavailable,
+  timedOut,
   type ModelUnavailable,
 } from '../../shared/model-fallback.ts';
 import { localModelSilenceMs, type createPiModelRuntime } from './models.ts';
@@ -121,7 +122,7 @@ export function createTurnFallback(options: {
     if (!kind || index !== at) return;
     reason ??= kind;
     failures++;
-    if (kind === 'busy' && failures < 2) {
+    if (kind === 'busy' && failures < 2 && !timedOut(message.errorMessage)) {
       wait = fallbackWait(ready.get(index)?.retryAfter(message), 15_000, 4000);
       return;
     }

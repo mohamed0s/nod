@@ -850,6 +850,37 @@ test('a server token alone keeps every local address and still refuses a foreign
     200,
   );
 });
+test('a pinned check gives later models no live request once its time budget is spent', async () => {
+  const { pinnedReview, keepUnavailable } = await import('../src/server/model-fallback.ts');
+  const { ModelUnavailableError } = await import('../src/ports/models.ts');
+  const seen: Array<{ name: string; aborted: boolean }> = [];
+  const slow = async (_instructions: string, _input: object, signal?: AbortSignal) => {
+    seen.push({ name: 'slow', aborted: Boolean(signal?.aborted) });
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 150));
+    throw new ModelUnavailableError('slow: 503 Service Unavailable (HTTP 503)', ['slow']);
+  };
+  const next = async (_instructions: string, _input: object, signal?: AbortSignal) => {
+    seen.push({ name: 'next', aborted: Boolean(signal?.aborted) });
+    signal?.throwIfAborted();
+    return { run: true };
+  };
+  const result = await pinnedReview(
+    async () => [slow, next],
+    async () => undefined,
+    (review, last, signal) =>
+      review('Check the synthetic action.', {}, signal).catch((error: unknown) => {
+        keepUnavailable(last, error);
+        return 'closed';
+      }),
+    { ms: 50 },
+  );
+  assert.equal(result, 'closed');
+  assert.deepEqual(seen, [
+    { name: 'slow', aborted: false },
+    { name: 'next', aborted: true },
+  ]);
+});
+
 test('localhost access requires the owner key and rejects foreign Host, Origin and cross-site requests', async () => {
   const root = await mkdtemp(join(tmpdir(), 'nod-access-'));
   const app = Fastify();

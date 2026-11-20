@@ -13,7 +13,7 @@ import { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { createPiModelRuntime } from './models.ts';
 import { ModelUnavailableError, type ModelAccess } from '../../ports/models.ts';
 import { lightestEffort } from '../../shared/models.ts';
-import { fallbackWait, modelUnavailable } from '../../shared/model-fallback.ts';
+import { fallbackWait, modelUnavailable, timedOut } from '../../shared/model-fallback.ts';
 import type { MemoryCurator } from '../../ports/memory-curator.ts';
 import { agentModels, memoryModels } from '../../shared/model-defaults.ts';
 import { piUsageMetrics } from './usage.ts';
@@ -87,6 +87,7 @@ function failure(
   model: Model<Api>,
   tried: string[],
   unavailable: boolean,
+  expired = false,
 ) {
   const label =
     task === 'vision'
@@ -98,8 +99,9 @@ function failure(
           : task === 'check'
             ? 'The selected model is unavailable.'
             : 'The memory model is unavailable.';
-  const detail =
-    reply.stopReason === 'error' && reply.errorMessage
+  const detail = expired
+    ? ' The request timed out.'
+    : reply.stopReason === 'error' && reply.errorMessage
       ? ` The provider said: ${reply.errorMessage.trim().slice(0, 300)}`
       : reply.stopReason === 'length'
         ? ' The reply stopped at the token limit.'
@@ -215,8 +217,10 @@ export function createPiMemoryCurator(options: {
           ? crypto.randomUUID()
           : undefined;
         let attempt = 0;
+        let expired = false;
         const complete = async () => {
           attempt++;
+          const deadline = AbortSignal.timeout(bounded ? 10_000 : 45_000);
           const context: Context = {
             systemPrompt: instructions,
             messages: [
@@ -243,16 +247,14 @@ export function createPiMemoryCurator(options: {
                       : {}),
                   }
                 : {}),
-              signal: AbortSignal.any([
-                AbortSignal.timeout(bounded ? 10_000 : 45_000),
-                ...(signal ? [signal] : []),
-              ]),
+              signal: AbortSignal.any([deadline, ...(signal ? [signal] : [])]),
               maxTokens: bounded ? 512 : 8192,
               ...(sessionId ? { sessionId } : {}),
               ...(bounded ? { maxRetries: 0, timeoutMs: 10_000 } : {}),
               reasoning: effort === 'off' ? undefined : effort,
             });
           } finally {
+            expired = deadline.aborted && !signal?.aborted;
             const metrics = piUsageMetrics(reply?.usage);
             report?.({
               id: crypto.randomUUID(),
@@ -261,8 +263,9 @@ export function createPiMemoryCurator(options: {
               model: reply?.model ?? model.id,
               durationMs: performance.now() - started,
               ...metrics,
-              status:
-                reply?.stopReason === 'aborted' || (!reply && signal?.aborted)
+              status: expired
+                ? 'failed'
+                : reply?.stopReason === 'aborted' || (!reply && signal?.aborted)
                   ? 'cancelled'
                   : !reply || reply.stopReason === 'error'
                     ? 'failed'
@@ -289,14 +292,18 @@ export function createPiMemoryCurator(options: {
           return reply;
         };
         const unavailable = (reply: AssistantMessage) =>
-          reply.stopReason === 'error' &&
-          !signal?.aborted &&
-          !isContextOverflow(reply, model.contextWindow)
-            ? modelUnavailable(reply.errorMessage, isRetryableAssistantError(reply))
-            : undefined;
+          signal?.aborted
+            ? undefined
+            : expired
+              ? ('busy' as const)
+              : reply.stopReason === 'error' && !isContextOverflow(reply, model.contextWindow)
+                ? modelUnavailable(reply.errorMessage, isRetryableAssistantError(reply))
+                : undefined;
         let reply = await complete();
         if (
           fallback !== false &&
+          !expired &&
+          !timedOut(reply.errorMessage) &&
           unavailable(reply) === 'busy' &&
           (await sleep(
             fallbackWait(connection.retryAfter?.(reply), checks.has(task) ? 3000 : 15_000, 250),
@@ -318,7 +325,7 @@ export function createPiMemoryCurator(options: {
           tried.push(`${model.provider}/${model.id} (${reply.errorMessage?.trim().slice(0, 150)})`);
           continue;
         }
-        throw failure(task, reply, model, tried, Boolean(kind));
+        throw failure(task, reply, model, tried, Boolean(kind), expired);
       }
       throw new Error('The selected model is unavailable.');
     },

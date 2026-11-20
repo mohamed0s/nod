@@ -42,6 +42,10 @@ export function modelUnavailable(
   if (retryable || busy.test(text)) return 'busy';
 }
 
+export function timedOut(text: string | undefined) {
+  return Boolean(text && /timed? ?out|timeout|sent no response|ETIMEDOUT/i.test(text));
+}
+
 export function retryDelayMs(header: (name: string) => string | null | undefined, text = '') {
   const milliseconds = Number(header('retry-after-ms'));
   if (Number.isFinite(milliseconds) && milliseconds > 0) return milliseconds;

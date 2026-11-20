@@ -8987,7 +8987,7 @@ test('a failed model request leaves none of its unanswered input for later turns
   assert.ok(requests[4].includes('Hi'));
 });
 
-test('task and batch classification have a small request budget and never retries or records conversation traces', async (t) => {
+test('task and batch classification have a small request budget, retry nothing that is not an availability error and never record conversation traces', async (t) => {
   const deadlines: number[] = [];
   t.mock.method(AbortSignal, 'timeout', (milliseconds: number) => {
     deadlines.push(milliseconds);
@@ -9069,6 +9069,7 @@ async function fallbackServer(
         requests.filter((item) => item.model === model).length,
         request.url ?? '',
       );
+      if (!reply.status) return;
       if (reply.status !== 200) {
         response.writeHead(reply.status, {
           'content-type': 'application/json',
@@ -9088,7 +9089,10 @@ async function fallbackServer(
     });
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  t.after(() => {
+    server.closeAllConnections();
+    return new Promise<void>((resolve) => server.close(() => resolve()));
+  });
   const url = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/v1`;
   const access = (id: string, path = '/v1'): ModelAccess => {
     const value = smallContextAccess('compatible', id, 131_072);
@@ -9429,6 +9433,33 @@ test('helpers in a turn start on the backup the turn moved to, even when two bac
   );
 });
 
+test('a check that times out moves to the next model without retrying the same one', async (t) => {
+  const timeout = AbortSignal.timeout.bind(AbortSignal);
+  t.mock.method(AbortSignal, 'timeout', (milliseconds: number) =>
+    timeout(milliseconds === 10_000 ? 1000 : milliseconds),
+  );
+  const { requests, access } = await fallbackServer(t, (model) =>
+    model === 'fixture-backup' ? { status: 200, text: '{"run":false}' } : { status: 0 },
+  );
+  const curator = createPiMemoryCurator({
+    provider: 'compatible',
+    configured: () => true,
+    resolve: async () => [access('fixture-primary'), access('fixture-backup')],
+  });
+  const reports: Array<string | undefined> = [];
+  assert.deepEqual(
+    await curator.curate(
+      { task: 'attention', instructions: 'Check the synthetic batch.', input: {} },
+      undefined,
+      (usage) => reports.push(usage.status),
+    ),
+    { run: false },
+  );
+  assert.deepEqual(reports, ['failed', 'succeeded']);
+  assert.ok(requests.filter(({ model }) => model === 'fixture-primary').length <= 1);
+  assert.equal(requests.filter(({ model }) => model === 'fixture-backup').length, 1);
+});
+
 test('a backup request uses its own connection timeout, not the work model one', async () => {
   const { createTurnFallback } = await import('../src/providers/pi/fallback.ts');
   const { localModelSilenceMs } = await import('../src/providers/pi/models.ts');
@@ -9641,6 +9672,16 @@ test('a busy work model hands the same request to a backup and records each atte
   const reason = skipped.filter((event) => event.type === 'error').at(-1);
   assert.ok(reason?.type === 'error');
   assert.match(reason.message, /fixture-tiny can't take this conversation/);
+
+  requests.length = 0;
+  answers['fixture-primary'] = () => ({ status: 504, text: 'upstream request timeout' });
+  const slow = await turn();
+  await slow.session.prompt('Synthetic question.', []);
+  await slow.session.dispose();
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-primary', 'fixture-backup'],
+  );
 });
 
 test('action review failures identify the task, model, provider, and bounded provider reason', async (t) => {
