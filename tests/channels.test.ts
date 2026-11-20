@@ -5224,9 +5224,11 @@ test(
       CREATE TABLE tasks(id uuid PRIMARY KEY,owner_id text NOT NULL,turn_id uuid,session_id uuid,message_id uuid,title text NOT NULL)`);
     let topics = false;
     let refuse = false;
+    let refuseRename = false;
     let failText: string | undefined;
     const gone = new Set<number>();
     const created: Record<string, unknown>[] = [];
+    const renamed: Record<string, unknown>[] = [];
     const sent: Record<string, unknown>[] = [];
     t.mock.method(
       globalThis,
@@ -5247,6 +5249,15 @@ test(
               ...(topics ? { has_topics_enabled: true } : {}),
             },
           });
+        if (method === 'editForumTopic') {
+          if (refuseRename)
+            return Response.json(
+              { ok: false, error_code: 400, description: 'Bad Request: TOPIC_NOT_MODIFIED' },
+              { status: 400 },
+            );
+          renamed.push(body);
+          return Response.json({ ok: true, result: true });
+        }
         if (method === 'createForumTopic') {
           if (refuse)
             return Response.json(
@@ -5453,6 +5464,15 @@ test(
     assert.equal(delivery('First topic update').message_thread_id, 701);
     assert.equal(delivery('First topic update').reply_parameters, undefined);
     assert.equal(delivery('Second topic update').message_thread_id, 701);
+    await service.renameTopic(taskId, 'Synthetic quarterly report');
+    assert.deepEqual(renamed, [
+      { chat_id: '123456', message_thread_id: 701, name: 'Synthetic quarterly report' },
+    ]);
+    refuseRename = true;
+    await service.renameTopic(taskId, 'Synthetic quarterly report');
+    refuseRename = false;
+    await service.renameTopic(randomUUID(), 'Synthetic missing chat');
+    assert.equal(renamed.length, 1);
 
     const inTopic = await receive('Add a synthetic chart', 701);
     assert.deepEqual([inTopic.topic_id, inTopic.provider_reply_id], ['701', null]);

@@ -1629,6 +1629,30 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     return saved.rows[0]?.topic_id ?? topicId;
   }
 
+  async function renameTopic(taskId: string, title: string) {
+    if (closed || replacing || !transport.renameTopic) return;
+    const topics = await pool.query<ChannelIdentity & { topic_id: string; thread_id: string }>(
+      `SELECT c.provider,c.account_id,c.sender_id,c.topic_id,i.thread_id FROM channel_topics c
+       CROSS JOIN LATERAL (SELECT i.thread_id FROM channel_inbox i WHERE i.owner_id=c.owner_id AND i.provider=c.provider
+         AND i.account_id=c.account_id AND i.sender_id=c.sender_id ORDER BY i.received_at DESC LIMIT 1) i
+       WHERE c.owner_id=$1 AND c.task_id=$2`,
+      [ownerId, taskId],
+    );
+    for (const row of topics.rows) {
+      if (!permitted(row)) continue;
+      await transport
+        .renameTopic({
+          channelId: row.provider,
+          accountId: row.account_id,
+          threadId: row.thread_id,
+          topicId: row.topic_id,
+          name: title,
+          signal: AbortSignal.any([receiving.signal, AbortSignal.timeout(30_000)]),
+        })
+        .catch((cause: unknown) => logFailure('channel_topic_rename_failed', cause));
+    }
+  }
+
   const presence = new Map<string, { at: number; status: string }>();
   const confirmedProgress = new Map<string, string>();
   const acknowledged = new Set<string>();
@@ -2077,6 +2101,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     replaceTransport,
     announcePairing,
     react,
+    renameTopic,
     async pairing() {
       if (closed || replacing || !transport.pairing) throw new Error('QR pairing is unavailable.');
       return transport.pairing();

@@ -1133,6 +1133,10 @@ async function initializeApplication(
     watchState: async (connectionIds) => integrations.watchState(connectionIds),
   });
   await personal.initialize({ workers: options.workers });
+  const renameTopic = (id: string, title: string) =>
+    void channels
+      ?.renameTopic(id, title)
+      .catch((error) => logFailure('channel_topic_rename_failed', error));
   const tasks = createTasks({
     pool,
     ownerId,
@@ -1142,6 +1146,7 @@ async function initializeApplication(
     ...(adapters.models
       ? { validateModel: (choice: ModelSelection) => adapters.models!.validateChoice(choice) }
       : {}),
+    renamed: renameTopic,
   });
   await tasks.initialize();
   const chatTitles = createChatTitles({
@@ -1149,6 +1154,7 @@ async function initializeApplication(
     ownerId,
     curator,
     refresh,
+    renamed: renameTopic,
   });
   const jobs = createJobs({
     pool,
