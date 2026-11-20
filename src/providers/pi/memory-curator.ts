@@ -202,9 +202,11 @@ export function createPiMemoryCurator(options: {
             connection = await loaded;
           }
         } catch (error) {
-          const reason = error instanceof Error ? error.message : String(error);
-          if (last || !access || signal?.aborted || !modelUnavailable(reason)) throw error;
-          tried.push(`${access.provider}/${access.definition.choice.id} (${reason.slice(0, 150)})`);
+          if (last || !access || signal?.aborted || !(error instanceof ModelUnavailableError))
+            throw error;
+          tried.push(
+            `${access.provider}/${access.definition.choice.id} (${error.message.slice(0, 150)})`,
+          );
           continue;
         }
         const { runtime, model, effort, subscription, requestFacts } = connection;

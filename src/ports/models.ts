@@ -1,3 +1,4 @@
+import { ModelRequestError } from './agent.ts';
 import type {
   ModelChoice,
   ModelProvider,
@@ -34,7 +35,7 @@ export class ModelAuthError extends Error {
   }
 }
 
-export class ModelUnavailableError extends Error {
+export class ModelUnavailableError extends ModelRequestError {
   constructor(
     message: string,
     readonly attempts: string[],

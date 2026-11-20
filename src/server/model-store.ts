@@ -17,7 +17,13 @@ export interface ModelRecord {
   credential?: ModelCredential;
   requestFailures?: Record<
     string,
-    { credentialTag: string; reason: string; failures: number; retryAt: number }
+    {
+      credentialTag: string;
+      reason: string;
+      failures: number;
+      retryAt: number;
+      unavailable?: 'busy' | 'quota';
+    }
   >;
 }
 

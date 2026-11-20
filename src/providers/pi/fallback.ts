@@ -10,7 +10,7 @@ import {
   type SimpleStreamOptions,
 } from '@earendil-works/pi-ai';
 import { estimateTokens } from '@earendil-works/pi-coding-agent';
-import type { ModelAccess } from '../../ports/models.ts';
+import { ModelUnavailableError, type ModelAccess } from '../../ports/models.ts';
 import {
   fallbackWait,
   modelUnavailable,
@@ -152,8 +152,9 @@ export function createTurnFallback(options: {
         ready.set(index, connection);
         use(index, connection.model);
         if (!fits(connection.model, context))
-          throw new Error(
+          throw new ModelUnavailableError(
             `${candidate.access.definition.choice.name} can't take this conversation, so Nod didn't try it.`,
+            [candidate.access.definition.choice.id],
           );
         if (options.automatic) await candidate.access.prepareRequest?.(connection.model.id, true);
         const { apiKey: _, headers: __, env: ___, ...rest } = streamOptions ?? {};
@@ -171,7 +172,7 @@ export function createTurnFallback(options: {
           label: `${candidate.access.provider} / ${candidate.access.definition.choice.id}`,
           reason: error instanceof Error ? error.message : String(error),
         });
-        if (index + 1 >= candidates.length) {
+        if (index + 1 >= candidates.length || !(error instanceof ModelUnavailableError)) {
           exhausted = true;
           throw error;
         }

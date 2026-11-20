@@ -41,7 +41,7 @@ import { createContextOutput, toolOutputReference } from './context-output.ts';
 import { audioContext, audioEntries, audioMessage, readsNativeAudio } from './audio.ts';
 import { piModelTrace } from './traces.ts';
 import type { ModelTraces } from '../../ports/traces.ts';
-import type { ModelAccess } from '../../ports/models.ts';
+import { ModelUnavailableError, type ModelAccess } from '../../ports/models.ts';
 import type { Agent, AgentEvent } from '../../ports/agent.ts';
 import {
   closeInterruptedCalls,
@@ -502,6 +502,7 @@ export function createPiAgent(options: {
             break;
           } catch (error) {
             paused ??= error;
+            if (!(error instanceof ModelUnavailableError)) throw error;
           }
         }
         if (start >= chain.length) throw paused;

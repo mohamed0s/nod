@@ -9219,6 +9219,91 @@ test('curator checks retry a busy model once, then use the next backup, and neve
   });
 });
 
+test('a paused work model moves a turn and a pinned check to the backup only when the pause is an availability failure', async (t) => {
+  const { ModelUnavailableError } = await import('../src/ports/models.ts');
+  const { pinnedReview } = await import('../src/server/model-fallback.ts');
+  const directory = await mkdtemp(join(tmpdir(), 'nod-fallback-paused-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { requests, access } = await fallbackServer(t, (model) =>
+    model === 'fixture-backup'
+      ? { status: 200, text: '{"run":false}' }
+      : { status: 500, text: 'The paused model was called.' },
+  );
+  const quota = new ModelUnavailableError(
+    'Synthetic failed the last request (429 insufficient_quota). Automatic requests to this model are paused until a request succeeds.',
+    ['fixture-primary'],
+  );
+  const revoked = new Error(
+    'Synthetic failed the last request (401 Invalid API key). Automatic requests to this model are paused until a request succeeds.',
+  );
+  const paused = (error: Error): ModelAccess => ({
+    ...access('fixture-primary'),
+    prepareRequest: async (_id, automatic) => {
+      if (automatic) throw error;
+      return async () => {};
+    },
+  });
+  const turn = async (pause: Error) => {
+    const events: AgentEvent[] = [];
+    const agent = createPiAgent({
+      provider: 'compatible',
+      resolve: async () => [paused(pause), access('fixture-backup')],
+      sessionRoot: directory,
+    });
+    t.after(() => agent.dispose());
+    const session = await agent.open({
+      ...fakeExecution(randomUUID()),
+      ...sandbox,
+      automatic: true,
+      systemPrompt: 'Synthetic fixture',
+      tools: [],
+      shouldStop: () => false,
+      onEvent: (event) => events.push(event),
+    });
+    await session.prompt('Synthetic question.', []);
+    await session.dispose();
+    return events;
+  };
+  const moved = await turn(quota);
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-backup'],
+  );
+  assert.deepEqual(
+    moved.filter((event) => event.type === 'fallback'),
+    [{ type: 'fallback', from: 'fixture-primary', to: 'fixture-backup', reason: 'unavailable' }],
+  );
+  requests.length = 0;
+  await assert.rejects(turn(revoked), /401 Invalid API key/);
+  assert.deepEqual(requests, []);
+
+  const check = (pause: Error) => {
+    const curator = createPiMemoryCurator({
+      provider: 'compatible',
+      configured: () => true,
+      resolve: async () => [paused(pause), access('fixture-backup')],
+    });
+    return pinnedReview(
+      async () =>
+        (await curator.pinned!()).map(
+          (pinned) => (instructions: string, input: object, signal?: AbortSignal) =>
+            pinned.curate({ task: 'review', instructions, input, automatic: true }, signal),
+        ),
+      async () => undefined,
+      (review) => review('Check the synthetic action.', {}),
+    );
+  };
+  requests.length = 0;
+  assert.deepEqual(await check(quota), { run: false });
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-backup'],
+  );
+  requests.length = 0;
+  await assert.rejects(check(revoked), /401 Invalid API key/);
+  assert.deepEqual(requests, []);
+});
+
 test('a busy work model hands the same request to a backup and records each attempt', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'nod-fallback-turn-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
