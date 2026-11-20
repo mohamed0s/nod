@@ -9048,6 +9048,277 @@ test('task and batch classification have a small request budget and never retrie
       });
 });
 
+async function fallbackServer(
+  t: TestContext,
+  answer: (model: string, attempt: number) => { status: number; headers?: object; text?: string },
+) {
+  const { createServer } = await import('node:http');
+  const requests: Array<{ model: string; at: number }> = [];
+  const server = createServer((request, response) => {
+    const parts: Buffer[] = [];
+    request.on('data', (part) => parts.push(part));
+    request.on('end', () => {
+      const { model } = JSON.parse(Buffer.concat(parts).toString()) as { model: string };
+      requests.push({ model, at: performance.now() });
+      const reply = answer(model, requests.filter((item) => item.model === model).length);
+      if (reply.status !== 200) {
+        response.writeHead(reply.status, {
+          'content-type': 'application/json',
+          ...reply.headers,
+        });
+        response.end(JSON.stringify({ error: { message: reply.text ?? 'Synthetic failure.' } }));
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end(
+        `data: ${JSON.stringify({
+          id: `fixture-${model}`,
+          choices: [{ index: 0, delta: { content: reply.text }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+        })}\n\ndata: [DONE]\n\n`,
+      );
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const url = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/v1`;
+  const access = (id: string): ModelAccess => {
+    const value = smallContextAccess('compatible', id, 131_072);
+    value.definition.spec = { ...value.definition.spec, baseUrl: url };
+    value.read = async () => ({ type: 'endpoint', url, key: 'fixture-key' });
+    return value;
+  };
+  return { requests, access };
+}
+
+test('curator checks retry a busy model once, then use the next backup, and never on a request error', async (t) => {
+  const { modelUnavailable, retryDelayMs, fallbackWait } =
+    await import('../src/shared/model-fallback.ts');
+  for (const [text, expected] of [
+    ['429 Model is at capacity (HTTP 429) [request phase: response]', 'busy'],
+    ['503 Service Unavailable (HTTP 503)', 'busy'],
+    ['529 overloaded_error (HTTP 529)', 'busy'],
+    ['fetch failed (transport cause: ECONNRESET) [request phase: request]', 'busy'],
+    ['getaddrinfo ENOTFOUND fixture.example.test', 'busy'],
+    ['socket hang up', 'busy'],
+    ['Synthetic sent no response for 90 seconds, so the request timed out.', 'busy'],
+    ['429 You exceeded your current quota: insufficient_quota (HTTP 429)', 'quota'],
+    ['400 Model Not Exist (HTTP 400)', undefined],
+    ['401 Invalid API key (HTTP 401)', undefined],
+    ['403 Forbidden (HTTP 403)', undefined],
+    ['404 model not found (HTTP 404)', undefined],
+    ['Provider finish_reason: content_filter (HTTP 200)', undefined],
+    ['Context length exceeded: maximum context is 8192 tokens.', undefined],
+    ['Rate limit reached for tokens per minute (TPM). Please retry after 2s.', 'busy'],
+  ] as const)
+    assert.equal(modelUnavailable(text), expected, text);
+  assert.equal(
+    retryDelayMs((name) => (name === 'retry-after' ? '12' : null)),
+    12_000,
+  );
+  assert.equal(
+    retryDelayMs(() => null, 'Rate limit reached. Please try again in 1.5s.'),
+    1500,
+  );
+  assert.equal(fallbackWait(60_000, 3000, 250), 3000);
+  assert.equal(fallbackWait(undefined, 3000, 250), 250);
+
+  const answers: Record<
+    string,
+    (attempt: number) => { status: number; headers?: object; text?: string }
+  > = {
+    'fixture-primary': () => ({
+      status: 429,
+      headers: { 'retry-after-ms': '200' },
+      text: 'Model is at capacity',
+    }),
+    'fixture-backup': () => ({ status: 200, text: '{"task_type":"research"}' }),
+  };
+  const { requests, access } = await fallbackServer(t, (model, attempt) =>
+    answers[model]!(attempt),
+  );
+  const reports: Array<{ model: string; status?: string }> = [];
+  const curator = createPiMemoryCurator({
+    provider: 'compatible',
+    configured: () => true,
+    resolve: async () => [access('fixture-primary'), access('fixture-backup')],
+  });
+  const classify = (signal?: AbortSignal) =>
+    curator.curate({ task: 'attention', instructions: 'Classify.', input: {} }, signal, (usage) =>
+      reports.push({ model: usage.model, status: usage.status }),
+    );
+  assert.deepEqual(await classify(), { task_type: 'research' });
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-primary', 'fixture-primary', 'fixture-backup'],
+  );
+  assert.ok(requests[1]!.at - requests[0]!.at >= 190);
+  assert.deepEqual(reports, [
+    { model: 'fixture-primary', status: 'failed' },
+    { model: 'fixture-primary', status: 'failed' },
+    { model: 'fixture-backup', status: 'succeeded' },
+  ]);
+
+  requests.length = 0;
+  answers['fixture-primary'] = () => ({ status: 429, headers: { 'retry-after': '60' } });
+  const started = performance.now();
+  assert.deepEqual(await classify(), { task_type: 'research' });
+  const waited = requests[1]!.at - requests[0]!.at;
+  assert.ok(waited >= 2900 && waited < 10_000, String(waited));
+  assert.ok(performance.now() - started < 15_000);
+
+  requests.length = 0;
+  answers['fixture-primary'] = () => ({ status: 400, text: 'Model Not Exist' });
+  await assert.rejects(classify(), /classification model is unavailable[\s\S]*Model Not Exist/);
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-primary'],
+  );
+
+  requests.length = 0;
+  answers['fixture-primary'] = () => ({ status: 429, headers: { 'retry-after': '10' } });
+  const stop = new AbortController();
+  const stopped = classify(stop.signal);
+  setTimeout(100).then(() => stop.abort());
+  await assert.rejects(stopped);
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-primary'],
+  );
+
+  requests.length = 0;
+  await assert.rejects(
+    curator.curate({ task: 'classify', instructions: 'Classify.', input: {}, fallback: false }),
+  );
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-primary'],
+  );
+
+  requests.length = 0;
+  answers['fixture-primary'] = () => ({ status: 503, text: 'Service Unavailable' });
+  answers['fixture-backup'] = () => ({ status: 503, text: 'Backend overloaded' });
+  const { ModelUnavailableError } = await import('../src/ports/models.ts');
+  await assert.rejects(classify(), (error: unknown) => {
+    assert.ok(error instanceof ModelUnavailableError);
+    assert.match(error.message, /compatible\/fixture-primary \(.*Service Unavailable/);
+    assert.match(error.message, /then compatible\/fixture-backup\..*Backend overloaded/);
+    return true;
+  });
+  assert.equal(requests.length, 4);
+  const [pinned, backup] = await curator.pinned!();
+  requests.length = 0;
+  await assert.rejects(pinned!.curate({ task: 'review', instructions: 'Check.', input: {} }));
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-primary', 'fixture-primary'],
+  );
+  answers['fixture-backup'] = () => ({ status: 200, text: '{"run":false}' });
+  assert.deepEqual(await backup!.curate({ task: 'review', instructions: 'Check.', input: {} }), {
+    run: false,
+  });
+});
+
+test('a busy work model hands the same request to a backup and records each attempt', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-fallback-turn-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const answers: Record<string, () => { status: number; headers?: object; text?: string }> = {
+    'fixture-primary': () => ({
+      status: 429,
+      headers: { 'retry-after-ms': '5' },
+      text: 'Model is at capacity',
+    }),
+    'fixture-backup': () => ({ status: 200, text: 'Synthetic backup answer.' }),
+  };
+  const { requests, access } = await fallbackServer(t, (model) => answers[model]!());
+  const agent = createPiAgent({
+    provider: 'compatible',
+    resolve: async () => [access('fixture-primary'), access('fixture-backup')],
+    sessionRoot: directory,
+  });
+  t.after(() => agent.dispose());
+  const turn = async () => {
+    const events: AgentEvent[] = [];
+    const session = await agent.open({
+      ...fakeExecution(randomUUID()),
+      ...sandbox,
+      systemPrompt: 'Synthetic fixture',
+      tools: [],
+      shouldStop: () => false,
+      onEvent: (event) => events.push(event),
+    });
+    return { session, events };
+  };
+
+  const busy = await turn();
+  await busy.session.prompt('Synthetic question.', []);
+  await busy.session.dispose();
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-primary', 'fixture-primary', 'fixture-backup'],
+  );
+  assert.deepEqual(
+    busy.events.flatMap((event) =>
+      event.type === 'model_usage' ? [{ model: event.model, status: event.status }] : [],
+    ),
+    [
+      { model: 'fixture-primary', status: 'failed' },
+      { model: 'fixture-primary', status: 'failed' },
+      { model: 'fixture-backup', status: 'succeeded' },
+    ],
+  );
+  assert.deepEqual(
+    busy.events.filter((event) => event.type === 'fallback'),
+    [{ type: 'fallback', from: 'fixture-primary', to: 'fixture-backup', reason: 'busy' }],
+  );
+  assert.ok(
+    busy.events.some(
+      (event) => event.type === 'final' && event.text === 'Synthetic backup answer.',
+    ),
+  );
+
+  requests.length = 0;
+  answers['fixture-backup'] = () => ({ status: 503, text: 'Backend overloaded' });
+  const exhausted = await turn();
+  await exhausted.session.prompt('Synthetic question.', []);
+  await exhausted.session.dispose();
+  assert.equal(requests.length, 4);
+  const last = exhausted.events.filter((event) => event.type === 'error').at(-1);
+  assert.ok(last?.type === 'error');
+  assert.match(
+    last.message,
+    /^compatible \/ fixture-primary: .*capacity.*; then compatible \/ fixture-backup: .*Backend overloaded/,
+  );
+
+  requests.length = 0;
+  answers['fixture-primary'] = () => ({ status: 400, text: 'Model Not Exist' });
+  const rejected = await turn();
+  await rejected.session.prompt('Synthetic question.', []);
+  await rejected.session.dispose();
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-primary'],
+  );
+  assert.equal(rejected.events.filter((event) => event.type === 'fallback').length, 0);
+
+  requests.length = 0;
+  answers['fixture-primary'] = () => ({ status: 429, headers: { 'retry-after': '10' } });
+  answers['fixture-backup'] = () => ({ status: 200, text: 'Synthetic backup answer.' });
+  const stopped = await turn();
+  const started = performance.now();
+  const pending = stopped.session.prompt('Synthetic question.', []);
+  while (!requests.length) await setTimeout(10);
+  await setTimeout(50);
+  await stopped.session.abort();
+  await pending;
+  await stopped.session.dispose();
+  assert.ok(performance.now() - started < 5000);
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-primary'],
+  );
+});
+
 test('action review failures identify the task, model, provider, and bounded provider reason', async (t) => {
   const { createServer } = await import('node:http');
   const { InMemoryCredentialStore } = await import('@earendil-works/pi-ai');

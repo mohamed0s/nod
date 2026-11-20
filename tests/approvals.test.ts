@@ -1715,6 +1715,133 @@ test(
       });
 
       await t.test(
+        'a trust check keeps one model for all its steps and fails closed when every model is busy',
+        async () => {
+          const { ModelUnavailableError } = await import('../src/ports/models.ts');
+          const { createTrust } = await import('../src/server/trust.ts');
+          const calls: string[] = [];
+          const busy = (name: string) =>
+            new ModelUnavailableError(`${name}: 429 model is at capacity (HTTP 429)`, [name]);
+          const pinned =
+            (name: string, outcome: (step: string) => 'busy' | 'broken' | 'yes' | 'no') =>
+            async (_instructions: string, input: Record<string, any>) => {
+              const step = 'expiredConfirmation' in input ? 'retired' : 'check';
+              calls.push(`${name}:${step}`);
+              const result = outcome(step);
+              if (result === 'busy') throw busy(name);
+              if (result === 'broken') throw new Error(`${name}: 400 bad request (HTTP 400)`);
+              if (step === 'retired') return { retiredReply: 'new', probability: 1 };
+              return result === 'yes'
+                ? { run: true, because: input.userMessages?.at(-1)?.text }
+                : { run: false };
+            };
+          const checker = (
+            reviewers: Array<ReturnType<typeof pinned>>,
+            decisions?: import('../src/ports/decisions.ts').DecisionModel,
+          ) =>
+            createTrust({
+              pool: db.pool,
+              ownerId,
+              review: async () => {
+                calls.push('unpinned');
+                return undefined;
+              },
+              reviewers: async () => reviewers,
+              ...(decisions ? { decisions } : {}),
+            });
+
+          const expiring = await begin(
+            'Send the synthetic invoice to Carol at carol@example.test.',
+          );
+          const expiredId = await propose(
+            expiring,
+            'GMAIL_SEND_EMAIL',
+            email('carol@example.test'),
+          );
+          await finish(expiring.turnId, 'waiting');
+          await db.pool.query("UPDATE approvals SET status='expired' WHERE id=$1", [expiredId]);
+          const replacementText = 'Send the revised synthetic invoice to Dan at dan@example.test.';
+          const replacement = await messages.submit(replacementText, [], {
+            replyToMessageId: (await stored(expiredId)).confirmation_message_id,
+          });
+          const replacementTurn = await running(replacement.turnId);
+          const moved = await checker([
+            pinned('first', (step) => (step === 'check' ? 'busy' : 'yes')),
+            pinned('second', () => 'yes'),
+          ]).check(replacementTurn, 'GMAIL_SEND_EMAIL', email('dan@example.test'));
+          assert.deepEqual(calls, [
+            'first:retired',
+            'first:check',
+            'second:retired',
+            'second:check',
+          ]);
+          assert.equal(moved.confirm, false);
+          await finish(replacementTurn.turnId, 'cancelled');
+
+          calls.length = 0;
+          const asked = await begin('Email Ana the synthetic invoice.');
+          compareVerdict(
+            await checker([pinned('first', () => 'busy'), pinned('second', () => 'busy')]).check(
+              asked,
+              'GMAIL_SEND_EMAIL',
+              email('ana@example.test'),
+            ),
+            { confirm: true, reason: 'unrequested' },
+          );
+          assert.deepEqual(calls, ['first:check', 'second:check']);
+
+          calls.length = 0;
+          compareVerdict(
+            await checker([pinned('first', () => 'broken'), pinned('second', () => 'yes')]).check(
+              asked,
+              'GMAIL_SEND_EMAIL',
+              email('ana@example.test'),
+            ),
+            { confirm: true, reason: 'unrequested' },
+          );
+          assert.deepEqual(calls, ['first:check']);
+          await finish(asked.turnId, 'cancelled');
+
+          calls.length = 0;
+          const scheduled = await attachSchedule(
+            await begin('Synthetic scheduled send', { source: 'schedule' }),
+            'Email Ana the synthetic invoice.',
+          );
+          await assert.rejects(
+            checker([pinned('first', () => 'busy'), pinned('second', () => 'busy')]).check(
+              scheduled,
+              'GMAIL_SEND_EMAIL',
+              email('ana@example.test'),
+            ),
+            /couldn't decide this action, so it didn't run and the owner wasn't asked/,
+          );
+          assert.deepEqual(calls, ['first:check', 'second:check']);
+          await finish(scheduled.turnId, 'cancelled');
+
+          calls.length = 0;
+          const decided = await begin('Email Ana the synthetic invoice.');
+          let decisionChecks = 0;
+          const failing: import('../src/ports/decisions.ts').DecisionModel = {
+            configured: true,
+            check: async () => {
+              decisionChecks++;
+              throw new Error('decision: 503 overloaded (HTTP 503)');
+            },
+          };
+          compareVerdict(
+            await checker(
+              [pinned('first', () => 'yes'), pinned('second', () => 'yes')],
+              failing,
+            ).check(decided, 'GMAIL_SEND_EMAIL', email('ana@example.test')),
+            { confirm: true, reason: 'unrequested' },
+          );
+          assert.equal(decisionChecks, 1);
+          assert.deepEqual(calls, []);
+          await finish(decided.turnId, 'cancelled');
+        },
+      );
+
+      await t.test(
         'a browser step quoted from informal owner words runs, and uncovered steps still ask',
         async () => {
           const request =
