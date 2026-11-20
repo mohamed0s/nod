@@ -6,6 +6,7 @@ import type { MemoryBrief } from '../ports/memory-recall.ts';
 import type { MemoryService } from './memory.ts';
 import { createHistorySearch } from './history.ts';
 import { unsafe } from './memory-tree.ts';
+import { turnChat } from './chat-scope.ts';
 
 const planSchema = z.object({
   mode: z.enum(['none', 'personalize', 'recall', 'aggregate']),
@@ -132,11 +133,12 @@ export function createMemoryRecall(options: {
     const searches: MemoryBrief['searches'] = [];
     let truncated = false;
     const queries = [...new Set([context.prompt.slice(0, 4000), ...plan.queries])].slice(0, 5);
+    const chat = await turnChat(options.pool, options.ownerId, context.turnId);
     for (const query of queries) {
       let cursor: string | undefined;
       for (let page = 0; page < (plan.mode === 'aggregate' ? 5 : 1); page++) {
         signal.throwIfAborted();
-        const result = await search({ query, cursor });
+        const result = await search({ query, cursor }, chat);
         for (const message of result.messages) {
           if (message.id === context.currentMessageId || unsafe(message.text)) continue;
           if (plan.mode === 'personalize' && message.role !== 'user') continue;

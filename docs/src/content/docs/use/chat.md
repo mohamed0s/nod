@@ -9,7 +9,7 @@ Chat is where you give Nod work, answer its questions and get the results.
 
 Nod keeps one ongoing conversation with you. The desktop app, the web app, Telegram and WhatsApp all add to that same conversation, so Nod remembers what you said in any of them.
 
-To change topics, type your new request in this conversation. There is no **New chat** control. You do not need to delete data to change topics.
+To change topics, type your new request in this conversation, or select **New chat** in the web app to give it a chat of its own. Each chat keeps its own history, while memory, rules, Vault, connected apps and schedules are shared. See [The chat list](/use/tasks/#the-chat-list). You do not need to delete data to change topics.
 
 Nod follows your latest clear message's language, spoken or typed, including questions, confirmations and connection instructions. This covers tasks too: a task you started in one language reports in the language of your latest message. Answers to approval cards don't count. When your latest message is too short to tell, Nod keeps the language it last used. An explicit language request takes precedence. Your email, websites and other data never set it, and before you've written anything, such as at the start of setup, Nod writes in English. Asking for an email or document in a different language applies to that output; a neutral acknowledgement such as "OK" keeps the preceding language. What Nod reads on websites, in email and in documents comes back translated. It keeps the original wording only in quotes, such as a menu or button name you need to find, with a short translation when the meaning isn't clear. Voice, region, date format and time zone are separate preferences.
 
@@ -207,7 +207,7 @@ Send `/clear` as a text message without attachments or a recording to start fres
 
 Nod stops work in the main chat. Independent tasks keep running, and saved task and schedule instructions stay valid. Files, apps, Vault, memory, schedules and settings stay. Previous messages remain available in chat search. The next message starts with fresh model context; automatic related-chat recall also starts at this point.
 
-Nod has one main chat. `/clear` does not create a second conversation or delete previous messages.
+Nod has one main chat. `/clear` does not create a second conversation or delete previous messages. Send it in **Main**: it clears only the main chat, and each task chat keeps its own history. A task chat or **New chat** refuses it, and so does a task topic in Telegram.
 
 ## Stop Nod
 

@@ -164,6 +164,7 @@ export function createTasks(options: {
   refresh?: () => void;
   clearBrowser?: (id: string) => Promise<void>;
   validateModel?: (choice: ModelSelection) => ModelSelection;
+  renamed?: (taskId: string, title: string) => void;
 }) {
   const { pool, ownerId } = options;
   const refresh = options.refresh ?? (() => {});
@@ -369,8 +370,8 @@ export function createTasks(options: {
   ) {
     const title = chat.text.trim().split('\n')[0]!.trim().slice(0, 160) || 'New chat';
     await client.query(
-      `INSERT INTO tasks(id,owner_id,turn_id,session_id,source_message_id,title,done_when,brief,now_text,state,closed_at)
-       VALUES($1,$2,$3,$1,$4,$5,'',$6,'',$7,CASE WHEN $7='cancelled' THEN now() END)`,
+      `INSERT INTO tasks(id,owner_id,turn_id,session_id,source_message_id,title,done_when,brief,now_text,state,closed_at,title_by)
+       VALUES($1,$2,$3,$1,$4,$5,'',$6,'',$7,CASE WHEN $7='cancelled' THEN now() END,'line')`,
       [
         chat.sessionId,
         ownerId,
@@ -812,6 +813,10 @@ export function createTasks(options: {
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS activity_key text;
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS model jsonb;
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS archived_at timestamptz;
+      ALTER TABLE tasks ADD COLUMN IF NOT EXISTS title_by text;
+      UPDATE tasks SET title_by='line' WHERE title_by IS NULL AND session_id=id AND message_id IS NULL
+        AND done_when='' AND activity_key IS NULL
+        AND (title='New chat' OR title=left(btrim(split_part(btrim(brief),chr(10),1)),160));
       CREATE INDEX IF NOT EXISTS tasks_message ON tasks(message_id) WHERE message_id IS NOT NULL;
       CREATE UNIQUE INDEX IF NOT EXISTS tasks_activity ON tasks(owner_id,activity_key) WHERE activity_key IS NOT NULL;
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS steps jsonb NOT NULL DEFAULT '[]';
@@ -880,6 +885,7 @@ export function createTasks(options: {
         .parse(request.body);
       const { rowCount } = await pool.query(
         `UPDATE tasks SET title=COALESCE($3,title),updated_at=now(),
+           title_by=CASE WHEN $3::text IS NULL THEN title_by ELSE 'owner' END,
            archived_at=CASE WHEN $4::boolean IS NULL THEN archived_at WHEN $4 THEN COALESCE(archived_at,now()) END
          WHERE id=$1 AND owner_id=$2 AND (NOT COALESCE($4,false) OR state<>'open')`,
         [id, ownerId, title ?? null, archived ?? null],
@@ -897,6 +903,7 @@ export function createTasks(options: {
           : failure('Task not found.', 404);
       }
       refresh();
+      if (title !== undefined) options.renamed?.(id, title);
       return { ok: true };
     });
     app.put<{ Params: { id: string } }>('/api/tasks/:id/model', async (request) => {

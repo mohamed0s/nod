@@ -126,6 +126,14 @@ export interface MessagingTransport {
     name: string;
     signal?: AbortSignal;
   }): Promise<string>;
+  renameTopic?(input: {
+    channelId: string;
+    accountId: string;
+    threadId: string;
+    topicId: string;
+    name: string;
+    signal?: AbortSignal;
+  }): Promise<void>;
   react?(input: {
     channelId: string;
     accountId: string;

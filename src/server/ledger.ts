@@ -624,7 +624,7 @@ export function createLedger({
                     ? 'agent'
                     : request.task === 'review' || request.task === 'access'
                       ? 'review'
-                      : request.task === 'plan'
+                      : request.task === 'plan' || request.task === 'title'
                         ? 'tasks'
                         : 'memory',
               operation: request.task,
@@ -640,6 +640,9 @@ export function createLedger({
           await finishUsage();
         }
       },
+      ...(base.pinned
+        ? { pinned: async () => (await base.pinned!()).map((pinned) => curator(pinned)) }
+        : {}),
     };
   }
 

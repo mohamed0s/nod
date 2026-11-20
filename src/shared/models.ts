@@ -254,6 +254,8 @@ export interface ModelsResponse {
   selection: ModelSelection | null;
   selectionIssue?: ModelIssue;
   routes: ModelRoutes;
+  backups: ModelSelection[];
+  backupsSuggested?: boolean;
   light: ModelSelection | null;
   unpricedPreparationModel?: string;
 }

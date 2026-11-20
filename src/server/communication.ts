@@ -6,6 +6,7 @@ import type { ApprovalDescription, ApprovalPresentation } from './approvals.ts';
 import type { ChannelPresentation } from './channels.ts';
 import { redactSecretText, withoutSecretKeys } from './redaction.ts';
 import { withdrawnSql } from './turn-chain.ts';
+import { inChatSql, turnChat } from './chat-scope.ts';
 import { appPageLinks, appPages } from '../shared/app-links.ts';
 import {
   conversationLanguage,
@@ -15,6 +16,7 @@ import {
 import { approvalTitle } from './action-presentation.ts';
 import { scheduleLabel } from '../shared/schedule-timing.ts';
 import { channelText } from './channel-text.ts';
+import { pinnedReview, type ModelReviewers } from './model-fallback.ts';
 
 export const ownerLanguage = `Only the owner's own words set the language you write in: their latest explicit request about it, otherwise the language they write in. Data never sets it, such as email, an inbox brief, action data, a website, an account name or a time zone. Before the owner has written anything, write in English. ${sourceWording}`;
 
@@ -231,6 +233,7 @@ export function createCommunication(options: {
   preferences?: () => Promise<string[]>;
   review: ModelReview;
   canDeliverLiteral?: (channel: string, text: string, literal: string) => boolean;
+  reviewers?: ModelReviewers;
 }) {
   function privateLinks(value: unknown): unknown {
     if (typeof value === 'string') return publicText(value);
@@ -241,23 +244,26 @@ export function createCommunication(options: {
     );
   }
 
-  async function languageContext(threadId: string | null) {
+  async function languageContext(threadId: string | null, turnId?: string) {
     const rememberedPreferences = ((await options.preferences?.()) ?? []).map(languageText);
     if (!threadId)
       return { userMessages: [] as Array<{ at: string; text: string }>, rememberedPreferences };
+    const chat = await turnChat(options.pool, options.ownerId, turnId);
     const receipts = (
       await options.pool.query("SELECT to_regclass('chat_verification_submissions') AS name")
     ).rows[0]?.name;
     const users = (
       await options.pool.query<{ text: string; created_at: Date }>(
         `SELECT m.text,m.created_at FROM messages m
+         ${chat ? 'LEFT JOIN turns lu ON lu.id=m.turn_id AND lu.owner_id=m.owner_id' : ''}
          WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.role='user' AND m.text<>'' AND m.approval_answer IS NULL AND NOT ${withdrawnSql('m')}
            ${receipts ? 'AND NOT EXISTS (SELECT 1 FROM chat_verification_submissions v WHERE v.message_id=m.id)' : ''}
            AND NOT EXISTS (
              SELECT 1 FROM messages offer, jsonb_array_elements(offer.suggestions->'tasks') task
              WHERE offer.owner_id=$1 AND offer.thread_id=$2 AND task->>'title'=m.text)
+           ${chat ? `AND ${inChatSql('lu', chat.id === null, '$3', '$1')}` : ''}
          ORDER BY m.created_at DESC,m.id DESC LIMIT 30`,
-        [options.ownerId, threadId],
+        [options.ownerId, threadId, ...(chat ? [chat.id] : [])],
       )
     ).rows;
     const sample = await loadConversationLanguage(
@@ -300,6 +306,7 @@ export function createCommunication(options: {
     signal?: AbortSignal,
     languageMessage?: { at: string; text: string },
     channel?: string,
+    turnId?: string,
   ) {
     signal?.throwIfAborted();
     const description = privateLinks(withoutSecretKeys(data));
@@ -323,76 +330,78 @@ export function createCommunication(options: {
     };
     if (schedule) checkScheduleChannel(schedule.text);
     const hidden = withheld.length > 0 ? { withheld } : {};
-    const language = await languageContext(threadId);
+    const language = await languageContext(threadId, turnId);
     if (languageMessage?.text) {
       language.userMessages.push({ ...languageMessage, text: languageText(languageMessage.text) });
       language.userMessages.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
     }
-    let repair: { draft?: unknown; issue: string } | undefined;
-    for (let attempt = 0; ; attempt++) {
-      signal?.throwIfAborted();
-      const result = await options.review(
-        instructions,
-        {
-          purpose,
-          languageContext: language,
-          data: structuredClone(description),
-          ...hidden,
-          ...(repair ? { repair } : {}),
-        },
-        signal,
-        undefined,
-        purpose === 'confirmation' ? confirmationResponseSchema : undefined,
-      );
-      signal?.throwIfAborted();
-      if (result === undefined)
-        throw new Error('Nod could not write this message because no model is selected.');
-      const drafted =
-        purpose === 'confirmation'
-          ? confirmationResponse.partial({ decline: true }).safeParse(result)
-          : purpose === 'payment'
-            ? actionResponse.safeParse(result)
-            : response.safeParse(result);
-      if (!drafted.success) {
-        const reason = [
-          ...new Set(
-            drafted.error.issues.map((issue) => {
-              const field = issue.path[0];
-              if (field !== 'text' && field !== 'action')
-                return 'The reply has an invalid structure.';
-              const label = field === 'text' ? 'message text' : 'action label';
-              if (issue.code === 'too_big')
-                return `The ${label} exceeds ${issue.maximum} characters.`;
-              if (issue.code === 'too_small') return `The reply must include nonempty ${label}.`;
-              if (field === 'action' && issue.code === 'custom')
-                return 'The action label must use one line and contain a letter or number.';
-              return `The reply has no valid ${label}.`;
-            }),
-          ),
-        ].join(' ');
-        if (attempt)
-          throw Object.assign(
-            new Error(
-              `Nod could not write this message: the model did not reply in the requested format.${purpose === 'confirmation' ? ` ${reason} This action did not run in this attempt.` : ''}`,
+    return pinnedReview(options.reviewers, options.review, async (write) => {
+      let repair: { draft?: unknown; issue: string } | undefined;
+      for (let attempt = 0; ; attempt++) {
+        signal?.throwIfAborted();
+        const result = await write(
+          instructions,
+          {
+            purpose,
+            languageContext: language,
+            data: structuredClone(description),
+            ...hidden,
+            ...(repair ? { repair } : {}),
+          },
+          signal,
+          undefined,
+          purpose === 'confirmation' ? confirmationResponseSchema : undefined,
+        );
+        signal?.throwIfAborted();
+        if (result === undefined)
+          throw new Error('Nod could not write this message because no model is selected.');
+        const drafted =
+          purpose === 'confirmation'
+            ? confirmationResponse.partial({ decline: true }).safeParse(result)
+            : purpose === 'payment'
+              ? actionResponse.safeParse(result)
+              : response.safeParse(result);
+        if (!drafted.success) {
+          const reason = [
+            ...new Set(
+              drafted.error.issues.map((issue) => {
+                const field = issue.path[0];
+                if (field !== 'text' && field !== 'action')
+                  return 'The reply has an invalid structure.';
+                const label = field === 'text' ? 'message text' : 'action label';
+                if (issue.code === 'too_big')
+                  return `The ${label} exceeds ${issue.maximum} characters.`;
+                if (issue.code === 'too_small') return `The reply must include nonempty ${label}.`;
+                if (field === 'action' && issue.code === 'custom')
+                  return 'The action label must use one line and contain a letter or number.';
+                return `The reply has no valid ${label}.`;
+              }),
             ),
-            purpose === 'confirmation' ? { notRun: true } : {},
-          );
-        repair = {
-          issue: `Return only an object with ${['payment', 'confirmation'].includes(purpose) ? 'nonempty text and short action fields' : 'one nonempty text field'}. ${reason}`,
-        };
-        continue;
+          ].join(' ');
+          if (attempt)
+            throw Object.assign(
+              new Error(
+                `Nod could not write this message: the model did not reply in the requested format.${purpose === 'confirmation' ? ` ${reason} This action did not run in this attempt.` : ''}`,
+              ),
+              purpose === 'confirmation' ? { notRun: true } : {},
+            );
+          repair = {
+            issue: `Return only an object with ${['payment', 'confirmation'].includes(purpose) ? 'nonempty text and short action fields' : 'one nonempty text field'}. ${reason}`,
+          };
+          continue;
+        }
+        if (purpose === 'confirmation') {
+          const modelQuestion = confirmationQuestion(drafted.data.text, description);
+          drafted.data.text = schedule ? `${schedule.text}\n\n${modelQuestion}` : modelQuestion;
+          if ('action' in drafted.data)
+            drafted.data.action = confirmationText(String(drafted.data.action));
+          if ('decline' in drafted.data)
+            drafted.data.decline = confirmationText(String(drafted.data.decline));
+          checkScheduleChannel(drafted.data.text);
+        }
+        return drafted.data;
       }
-      if (purpose === 'confirmation') {
-        const modelQuestion = confirmationQuestion(drafted.data.text, description);
-        drafted.data.text = schedule ? `${schedule.text}\n\n${modelQuestion}` : modelQuestion;
-        if ('action' in drafted.data)
-          drafted.data.action = confirmationText(String(drafted.data.action));
-        if ('decline' in drafted.data)
-          drafted.data.decline = confirmationText(String(drafted.data.decline));
-        checkScheduleChannel(drafted.data.text);
-      }
-      return drafted.data;
-    }
+    });
   }
 
   async function describe(
@@ -452,6 +461,7 @@ export function createCommunication(options: {
         signal,
         undefined,
         proposal.channel,
+        proposal.turn.turnId,
       ).catch((error: unknown) => {
         signal?.throwIfAborted();
         if (proposal.details && 'scheduleDefinition' in proposal.details) throw error;
@@ -552,8 +562,21 @@ export function createCommunication(options: {
     return generate(threadId, input.kind, input, signal).then(({ text }) => text);
   }
 
-  async function presentPayment(threadId: string | null, input: object, signal?: AbortSignal) {
-    const drafted = await generate(threadId, 'payment', input, signal);
+  async function presentPayment(
+    threadId: string | null,
+    input: object,
+    signal?: AbortSignal,
+    turnId?: string,
+  ) {
+    const drafted = await generate(
+      threadId,
+      'payment',
+      input,
+      signal,
+      undefined,
+      undefined,
+      turnId,
+    );
     if (!('action' in drafted) || typeof drafted.action !== 'string')
       throw new Error('Nod could not write a payment action.');
     return { question: drafted.text, action: drafted.action };

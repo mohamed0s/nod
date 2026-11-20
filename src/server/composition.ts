@@ -14,7 +14,6 @@ import {
 } from '../ports/agent.ts';
 import {
   apiKeyConnectionProviders,
-  lightestEffort,
   modelProviderInfo,
   modelProviderNames,
   modelProviders,
@@ -156,6 +155,7 @@ import {
 import { localArtifacts } from './artifacts.ts';
 import { memoryFileName, memoryMarkdown } from '../shared/memory-export.ts';
 import { createChannels } from './channels.ts';
+import { createChatTitles } from './chat-titles.ts';
 import { createChannelSettings, managedChannelEnvironment } from './channel-settings.ts';
 import { createChannelMedia } from './channel-media.ts';
 import { createChannelSessionStore } from './channel-session.ts';
@@ -402,7 +402,7 @@ export function createDefaultAdapters(
     get provider() {
       return models.current.provider;
     },
-    resolve: () => models.resolve(true),
+    resolve: () => models.candidates('memory'),
     configured: () => models.configured,
     traces,
   });
@@ -410,21 +410,7 @@ export function createDefaultAdapters(
     get provider() {
       return models.current.provider;
     },
-    resolve: async () => {
-      const access = await models.resolve();
-      return {
-        ...access,
-        effort: lightestEffort(access.definition.choice.efforts),
-        ...(access.textModel
-          ? {
-              textModel: {
-                ...access.textModel,
-                effort: lightestEffort(access.textModel.definition.choice.efforts),
-              },
-            }
-          : {}),
-      };
-    },
+    resolve: () => models.candidates('lightest'),
     configured: () => models.configured,
     traces,
   });
@@ -508,7 +494,7 @@ export function createDefaultAdapters(
     },
     models,
     agent: createPiAgent({
-      resolve: (choice) => models.resolve(false, choice),
+      resolve: (choice) => models.candidates('work', choice),
       provider,
       model,
       sessionRoot: join(dataRoot, 'sessions'),
@@ -619,14 +605,14 @@ export function createDefaultAdapters(
       get provider() {
         return models.current.provider;
       },
-      resolve: () => models.resolveClassification(true),
+      resolve: () => models.candidates('small'),
       configured: () => models.hasClassificationModel(true),
     }),
     classificationCurator: createPiMemoryCurator({
       get provider() {
         return models.current.provider;
       },
-      resolve: () => models.resolveClassification(),
+      resolve: () => models.candidates('light'),
       configured: () => models.hasClassificationModel(),
     }),
     imageCurator: createPiMemoryCurator({
@@ -634,7 +620,7 @@ export function createDefaultAdapters(
         return models.current.provider;
       },
       configured: () => models.hasImageModel(),
-      resolve: () => models.resolveImage(),
+      resolve: () => models.candidates('image'),
       traces,
     }),
     onboardingCurator: selectedCurator,
@@ -682,6 +668,11 @@ export function createDefaultAdapters(
       return models.current;
     },
   };
+}
+
+function pinnedReviewers(curator: MemoryCurator, review: (model: MemoryCurator) => ModelReview) {
+  return async () =>
+    curator.configured ? (await curator.pinned?.().catch(() => undefined))?.map(review) : undefined;
 }
 
 function alternativeModel(models: ApplicationAdapters['models']) {
@@ -913,22 +904,32 @@ async function initializeApplication(
     : curator;
   void adapters.models?.setSelectionCheck(() =>
     onboardingCurator.curate(
-      { task: 'check', instructions: 'Return only {"ok":true}.', input: {}, automatic: false },
+      {
+        task: 'check',
+        instructions: 'Return only {"ok":true}.',
+        input: {},
+        automatic: false,
+        fallback: false,
+      },
       AbortSignal.timeout(30_000),
     ),
   );
   const decisions = adapters.decisions && ledger.decisions(adapters.decisions);
-  const review: ModelReview = async (instructions, input, signal, question, responseSchema) => {
-    if (question) {
-      const result = await decisions?.check({ instructions, input, question }, signal);
-      if (result !== undefined) return result;
-      const values = question.choices.map(({ value }) => value);
-      instructions += `\nReply with only JSON with one property, ${JSON.stringify(question.name)}. Its value must be one of: ${values.map((value) => JSON.stringify(value)).join(', ')}.`;
-    }
-    return onboardingCurator.configured
-      ? onboardingCurator.curate({ task: 'review', instructions, input, responseSchema }, signal)
-      : undefined;
-  };
+  const reviewWith =
+    (model: MemoryCurator): ModelReview =>
+    async (instructions, input, signal, question, responseSchema) => {
+      if (question) {
+        const result = await decisions?.check({ instructions, input, question }, signal);
+        if (result !== undefined) return result;
+        const values = question.choices.map(({ value }) => value);
+        instructions += `\nReply with only JSON with one property, ${JSON.stringify(question.name)}. Its value must be one of: ${values.map((value) => JSON.stringify(value)).join(', ')}.`;
+      }
+      return model.configured
+        ? model.curate({ task: 'review', instructions, input, responseSchema }, signal)
+        : undefined;
+    };
+  const review = reviewWith(onboardingCurator);
+  const reviewers = pinnedReviewers(onboardingCurator, reviewWith);
   const mailCheck = createMailCheck({ curator, decisions });
   const skillLibrary = createSkillLibrary(
     [
@@ -1070,6 +1071,7 @@ async function initializeApplication(
     review,
     canDeliverLiteral: (channel, text, literal) =>
       channels?.canDeliverLiteral(channel, text, literal) ?? false,
+    reviewers,
     preferences: async () =>
       (await memory.load()).entries
         .filter(
@@ -1168,6 +1170,10 @@ async function initializeApplication(
     watchState: async (connectionIds) => integrations.watchState(connectionIds),
   });
   await personal.initialize({ workers: options.workers });
+  const renameTopic = (id: string, title: string) =>
+    void channels
+      ?.renameTopic(id, title)
+      .catch((error) => logFailure('channel_topic_rename_failed', error));
   const tasks = createTasks({
     pool,
     ownerId,
@@ -1177,8 +1183,16 @@ async function initializeApplication(
     ...(adapters.models
       ? { validateModel: (choice: ModelSelection) => adapters.models!.validateChoice(choice) }
       : {}),
+    renamed: renameTopic,
   });
   await tasks.initialize();
+  const chatTitles = createChatTitles({
+    pool,
+    ownerId,
+    curator,
+    refresh,
+    renamed: renameTopic,
+  });
   const jobs = createJobs({
     pool,
     ownerId,
@@ -2235,10 +2249,9 @@ async function initializeApplication(
         : adapters.classificationCurator
           ? ledger.curator(adapters.classificationCurator)
           : curator;
-  const trust = createTrust({
-    pool,
-    ownerId,
-    review: async (instructions, input, signal, question) => {
+  const trustReview =
+    (model: MemoryCurator): ModelReview =>
+    async (instructions, input, signal, question) => {
       if (question) {
         const values = question.choices.map(({ value }) => JSON.stringify(value)).join(', ');
         instructions +=
@@ -2246,10 +2259,15 @@ async function initializeApplication(
             ? `\nReply with only JSON containing exactly two properties: ${JSON.stringify(question.name)} set to one of ${values}, and "probability" set to a number from 0 to 1 expressing confidence in that label.`
             : `\nReply with only JSON with one property, ${JSON.stringify(question.name)}. Its value must be one of: ${values}.`;
       }
-      return trustCurator.configured
-        ? trustCurator.curate({ task: 'review', instructions, input }, signal)
+      return model.configured
+        ? model.curate({ task: 'review', instructions, input }, signal)
         : undefined;
-    },
+    };
+  const trust = createTrust({
+    pool,
+    ownerId,
+    review: trustReview(trustCurator),
+    reviewers: pinnedReviewers(trustCurator, trustReview),
     ...(adapters.trustModel === 'decision' && adapters.trustDecisions
       ? { decisions: ledger.decisions(adapters.trustDecisions) }
       : {}),
@@ -2392,7 +2410,8 @@ async function initializeApplication(
   payments = await createPayments(pool, {
     ownerId,
     analytics: captureAnalytics,
-    present: (turn, input) => communication.presentPayment(turn.threadId, input),
+    present: (turn, input) =>
+      communication.presentPayment(turn.threadId, input, undefined, turn.turnId),
     uses: vault.uses,
     page: (threadId) => computer.currentPage(threadId),
     destinations: (threadId, fields) => computer.cardDestinations(threadId, fields),
@@ -2497,6 +2516,9 @@ async function initializeApplication(
                       ledger.withTurn(turnId, () => taskClassification.run(turnId, consent)),
                     )
                     ?.catch(() => {});
+                  void admission
+                    .run(() => ledger.withTurn(turnId, () => chatTitles.name(turnId)))
+                    ?.catch((error) => logFailure('chat_title_failed', error));
                 }
               },
               ids,

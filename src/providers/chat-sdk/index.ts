@@ -151,7 +151,7 @@ class Telegram extends TelegramAdapter {
     return this.topicState.enabled;
   }
 
-  async createTopic(threadId: string, title: string, signal?: AbortSignal) {
+  private topicName(title: string) {
     let name = '';
     for (const { segment } of new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(
       title.trim().replace(/\s+/g, ' '),
@@ -160,6 +160,25 @@ class Telegram extends TelegramAdapter {
       name += segment;
     }
     if (!name) throw new Error('A Telegram topic needs a name.');
+    return name;
+  }
+
+  async renameTopic(threadId: string, topicId: string, title: string, signal?: AbortSignal) {
+    await this.telegramFetch(
+      'editForumTopic',
+      {
+        chat_id: this.decodeThreadId(threadId).chatId,
+        message_thread_id: z.coerce.number().int().positive().parse(topicId),
+        name: this.topicName(title),
+      },
+      { signal },
+    ).catch((cause: unknown) => {
+      if (!(cause instanceof Error && cause.message.includes('TOPIC_NOT_MODIFIED'))) throw cause;
+    });
+  }
+
+  async createTopic(threadId: string, title: string, signal?: AbortSignal) {
+    const name = this.topicName(title);
     const topic = await this.telegramFetch<{ message_thread_id: unknown }>(
       'createForumTopic',
       { chat_id: this.decodeThreadId(threadId).chatId, name },
@@ -950,6 +969,15 @@ export function createChatSdkTransport(
       )
         throw new Error('Channel topics are unavailable.');
       return telegram.createTopic(input.threadId, input.name, input.signal);
+    },
+    async renameTopic(input) {
+      if (
+        !telegram ||
+        input.channelId !== 'telegram' ||
+        input.accountId !== env.TELEGRAM_BOT_TOKEN!.split(':')[0]
+      )
+        throw new Error('Channel topics are unavailable.');
+      await telegram.renameTopic(input.threadId, input.topicId, input.name, input.signal);
     },
     async post(input) {
       if (
