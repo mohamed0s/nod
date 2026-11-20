@@ -34,7 +34,7 @@ export function ChatList({
   const [renaming, setRenaming] = useState<string>();
   const [draft, setDraft] = useState('');
   const [error, setError] = useState('');
-  const saving = useRef(false);
+  const saving = useRef(new Set<string>());
   const editing = useRef<string | undefined>(undefined);
   const renameNext = useRef<Task | undefined>(undefined);
   const items = useRef(new Map<string, HTMLButtonElement>());
@@ -52,15 +52,16 @@ export function ChatList({
     setRenaming(task.id);
   }
   function stopRename(task: Task, refocus: boolean) {
+    if (editing.current !== task.id) return;
     editing.current = undefined;
     if (refocus) renamed.current = task.id;
     setRenaming(undefined);
   }
   async function rename(task: Task, refocus: boolean) {
-    if (saving.current || editing.current !== task.id) return;
+    if (saving.current.has(task.id) || editing.current !== task.id) return;
     const title = draft.trim();
     if (!title || title === task.title) return stopRename(task, refocus);
-    saving.current = true;
+    saving.current.add(task.id);
     setError('');
     try {
       await api(`/api/tasks/${task.id}`, {
@@ -73,7 +74,7 @@ export function ChatList({
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {
-      saving.current = false;
+      saving.current.delete(task.id);
     }
   }
   async function close(task: Task) {
