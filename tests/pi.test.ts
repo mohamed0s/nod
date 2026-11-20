@@ -9304,6 +9304,49 @@ test('a paused work model moves a turn and a pinned check to the backup only whe
   assert.deepEqual(requests, []);
 });
 
+test('errors the fallback does not handle keep Pi backoff instead of a fast retry burst', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-fallback-backoff-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { requests, access } = await fallbackServer(t, () => ({
+    status: 400,
+    text: 'Provider returned error',
+  }));
+  const delays: number[] = [];
+  const agent = createPiAgent({
+    provider: 'compatible',
+    resolve: async () => [access('fixture-primary'), access('fixture-backup')],
+    sessionRoot: directory,
+    createSession: async (options) => {
+      const result = await createAgentSession(options);
+      result.session.subscribe((event) => {
+        if (event.type === 'auto_retry_start') delays.push(event.delayMs);
+      });
+      return result;
+    },
+  });
+  t.after(() => agent.dispose());
+  const session = await agent.open({
+    ...fakeExecution(randomUUID()),
+    ...sandbox,
+    systemPrompt: 'Synthetic fixture',
+    tools: [],
+    shouldStop: () => false,
+    onEvent: () => {},
+  });
+  const pending = session.prompt('Synthetic question.', []);
+  while (!delays.length) await setTimeout(10);
+  await setTimeout(200);
+  assert.deepEqual(delays, [4000]);
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-primary'],
+  );
+  await session.abort();
+  await pending;
+  await session.dispose();
+  assert.equal(requests.length, 1);
+});
+
 test('a busy work model hands the same request to a backup and records each attempt', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'nod-fallback-turn-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

@@ -78,7 +78,7 @@ export function createTurnFallback(options: {
   const tried: Array<{ label: string; reason: string }> = [];
   let at = Math.min(options.start, candidates.length - 1);
   let failures = 0;
-  let quiet = 0;
+  const handled = new WeakSet<AssistantMessage>();
   let wait = 0;
   let exhausted = false;
   let failed = at;
@@ -100,7 +100,7 @@ export function createTurnFallback(options: {
   function settle(index: number, message: AssistantMessage) {
     if (message.stopReason === 'aborted') return;
     if (message.stopReason !== 'error') {
-      failures = quiet = wait = 0;
+      failures = wait = 0;
       tried.length = 0;
       if (index > 0 && !announced) {
         announced = true;
@@ -116,12 +116,7 @@ export function createTurnFallback(options: {
     else tried.push(entry);
     failed = index;
     const kind = unavailable(message);
-    if (!kind) {
-      quiet++;
-      wait = Math.min(4000 * 2 ** (quiet - 1), 60_000);
-      return;
-    }
-    if (index !== at) return;
+    if (!kind || index !== at) return;
     reason ??= kind;
     failures++;
     if (kind === 'busy' && failures < 2) {
@@ -194,6 +189,7 @@ export function createTurnFallback(options: {
       let model = target;
       let settled = false;
       const finish = (message: AssistantMessage) => {
+        handled.add(message);
         if (settled) return;
         settled = true;
         settle(index, message);
@@ -231,7 +227,7 @@ export function createTurnFallback(options: {
       return out;
     },
     retries(message: AssistantMessage) {
-      return unavailable(message) ? !exhausted : undefined;
+      return handled.has(message) && unavailable(message) ? !exhausted : undefined;
     },
     describe(message: AssistantMessage) {
       if (message.stopReason !== 'error' || new Set(tried.map(({ label }) => label)).size < 2)

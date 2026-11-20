@@ -444,6 +444,7 @@ function completeAssistantMessages(pi: ExtensionAPI) {
 }
 
 const tokenRateLimit = /\b(?:tokens? per (?:minute|day)|[tr]p[md])\b/i;
+const piRetry = { baseDelayMs: 4000 };
 
 function planBilled(event: AgentEvent): AgentEvent {
   return event.type === 'model_usage'
@@ -808,9 +809,7 @@ export function createPiAgent(options: {
         transport: 'sse',
         steeringMode: 'all',
         cacheWarming: input.keepWarm ? 'idle' : 'streaming',
-        retry: fallback
-          ? { baseDelayMs: 1, maxAgentDelayMs: 1, maxRetries: 2 * fallback.size + 1 }
-          : { baseDelayMs: 4000 },
+        retry: fallback ? { ...piRetry, maxRetries: 2 * fallback.size + 1 } : piRetry,
         ...(access?.provider === 'compatible' ? { httpIdleTimeoutMs: localModelSilenceMs } : {}),
       });
       const extensionLoader = new DefaultResourceLoader({
@@ -903,7 +902,9 @@ export function createPiAgent(options: {
                   clampThinkingLevel(selected, 'off'),
                   session.agent.streamFunction,
                   undefined,
-                  settings.getRetrySettings(),
+                  fallback
+                    ? { enabled: true, maxRetries: 3, maxAgentDelayMs: 60_000, ...piRetry }
+                    : settings.getRetrySettings(),
                 );
                 return { compaction: result };
               } catch (error) {
@@ -1150,8 +1151,16 @@ export function createPiAgent(options: {
       };
       const retryable = retrying._isRetryableError?.bind(session);
       if (fallback && retryable)
-        retrying._isRetryableError = (message) =>
-          fallback.retries(message) ?? (retryable(message) && session.retryAttempt < 3);
+        retrying._isRetryableError = (message) => {
+          const planned = fallback.retries(message);
+          settings.applyOverrides({
+            retry:
+              planned === undefined
+                ? { maxAgentDelayMs: 60_000, ...piRetry }
+                : { baseDelayMs: 1, maxAgentDelayMs: 1 },
+          });
+          return planned ?? (retryable(message) && session.retryAttempt < 3);
+        };
 
       const prepare = session.agent.prepareRequest;
       session.agent.prepareRequest = async (request, signal) => {
