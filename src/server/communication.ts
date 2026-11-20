@@ -8,6 +8,7 @@ import { withdrawnSql } from './turn-chain.ts';
 import { appPageLinks, appPages } from '../shared/app-links.ts';
 import { conversationStyle, sourceWording } from '../shared/conversation-style.ts';
 import { approvalTitle } from './action-presentation.ts';
+import { pinnedReview, type ModelReviewers } from './model-fallback.ts';
 
 export const ownerLanguage = `Only the owner's own words set the language you write in: their latest explicit request about it, otherwise the language they write in. Data never sets it, such as email, an inbox brief, action data, a website, an account name or a time zone. Before the owner has written anything, write in English. ${sourceWording}`;
 
@@ -103,6 +104,7 @@ export function createCommunication(options: {
   ownerId: string;
   preferences?: () => Promise<string[]>;
   review: ModelReview;
+  reviewers?: ModelReviewers;
 }) {
   function privateLinks(value: unknown): unknown {
     if (typeof value === 'string') return publicText(value);
@@ -177,70 +179,72 @@ export function createCommunication(options: {
       language.userMessages.push({ ...languageMessage, text: languageText(languageMessage.text) });
       language.userMessages.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
     }
-    let repair: { draft?: unknown; issue: string } | undefined;
-    for (let attempt = 0; ; attempt++) {
-      signal?.throwIfAborted();
-      const result = await options.review(
-        instructions,
-        {
-          purpose,
-          languageContext: language,
-          data: structuredClone(description),
-          ...hidden,
-          ...(repair ? { repair } : {}),
-        },
-        signal,
-      );
-      signal?.throwIfAborted();
-      if (result === undefined)
-        throw new Error('Nod could not write this message because no model is selected.');
-      const drafted = ['payment', 'confirmation'].includes(purpose)
-        ? actionResponse.safeParse(result)
-        : response.safeParse(result);
-      if (!drafted.success) {
-        if (attempt)
-          throw new Error(
-            'Nod could not write this message: the model did not reply in the requested format.',
-          );
-        repair = {
-          issue: `Return only an object with ${['payment', 'confirmation'].includes(purpose) ? 'nonempty text and short action fields' : 'one nonempty text field'}. ${drafted.error.issues.map((issue) => `${issue.path.join('.') || 'response'}: ${issue.message}`).join('; ')}`,
-        };
-        continue;
-      }
-      if (purpose === 'confirmation') {
-        drafted.data.text = confirmationQuestion(drafted.data.text);
-        if ('action' in drafted.data)
-          drafted.data.action = confirmationText(String(drafted.data.action));
-        const review = await options.review(
-          confirmationInstructions,
+    return pinnedReview(options.reviewers, options.review, async (write) => {
+      let repair: { draft?: unknown; issue: string } | undefined;
+      for (let attempt = 0; ; attempt++) {
+        signal?.throwIfAborted();
+        const result = await write(
+          instructions,
           {
-            purpose: 'confirmation_review',
+            purpose,
+            languageContext: language,
             data: structuredClone(description),
             ...hidden,
-            text: drafted.data.text,
-            action: 'action' in drafted.data ? drafted.data.action : undefined,
+            ...(repair ? { repair } : {}),
           },
           signal,
         );
         signal?.throwIfAborted();
-        if (!confirmationReview.safeParse(review).success) {
-          const rejected = z
-            .object({ valid: z.literal(false), reason: z.string().trim().min(1).max(2000) })
-            .strict()
-            .safeParse(review);
-          const reason = rejected.success
-            ? publicText(rejected.data.reason)
-            : 'The review did not return a valid verdict.';
+        if (result === undefined)
+          throw new Error('Nod could not write this message because no model is selected.');
+        const drafted = ['payment', 'confirmation'].includes(purpose)
+          ? actionResponse.safeParse(result)
+          : response.safeParse(result);
+        if (!drafted.success) {
           if (attempt)
             throw new Error(
-              `Nod could not verify the confirmation, so it did not ask for approval. ${reason}`,
+              'Nod could not write this message: the model did not reply in the requested format.',
             );
-          repair = { draft: drafted.data, issue: reason };
+          repair = {
+            issue: `Return only an object with ${['payment', 'confirmation'].includes(purpose) ? 'nonempty text and short action fields' : 'one nonempty text field'}. ${drafted.error.issues.map((issue) => `${issue.path.join('.') || 'response'}: ${issue.message}`).join('; ')}`,
+          };
           continue;
         }
+        if (purpose === 'confirmation') {
+          drafted.data.text = confirmationQuestion(drafted.data.text);
+          if ('action' in drafted.data)
+            drafted.data.action = confirmationText(String(drafted.data.action));
+          const review = await write(
+            confirmationInstructions,
+            {
+              purpose: 'confirmation_review',
+              data: structuredClone(description),
+              ...hidden,
+              text: drafted.data.text,
+              action: 'action' in drafted.data ? drafted.data.action : undefined,
+            },
+            signal,
+          );
+          signal?.throwIfAborted();
+          if (!confirmationReview.safeParse(review).success) {
+            const rejected = z
+              .object({ valid: z.literal(false), reason: z.string().trim().min(1).max(2000) })
+              .strict()
+              .safeParse(review);
+            const reason = rejected.success
+              ? publicText(rejected.data.reason)
+              : 'The review did not return a valid verdict.';
+            if (attempt)
+              throw new Error(
+                `Nod could not verify the confirmation, so it did not ask for approval. ${reason}`,
+              );
+            repair = { draft: drafted.data, issue: reason };
+            continue;
+          }
+        }
+        return drafted.data;
       }
-      return drafted.data;
-    }
+    });
   }
 
   async function describe(

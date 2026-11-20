@@ -1,3 +1,4 @@
+import { ModelRequestError } from './agent.ts';
 import type {
   ModelChoice,
   ModelProvider,
@@ -34,6 +35,16 @@ export class ModelAuthError extends Error {
   }
 }
 
+export class ModelUnavailableError extends ModelRequestError {
+  constructor(
+    message: string,
+    readonly attempts: string[],
+    readonly providerStatus?: number,
+  ) {
+    super(message);
+  }
+}
+
 export class ModelWorkspaceSelectionError extends ModelAuthError {
   constructor(readonly workspaces: ModelWorkspace[]) {
     super('Choose an Anthropic workspace to connect.');
@@ -46,6 +57,7 @@ export interface ModelDefinition {
 }
 
 export interface ModelAccess {
+  connectionId?: string;
   provider: ModelProvider;
   method: ModelMethod;
   definition: ModelDefinition;

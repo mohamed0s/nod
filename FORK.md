@@ -20,6 +20,12 @@ upstream. It runs Nod from source on Windows and adds a few changes. The
   and scores jobs with [career-ops](https://github.com/career-ops-hq/career-ops),
   installed in the workspace image. See the docs page
   [Job search](docs/src/content/docs/use/job-search.md).
+- **Model fallback.** **Settings > Models** keeps up to three backup models.
+  When the model in use is busy or unavailable (a rate limit, an overload, a
+  timeout, a network or quota error), Nod retries it once, then continues the
+  same request on each backup in order. Action checks start again on the backup
+  so they never mix models, and the reply says which model was used. See
+  [Backup models](docs/src/content/docs/connect/models.mdx#backup-models).
 - **Private by default.** The installer turns off usage data
   (`NOD_ANALYTICS_ENABLED=false`) and conversation traces (`NOD_TRACES_URL=`).
 - **One-command install on Windows,** with Nod starting at every sign-in.
