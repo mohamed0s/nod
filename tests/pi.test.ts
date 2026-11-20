@@ -9429,6 +9429,80 @@ test('helpers in a turn start on the backup the turn moved to, even when two bac
   );
 });
 
+test('a backup request uses its own connection timeout, not the work model one', async () => {
+  const { createTurnFallback } = await import('../src/providers/pi/fallback.ts');
+  const { localModelSilenceMs } = await import('../src/providers/pi/models.ts');
+  const reply = (model: { provider: string; id: string; api: string }, error?: string) => {
+    const message = {
+      ...fauxAssistantMessage(error ? '' : 'Synthetic answer.'),
+      provider: model.provider,
+      model: model.id,
+      api: model.api,
+      ...(error ? { stopReason: 'error' as const, errorMessage: error } : {}),
+    };
+    const stream = createAssistantMessageEventStream();
+    stream.push(
+      error
+        ? { type: 'error', reason: 'error', error: message as AssistantMessage }
+        : { type: 'done', reason: 'stop', message: message as AssistantMessage },
+    );
+    stream.end(message as AssistantMessage);
+    return stream;
+  };
+  const model = (provider: string, id: string) =>
+    ({ provider, id, api: 'openai-completions', input: ['text'], contextWindow: 131_072 }) as never;
+  const timeouts: Array<[string, number | undefined]> = [];
+  const connection = (provider: string, id: string, failing: boolean) => ({
+    model: model(provider, id),
+    retryAfter: () => 1,
+    runtime: {
+      streamSimple: (target: never, _context: never, options?: { timeoutMs?: number }) => {
+        timeouts.push([id, options?.timeoutMs]);
+        return reply(target, failing ? '503 Service Unavailable (HTTP 503)' : undefined);
+      },
+    },
+  });
+  const choice = (provider: 'compatible' | 'openai', id: string): ModelAccess => ({
+    provider,
+    method: 'api_key',
+    effort: 'off',
+    read: async () => undefined,
+    definition: {
+      choice: { id, name: id, efforts: ['off'], images: false, contextWindow: 131_072 },
+      spec: {},
+    },
+  });
+  for (const [primary, backup, expected] of [
+    ['compatible', 'openai', 300_000],
+    ['openai', 'compatible', localModelSilenceMs],
+  ] as const) {
+    timeouts.length = 0;
+    const work = connection(primary, 'fixture-work', true);
+    const fallback = createTurnFallback({
+      primary: {
+        access: choice(primary, 'fixture-work'),
+        connection: work as never,
+        stream: work.runtime.streamSimple as never,
+      },
+      backups: [choice(backup, 'fixture-backup')],
+      start: 0,
+      automatic: false,
+      connect: async () => connection(backup, 'fixture-backup', false) as never,
+      floor: () => 0,
+      switched: () => {},
+      served: () => {},
+    });
+    const inherited = primary === 'compatible' ? localModelSilenceMs : 300_000;
+    for (let attempt = 0; attempt < 3; attempt++)
+      await fallback.stream(work.model, { messages: [] }, { timeoutMs: inherited }).result();
+    assert.deepEqual(timeouts, [
+      ['fixture-work', inherited],
+      ['fixture-work', inherited],
+      ['fixture-backup', expected],
+    ]);
+  }
+});
+
 test('a busy work model hands the same request to a backup and records each attempt', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'nod-fallback-turn-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
