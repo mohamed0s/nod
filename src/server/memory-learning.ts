@@ -8,6 +8,7 @@ import { applyOps } from './memory-ops.ts';
 import { localTimestamp } from '../shared/date-locale.ts';
 import { indexLayout, unsafe } from './memory-tree.ts';
 import { withdrawnSql } from './turn-chain.ts';
+import { chatsReady, messageChatSql } from './chat-scope.ts';
 import type { MemoryService } from './memory.ts';
 import type { WorkConsumers } from './work-admission.ts';
 import type { CaptureAnalytics } from './analytics.ts';
@@ -145,10 +146,11 @@ export function createMemoryLearning(options: {
     const named = [...new Set(input.messages ?? [])].filter((id) => id !== sourceMessageId);
     const ids = named.filter((id) => z.uuid().safeParse(id).success);
     const required = [...ids, sourceMessageId];
+    const chats = await chatsReady(options.pool);
     const { rows } = await options.pool.query(
-      `WITH source AS (SELECT thread_id,created_at FROM messages WHERE id=$3 AND owner_id=$1 AND role='user'),
+      `WITH source AS (SELECT s.thread_id,s.created_at${chats ? `,${messageChatSql('s')} AS chat` : ''} FROM messages s WHERE s.id=$3 AND s.owner_id=$1 AND s.role='user'),
        recent AS (SELECT r.id FROM messages r, source WHERE r.owner_id=$1 AND r.role='user' AND NOT ${withdrawnSql('r')}
-         AND r.thread_id IS NOT DISTINCT FROM source.thread_id AND r.created_at<=source.created_at
+         AND r.thread_id IS NOT DISTINCT FROM source.thread_id AND r.created_at<=source.created_at${chats ? ` AND ${messageChatSql('r')} IS NOT DISTINCT FROM source.chat` : ''}
          ORDER BY r.created_at DESC,r.id DESC LIMIT ${recentMessages})
        ${ownerText} AND (m.id=ANY($2::uuid[]) OR m.id IN (SELECT id FROM recent))
        ORDER BY m.created_at,m.id`,

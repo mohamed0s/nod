@@ -2127,7 +2127,8 @@ async function initializeApplication(
   payments = await createPayments(pool, {
     ownerId,
     analytics: captureAnalytics,
-    present: (turn, input) => communication.presentPayment(turn.threadId, input),
+    present: (turn, input) =>
+      communication.presentPayment(turn.threadId, input, undefined, turn.turnId),
     uses: vault.uses,
     page: (threadId) => computer.currentPage(threadId),
     destinations: (threadId, fields) => computer.cardDestinations(threadId, fields),

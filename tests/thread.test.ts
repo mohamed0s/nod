@@ -2671,6 +2671,8 @@ test(
       await t.test(
         'each chat reads only its own conversation and names another chat when one is searched',
         async () => {
+          const { captureOwnerInstructions } = await import('../src/server/owner-instructions.ts');
+          const { createCommunication } = await import('../src/server/communication.ts');
           const current = (await thread.activeThread(db.pool)).id;
           const say = async (
             text: string,
@@ -2755,6 +2757,71 @@ test(
           assert.ok(!(await recalled(null)).some((text) => text.includes('bicycles')));
           assert.ok((await recalled(null)).includes('Synthetic main chat about lanterns'));
           assert.ok(!(await recalled(bikes)).some((text) => text.includes('lanterns')));
+          const inputs: Array<{ earlier: Array<{ text: string }> }> = [];
+          const learning = createMemoryLearning({
+            pool: db.pool,
+            ownerId,
+            memory: createMemoryService({ pool: db.pool, ownerId, store: memoryObjectStore() }),
+            curator: {
+              id: 'fixture',
+              configured: true,
+              async curate({ input }) {
+                inputs.push(input as (typeof inputs)[number]);
+                return { ops: [] };
+              },
+            },
+          });
+          await learning.remember({}, firstAgain.messageId);
+          assert.deepEqual(
+            inputs.at(-1)!.earlier.map(({ text }) => text),
+            ['Synthetic first chat about bicycles'],
+          );
+          await learning.remember({}, mainAgain.messageId);
+          assert.ok(inputs.at(-1)!.earlier.some(({ text }) => text.includes('lanterns')));
+          assert.ok(!inputs.at(-1)!.earlier.some(({ text }) => /bicycles|canoes/.test(text)));
+          const since = new Date(Date.now() - 60 * 60 * 1000);
+          const checked = async (turnId: string, messageId: string, task: string | null) =>
+            (
+              await captureOwnerInstructions(
+                db.pool,
+                ownerId,
+                current,
+                [messageId],
+                task,
+                since,
+                turnId,
+              )
+            )?.evidence.messages.map(({ text }) => text) ?? [];
+          assert.deepEqual(await checked(firstAgain.turnId, firstAgain.messageId, bikes), [
+            'Synthetic first chat about bicycles',
+            'Synthetic first chat follow-up',
+          ]);
+          const mainChecked = await checked(mainAgain.turnId, mainAgain.messageId, null);
+          assert.ok(mainChecked.includes('Synthetic main chat follow-up'));
+          assert.ok(!mainChecked.some((text) => /bicycles|canoes/.test(text)));
+          const languages: string[][] = [];
+          const communication = createCommunication({
+            pool: db.pool,
+            ownerId,
+            review: async (_instructions, input) => {
+              const request = input as {
+                purpose: string;
+                languageContext?: { userMessages: Array<{ text: string }> };
+              };
+              if (request.purpose === 'confirmation_review') return { valid: true };
+              languages.push(request.languageContext!.userMessages.map(({ text }) => text));
+              return { text: 'Search Gmail for synthetic receipts?', action: 'Search Gmail' };
+            },
+          });
+          await communication.describe({
+            turn: { threadId: current, turnId: firstAgain.turnId },
+            action: 'GMAIL_FETCH_EMAILS',
+            args: { query: 'Synthetic receipts' },
+          });
+          assert.deepEqual(languages.at(-1), [
+            'Synthetic first chat about bicycles',
+            'Synthetic first chat follow-up',
+          ]);
         },
       );
 

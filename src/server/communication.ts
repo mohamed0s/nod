@@ -5,6 +5,7 @@ import type { ApprovalDescription, ApprovalPresentation } from './approvals.ts';
 import type { ChannelPresentation } from './channels.ts';
 import { redactSecretText, withoutSecretKeys } from './redaction.ts';
 import { withdrawnSql } from './turn-chain.ts';
+import { messageChatSql, turnChat } from './chat-scope.ts';
 import { appPageLinks, appPages } from '../shared/app-links.ts';
 import { conversationStyle, sourceWording } from '../shared/conversation-style.ts';
 import { approvalTitle } from './action-presentation.ts';
@@ -113,9 +114,10 @@ export function createCommunication(options: {
     );
   }
 
-  async function languageContext(threadId: string | null) {
+  async function languageContext(threadId: string | null, turnId?: string) {
     const rememberedPreferences = ((await options.preferences?.()) ?? []).map(languageText);
     if (!threadId) return { userMessages: [], rememberedPreferences };
+    const chat = await turnChat(options.pool, options.ownerId, turnId);
     const receipts = (
       await options.pool.query("SELECT to_regclass('chat_verification_submissions') AS name")
     ).rows[0]?.name;
@@ -127,8 +129,9 @@ export function createCommunication(options: {
            AND NOT EXISTS (
              SELECT 1 FROM messages offer, jsonb_array_elements(offer.suggestions->'tasks') task
              WHERE offer.owner_id=$1 AND offer.thread_id=$2 AND task->>'title'=m.text)
+           ${chat ? `AND ${messageChatSql('m')} IS NOT DISTINCT FROM $3::uuid` : ''}
          ORDER BY m.created_at DESC,m.id DESC LIMIT 30`,
-        [options.ownerId, threadId],
+        [options.ownerId, threadId, ...(chat ? [chat.id] : [])],
       )
     ).rows;
     return {
@@ -163,6 +166,7 @@ export function createCommunication(options: {
     data: object,
     signal?: AbortSignal,
     languageMessage?: { at: string; text: string },
+    turnId?: string,
   ) {
     signal?.throwIfAborted();
     const description = privateLinks(withoutSecretKeys(data));
@@ -172,7 +176,7 @@ export function createCommunication(options: {
         'The complete schedule instruction has hidden values, so Nod cannot ask for approval of its future work.',
       );
     const hidden = withheld.length > 0 ? { withheld } : {};
-    const language = await languageContext(threadId);
+    const language = await languageContext(threadId, turnId);
     if (languageMessage?.text) {
       language.userMessages.push({ ...languageMessage, text: languageText(languageMessage.text) });
       language.userMessages.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
@@ -281,6 +285,8 @@ export function createCommunication(options: {
           ...(proposal.work ? { work: proposal.work } : {}),
         },
         signal,
+        undefined,
+        proposal.turn.turnId,
       );
       if (!('action' in drafted) || typeof drafted.action !== 'string')
         throw new Error('The confirmation model did not return an action label.');
@@ -349,8 +355,13 @@ export function createCommunication(options: {
     return generate(threadId, input.kind, input, signal).then(({ text }) => text);
   }
 
-  async function presentPayment(threadId: string | null, input: object, signal?: AbortSignal) {
-    const drafted = await generate(threadId, 'payment', input, signal);
+  async function presentPayment(
+    threadId: string | null,
+    input: object,
+    signal?: AbortSignal,
+    turnId?: string,
+  ) {
+    const drafted = await generate(threadId, 'payment', input, signal, undefined, turnId);
     if (!('action' in drafted) || typeof drafted.action !== 'string')
       throw new Error('Nod could not write a payment action.');
     return { question: drafted.text, action: drafted.action };
