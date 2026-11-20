@@ -48,6 +48,19 @@ const idleWords = [
   'Fitting the puzzle together…',
 ];
 
+function grouped(recent: NonNullable<Activity['recent']>) {
+  const rows: Array<{ id: string; summary: string; sites: string[] }> = [];
+  for (const entry of recent) {
+    const last = rows.at(-1);
+    if (last?.summary === entry.summary) {
+      if (entry.site && !last.sites.includes(entry.site)) last.sites.push(entry.site);
+      continue;
+    }
+    rows.push({ id: entry.id, summary: entry.summary, sites: entry.site ? [entry.site] : [] });
+  }
+  return rows;
+}
+
 function useQuietMinutes(since: string, enabled: boolean) {
   const [minutes, setMinutes] = useState(() => quietMinutes(since));
   useEffect(() => {
@@ -133,14 +146,16 @@ export function LiveLine({
         <ChevronDown size={14} aria-hidden="true" />
       </summary>
       <ol aria-label="Recent completed activity">
-        {item.recent.map((entry) => (
+        {grouped(item.recent).map((entry) => (
           <li key={entry.id}>
             <Check size={12} aria-hidden="true" />
             <span>
               <Markdown allowedElements={[]} unwrapDisallowed>
                 {entry.summary}
               </Markdown>
-              {entry.site && <span className="live-line-site"> · {entry.site}</span>}
+              {entry.sites.length > 0 && (
+                <span className="live-line-site"> · {entry.sites.join(', ')}</span>
+              )}
             </span>
           </li>
         ))}
