@@ -71,7 +71,7 @@ import type { ModelSelection, WorkKind } from '../shared/models.ts';
 import { lockKey } from './locks.ts';
 import { redactSecretText } from './redaction.ts';
 import { resemblesTaskAcknowledgement } from '../shared/task-ack.ts';
-import { messageChatSql, turnChat } from './chat-scope.ts';
+import { inChatSql, turnChat } from './chat-scope.ts';
 
 const queue = 'thread-drain';
 const rasterTypes = new Set([
@@ -1617,7 +1617,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
     ? ''
     : chat.id
       ? 'AND u.session_id=$6'
-      : `AND ${messageChatSql('m')} IS NULL`;
+      : `AND ${inChatSql('u', true, 'NULL', '$1')}`;
   const [
     source,
     history,

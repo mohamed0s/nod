@@ -5,7 +5,7 @@ import type { ApprovalDescription, ApprovalPresentation } from './approvals.ts';
 import type { ChannelPresentation } from './channels.ts';
 import { redactSecretText, withoutSecretKeys } from './redaction.ts';
 import { withdrawnSql } from './turn-chain.ts';
-import { messageChatSql, turnChat } from './chat-scope.ts';
+import { inChatSql, turnChat } from './chat-scope.ts';
 import { appPageLinks, appPages } from '../shared/app-links.ts';
 import { conversationStyle, sourceWording } from '../shared/conversation-style.ts';
 import { approvalTitle } from './action-presentation.ts';
@@ -124,12 +124,13 @@ export function createCommunication(options: {
     const users = (
       await options.pool.query<{ text: string; created_at: Date }>(
         `SELECT m.text,m.created_at FROM messages m
+         ${chat ? 'LEFT JOIN turns lu ON lu.id=m.turn_id AND lu.owner_id=m.owner_id' : ''}
          WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.role='user' AND m.text<>'' AND m.approval_answer IS NULL AND NOT ${withdrawnSql('m')}
            ${receipts ? 'AND NOT EXISTS (SELECT 1 FROM chat_verification_submissions v WHERE v.message_id=m.id)' : ''}
            AND NOT EXISTS (
              SELECT 1 FROM messages offer, jsonb_array_elements(offer.suggestions->'tasks') task
              WHERE offer.owner_id=$1 AND offer.thread_id=$2 AND task->>'title'=m.text)
-           ${chat ? `AND ${messageChatSql('m')} IS NOT DISTINCT FROM $3::uuid` : ''}
+           ${chat ? `AND ${inChatSql('lu', chat.id === null, '$3', '$1')}` : ''}
          ORDER BY m.created_at DESC,m.id DESC LIMIT 30`,
         [options.ownerId, threadId, ...(chat ? [chat.id] : [])],
       )

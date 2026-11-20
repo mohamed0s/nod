@@ -1,7 +1,14 @@
 import { z } from 'zod';
 import type { Pool } from 'pg';
 import { withdrawnSql } from './turn-chain.ts';
-import { chatLabel, chatNameSql, messageChatSql, turnChatSql, type Chat } from './chat-scope.ts';
+import {
+  chatLabel,
+  chatNameSql,
+  inChatSql,
+  messageChatSql,
+  turnChatSql,
+  type Chat,
+} from './chat-scope.ts';
 export function activeThreadSql(alias = 'm') {
   return `${alias}.thread_id=(SELECT th.id FROM threads th WHERE th.owner_id=${alias}.owner_id AND th.archived_at IS NULL)`;
 }
@@ -92,16 +99,12 @@ export function createHistorySearch({
         ).rows[0]
       : undefined;
     if (before && !boundary) throw new Error('This history result is unavailable.');
-    const inChat = (alias: string) =>
-      !current
-        ? ''
-        : alias === 'u'
-          ? ` AND ${turnChatSql('u')} IS NOT DISTINCT FROM $7::uuid`
-          : ` AND ${messageChatSql(alias)} IS NOT DISTINCT FROM $8::uuid`;
+    const inChat = (turn: string, parameter: string) =>
+      current ? ` AND ${inChatSql(turn, chat.id === null, parameter, '$1')}` : '';
     const terms = `WITH terms AS (SELECT replace(plainto_tsquery('english',coalesce($2,''))::text,'&','|')::tsquery AS q,
       coalesce((SELECT time_zone FROM preferences WHERE owner_id=$1),'UTC') AS zone)`;
     const scope = (alias: string) =>
-      `${alias}.owner_id=$1 AND ${activeThreadSql(alias)}${inChat(alias)}
+      `${alias}.owner_id=$1 AND ${activeThreadSql(alias)}
        AND ($3::timestamptz IS NULL OR (${alias}.created_at,${alias}.id)<($3,$4::uuid))
        AND ($5::date IS NULL OR (${alias}.created_at AT TIME ZONE terms.zone)::date>=$5)
        AND ($6::date IS NULL OR (${alias}.created_at AT TIME ZONE terms.zone)::date<=$6)`;
@@ -119,14 +122,19 @@ export function createHistorySearch({
     ];
     const turns = await pool.query(
       `${terms} SELECT u.id,left(u.prompt,200) AS title,u.status,u.source,u.created_at,split_part(u.channel,':',1) AS channel${other(turnChatSql('u'), '$7')}
-       FROM turns u CROSS JOIN terms WHERE ${where('u', 'u.prompt')} ORDER BY ${ordered('u', 'u.prompt')} LIMIT 15`,
+       FROM turns u CROSS JOIN terms WHERE ${where('u', 'u.prompt')}${inChat('u', '$7')} ORDER BY ${ordered('u', 'u.prompt')} LIMIT 15`,
       scoped ? [...values, chat.id] : values,
     );
+    const matches = `SELECT corpus.* FROM corpus CROSS JOIN terms WHERE ($2::text IS NULL OR corpus.v @@ terms.q)${kept('corpus')}`;
+    const docs = current
+      ? `matched AS MATERIALIZED (${matches}), docs AS (SELECT matched.* FROM matched
+         LEFT JOIN turns u ON u.id=matched.turn_id AND u.owner_id=matched.owner_id WHERE TRUE${inChat('u', '$8')})`
+      : `docs AS (${matches})`;
     const page = await pool.query<HistoryMessage & { place: string; total: number }>(
       `${terms}, corpus AS (
          SELECT m.id,m.owner_id,m.turn_id,m.role,m.text,m.created_at,to_tsvector('english',m.text) AS v
          FROM messages m CROSS JOIN terms WHERE ${scope('m')} AND m.hidden_at IS NULL),
-       docs AS (SELECT corpus.* FROM corpus CROSS JOIN terms WHERE ($2::text IS NULL OR corpus.v @@ terms.q)${kept('corpus')}),
+       ${docs},
        weights AS (
          SELECT w,ln(1+((SELECT count(*) FROM corpus)-count(*)+0.5)/(count(*)+0.5)) AS idf
          FROM (SELECT DISTINCT lexeme AS w FROM unnest(tsvector_to_array(to_tsvector('english',coalesce($2,'')))) lexeme) words
@@ -145,7 +153,7 @@ export function createHistorySearch({
     );
     if (cursor && !page.rows.length) {
       const { rows } = await pool.query(
-        `${terms} SELECT m.id FROM messages m CROSS JOIN terms WHERE ${where('m', 'm.text')} AND m.hidden_at IS NULL${kept('m')} AND m.id=$7::uuid`,
+        `${terms} SELECT m.id FROM messages m CROSS JOIN terms WHERE ${where('m', 'm.text')} AND m.hidden_at IS NULL${kept('m')} AND m.id=$7::uuid${current ? ` AND ${messageChatSql('m')} IS NOT DISTINCT FROM $8::uuid` : ''}`,
         [...values, cursor, ...(current ? [chat.id] : [])],
       );
       if (!rows.length) throw new Error('This history cursor does not match the search.');
@@ -154,17 +162,14 @@ export function createHistorySearch({
     const nextCursor = page.rows.length > 20 ? picked.at(-1)!.id : null;
     const { rows: messages } = await pool.query<HistoryMessage>(
       `WITH terms AS (SELECT replace(plainto_tsquery('english',coalesce($4,''))::text,'&','|')::tsquery AS q),
-       chatted AS (
-         SELECT m.id,m.owner_id,m.role,m.text,m.turn_id,m.created_at,${scoped ? messageChatSql('m') : 'NULL::uuid'} AS chat
-         FROM messages m WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')}),
        thread AS (
-         SELECT c.*,row_number() OVER (PARTITION BY c.chat ORDER BY c.created_at,c.id) AS n
-         FROM chatted c${current ? ' WHERE c.chat IS NOT DISTINCT FROM $5::uuid' : ''}),
-       picked AS (SELECT t.n,t.chat,ids.place,t.id FROM unnest($2::uuid[]) WITH ORDINALITY ids(id,place) JOIN thread t ON t.id=ids.id),
+         SELECT m.id,m.owner_id,m.role,m.text,m.turn_id,m.created_at,row_number() OVER (ORDER BY m.created_at,m.id) AS n
+         FROM messages m WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')}),
+       picked AS (SELECT t.n,ids.place,t.id${scoped ? `,${messageChatSql('t')} AS chat` : ',NULL::uuid AS chat'} FROM unnest($2::uuid[]) WITH ORDINALITY ids(id,place) JOIN thread t ON t.id=ids.id),
        shown AS (
-         SELECT t.*,bool_or(p.id=t.id) AS match,min(p.place) AS place FROM thread t
-         JOIN picked p ON t.n BETWEEN p.n-$3 AND p.n+$3 AND t.chat IS NOT DISTINCT FROM p.chat
-         GROUP BY t.id,t.owner_id,t.role,t.text,t.turn_id,t.created_at,t.chat,t.n)
+         SELECT t.*,bool_or(p.id=t.id) AS match,min(p.place) AS place,(array_agg(p.chat))[1] AS chat FROM thread t
+         JOIN picked p ON t.n BETWEEN p.n-$3 AND p.n+$3${scoped ? ` AND ${messageChatSql('t')} IS NOT DISTINCT FROM p.chat` : ''}
+         GROUP BY t.id,t.owner_id,t.role,t.text,t.turn_id,t.created_at,t.n)
        SELECT s.id,s.role,CASE WHEN length(s.text)<=1200 THEN s.text
          ELSE ts_headline('english',s.text,terms.q,'StartSel="",StopSel="",MaxWords=60,MinWords=20,MaxFragments=3,FragmentDelimiter=" … "') END AS text,
          length(s.text)>1200 AS shortened,s.turn_id,s.created_at,
