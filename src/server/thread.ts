@@ -1616,7 +1616,8 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
   const sameChat = !chat
     ? ''
     : chat.id
-      ? 'AND u.session_id=$6'
+      ? `AND (u.session_id=$6 OR (m.role='user' AND m.id IN (SELECT d.message_id FROM turns d
+          WHERE d.owner_id=$1 AND d.session_id=$6 AND d.message_id IS NOT NULL)))`
       : `AND ${inChatSql('u', true, 'NULL', '$1')}`;
   const [
     source,

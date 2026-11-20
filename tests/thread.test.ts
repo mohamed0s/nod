@@ -2850,6 +2850,32 @@ test(
             'Synthetic first chat about bicycles',
             'Synthetic first chat follow-up',
           ]);
+          const note = 'Synthetic note for the bicycles chat';
+          const previousObserver = inspectObserver;
+          inspectObserver = async (context) => {
+            if (context.prompt !== note || context.taskContext) return previousObserver?.(context);
+            await context.task!({ action: 'reply', ids: [bikes] });
+            return { status: 'succeeded' };
+          };
+          try {
+            await say(note);
+            await waitFor(
+              async () =>
+                !(
+                  await db.pool.query(
+                    "SELECT 1 FROM turns WHERE session_id=$1 AND status IN ('queued','running')",
+                    [bikes],
+                  )
+                ).rowCount,
+            );
+          } finally {
+            inspectObserver = previousObserver;
+          }
+          const afterNote = await say('Synthetic first chat after the note', {
+            reply: await replyOf(firstAgain.turnId),
+          });
+          assert.ok(seen(afterNote.turnId).includes(note));
+          assert.ok(!seen(afterNote.turnId).some((text) => /lanterns|canoes/.test(text)));
         },
       );
 
