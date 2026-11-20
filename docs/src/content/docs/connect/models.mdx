@@ -267,13 +267,13 @@ Nod doesn't move for an invalid request, a key, permission or model access error
 
 Before it moves, Nod tries the same model once more. It waits for the provider's retry delay when one is sent, up to about 3 seconds for checks and about 15 seconds for other work, and never past the work's own deadline or your **Stop**. Each backup gets the same single retry. A quota error, or a model that's paused, moves straight to the next one.
 
-- **Chat, tasks, schedules and work Nod starts on its own** continue the same request on the backup, including compaction and helpers. The rest of that turn stays on the backup, and the next turn tries its own model first again. The reply ends with one short line, such as "DeepSeek-V4.1-Flash was busy, so this used GPT-6 Luna." Audio requests that include a recording stay on the audio model.
+- **Chat, tasks, schedules and work Nod starts on its own** continue the same request on the backup, including compaction and helpers. The rest of that turn stays on the backup, and the next turn tries its own model first again. The reply ends with one short line, such as "Gemini 3.8 Flash was busy, so this used GPT-6 Luna." Audio requests that include a recording stay on the audio model.
 - **Checks** use the backups too: memory, writing, image reading, account-access email checks and the small classifier for app activity. Task classification for usage data doesn't, so it keeps its one cheap model. Checks that use your selected model try each backup at its lightest effort, the small checker uses only the small models on your backups' connections, and image reading uses only backups that accept images.
 - **Action checks** keep one model for all their steps. If that model is busy, the whole check starts again from its first step on the next backup, so its answers never mix models. Decision checks never move to a model. See [Select the action checker](#select-the-action-checker).
 
 Backups count toward the same check-in, monthly limit and preparation allowance, and Usage shows each attempt with the model that ran and its cost. A model billed through a plan counts at its API price estimate. A backup without a known price can't run automatic preparation, just like your selected model.
 
-When every model fails, the error names each one and the provider's reason, for example `The model request failed: compatible / DeepSeek-V4.1-Flash: 429 at capacity; then openai / gpt-6-luna: 503 Service Unavailable`. An action check that can't get an answer from any model asks you, and in scheduled and background work the action doesn't run.
+When every model fails, the error names each one and the provider's reason, for example `The model request failed: google / gemini-3.8-flash: 429 Resource exhausted; then openai / gpt-6-luna: 503 Service Unavailable`. An action check that can't get an answer from any model asks you, and in scheduled and background work the action doesn't run.
 
 ## Models with a small context window
 
