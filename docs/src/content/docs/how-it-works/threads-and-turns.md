@@ -114,7 +114,7 @@ The next turn checks server status for sign-in forms referenced by its recent ch
 
 Every session saves its Pi history and opens its own browser on first use. Each runs one turn at a time; different sessions run in parallel.
 
-When a background turn starts, it loads its own messages and recent conversation messages available before that turn, with other sessions' work included only after it finished. The saved Pi history remains separate. A new main chat turn receives reports sent by other sessions. All sessions share the workspace, so files one writes are available for the others to read.
+A turn's recent conversation comes from its own chat. A task's turn loads only its own session's messages. A main chat turn, and a schedule, event or observer turn, whose messages show in the main chat, loads the messages that belong to no task. A background turn loads them as they were before it started, with other sessions' work included only after it finished. The saved Pi history remains separate. All sessions share the workspace, so files one writes are available for the others to read. See [Shared information, separate histories](/how-it-works/task-sessions/#shared-information-separate-histories).
 
 ## Saved tasks
 
