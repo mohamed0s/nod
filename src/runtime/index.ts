@@ -1328,6 +1328,7 @@ export function createAgentRuntime(dependencies: {
             resumed && !compact,
             currentUserTime(context.timeZone),
             sourceReads,
+            compact,
           )
         : undefined;
       const scheduled =
@@ -1338,12 +1339,13 @@ export function createAgentRuntime(dependencies: {
               omitted,
               currentUserTime(context.timeZone),
               analysis,
+              compact,
             )
           : undefined;
       const fallback =
         observer?.text ??
         scheduled?.text ??
-        instruct(firstInstruction(requestContext, resumed && !compact, omitted, analysis));
+        instruct(firstInstruction(requestContext, resumed && !compact, omitted, analysis, compact));
       const audio = nativeAudio(context.attachments, fallback);
       const nativeContext = audio
         ? {
@@ -1353,7 +1355,9 @@ export function createAgentRuntime(dependencies: {
         : requestContext;
       await session!.prompt(
         audio
-          ? instruct(firstInstruction(nativeContext, resumed && !compact, omitted, analysis))
+          ? instruct(
+              firstInstruction(nativeContext, resumed && !compact, omitted, analysis, compact),
+            )
           : fallback,
         images,
         audio,
