@@ -1041,8 +1041,16 @@ export function nodTools(
       ? [bind(toolDefinitions.delegate, (p) => turn.delegate!(p.title, p.instruction))]
       : []),
     bind(toolDefinitions.ask_user, async (p) => {
-      const text = p.question.trim();
+      let text = p.question.trim();
       if (!text) throw new Error('A question is required.');
+      const cost = turn.checkInCost?.();
+      if (cost !== undefined) {
+        if (!text.includes('{spent}'))
+          throw new Error(
+            'Write {spent} exactly where the question states what this work has used, then call ask_user again.',
+          );
+        text = text.replaceAll('{spent}', cost.spent).replaceAll('{plan}', cost.plan);
+      }
       const choices = p.choices
         ? answerChoicesSchema.parse({
             options: p.choices.map((choice) => ({

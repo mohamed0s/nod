@@ -257,16 +257,19 @@
 }
 .diagram-edge-label {
   position: absolute;
-  max-width: 110px;
+  display: -webkit-box;
+  width: max-content;
+  max-width: 168px;
   padding: 1px 6px;
   overflow: hidden;
-  border-radius: var(--radius-full);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  border-radius: 6px;
   color: var(--muted-foreground);
   background: var(--surface-subtle);
   font-size: 11px;
   line-height: 1.4;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  text-align: center;
   transform: translate(-50%, -50%);
   pointer-events: none;
 }

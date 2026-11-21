@@ -377,10 +377,14 @@ export function Seats({ visual }: { visual: SeatsVisual }) {
       row.groups.flatMap((group) => group.flatMap((seat) => (seat ? [{ seat, section }] : []))),
     ),
   );
+  const noted = seats.filter(({ seat }) => seat.note);
+  const notes = new Set(noted.map(({ seat }) => seat.note));
+  const sharedNote = notes.size === 1 ? [...notes][0]! : undefined;
+  const opening = noted[0] ?? seats[0]!;
   const [selected, setSelected] = useState(
     visual.recommended ?? {
-      sectionId: seats[0]!.section.id,
-      seatLabel: seats[0]!.seat.label,
+      sectionId: opening.section.id,
+      seatLabel: opening.seat.label,
     },
   );
   const [sectionFilter, setSectionFilter] = useState<string | null>(
@@ -421,7 +425,9 @@ export function Seats({ visual }: { visual: SeatsVisual }) {
             section.id === id &&
             section.id === visual.recommended?.sectionId &&
             seat.label === visual.recommended.seatLabel,
-        ) ?? seats.find(({ section }) => section.id === id)!;
+        ) ??
+        noted.find(({ section }) => section.id === id) ??
+        seats.find(({ section }) => section.id === id)!;
       setSelected({ sectionId: id, seatLabel: next.seat.label });
     }
   }
@@ -481,6 +487,12 @@ export function Seats({ visual }: { visual: SeatsVisual }) {
                   : 'Unknown'}
             </span>
           ))}
+        {noted.length > 0 && (
+          <span>
+            <i className="has-note" />
+            {sharedNote && sharedNote.length <= 60 ? sharedNote : 'Has a note'}
+          </span>
+        )}
       </div>
       <div className="seat-layout">
         <div
@@ -536,8 +548,8 @@ export function Seats({ visual }: { visual: SeatsVisual }) {
                                 <Tooltip key={item.label} content={item.label}>
                                   <button
                                     type="button"
-                                    className={`seat is-${item.status}${suggested ? ' is-recommended' : ''}`}
-                                    aria-label={`Seat ${item.label}, ${item.status}, ${section.name}${section.deck ? `, ${section.deck}` : ''}${suggested ? ', recommended' : ''}`}
+                                    className={`seat is-${item.status}${suggested ? ' is-recommended' : ''}${item.note ? ' has-note' : ''}`}
+                                    aria-label={`Seat ${item.label}, ${item.status}, ${section.name}${section.deck ? `, ${section.deck}` : ''}${suggested ? ', recommended' : ''}${item.note ? `, ${item.note}` : ''}`}
                                     aria-pressed={active}
                                     aria-describedby={active ? detailId : undefined}
                                     onClick={() =>

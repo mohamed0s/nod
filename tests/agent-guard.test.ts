@@ -1926,12 +1926,25 @@ test('past the spending check-in a turn stops working but can ask, and one that 
         },
       });
       assert.equal(options.shouldStop(), false);
-      await assert.rejects(read(tools), /\$5\.50 \(\$1\.50 of it ChatGPT plan usage/);
-      await call(tools, 'ask_user', { question: 'Read 12 of 40 threads. Keep going?' });
+      await assert.rejects(read(tools), /passed the \$5 check-in.*ChatGPT plan usage/);
+      await assert.rejects(
+        call(tools, 'ask_user', {
+          question: 'This used $5.50. Read 12 of 40 threads. Keep going?',
+        }),
+        /\{spent\}/,
+      );
+      emit(usage(0.25));
+      await call(tools, 'ask_user', {
+        question: 'This used {spent}, {plan} of it plan usage. Read 12 of 40 threads. Keep going?',
+      });
     },
     { integration, checkIn },
   );
   assert.equal(asked.result.status, 'waiting_user');
+  assert.equal(
+    asked.result.message,
+    'This used $5.75, $1.50 of it plan usage. Read 12 of 40 threads. Keep going?',
+  );
   assert.equal(reads.length, 2);
   const kept = await fixture(
     async (tools, emit, options) => {
@@ -1976,7 +1989,7 @@ test('past the spending check-in chat task start and reply are refused while rep
         status: 'done',
         result: 'Synthetic done.',
       });
-      await call(tools, 'ask_user', { question: 'Keep going?' });
+      await call(tools, 'ask_user', { question: 'This used {spent}. Keep going?' });
     },
     {
       checkIn: { budgetUsd: 5, spentUsd: 6 },
@@ -2904,7 +2917,9 @@ test('a spending check-in stops the observer from starting more tasks', async ()
         }),
         /check-in/,
       );
-      await call(tools, 'ask_user', { question: 'Continue the synthetic observer?' });
+      await call(tools, 'ask_user', {
+        question: 'This used {spent}. Continue the synthetic observer?',
+      });
     },
     {
       background: true,

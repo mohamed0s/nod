@@ -206,6 +206,16 @@ function Diagram({ visual }: { visual: Visual<'diagram'> }) {
   const scale = availableWidth ? Math.min(1, availableWidth / width) : 1;
   const height = levels.length * 140;
   const edgeLabels: Array<{ key: number; text: string; x: number; y: number }> = [];
+  const railTargets = [
+    ...new Set(
+      visual.edges
+        .filter(
+          (edge) =>
+            edge.from !== edge.to && points.get(edge.to)!.y - points.get(edge.from)!.y !== 140,
+        )
+        .map((edge) => edge.to),
+    ),
+  ];
   const node = selected ? nodes.get(selected) : undefined;
   const connections = visual.edges.filter((edge) => edge.from === selected || edge.to === selected);
   return (
@@ -232,14 +242,15 @@ function Diagram({ visual }: { visual: Visual<'diagram'> }) {
                   b = points.get(edge.to)!;
                 const y1 = a.y + 42,
                   y2 = b.y - 44;
-                const rail = width - 12 - (index % 6) * 5;
+                const slot = railTargets.indexOf(edge.to);
+                const rail = width - 12 - (slot % 6) * 6;
                 const loop = edge.from === edge.to;
                 const direct = b.y - a.y === 140;
                 const path = loop
                   ? `M ${a.x + 78} ${a.y - 14} H ${a.x + 98} V ${a.y + 58} H ${a.x} V ${a.y + 44}`
                   : direct
                     ? `M ${a.x} ${y1} C ${a.x} ${(y1 + y2) / 2}, ${b.x} ${(y1 + y2) / 2}, ${b.x} ${y2}`
-                    : `M ${a.x} ${y1} V ${y1 + 16} H ${rail} V ${y2 - 16} H ${b.x} V ${y2}`;
+                    : `M ${a.x} ${y1} V ${y1 + 16} H ${rail} V ${y2 - 16 - (slot % 4) * 6} H ${b.x} V ${y2}`;
                 const crowded = (key: 'from' | 'to', id: string) =>
                   visual.edges.filter(
                     (other) =>
