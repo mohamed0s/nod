@@ -1,3 +1,4 @@
+import type { FlightSearch } from '../ports/flights.ts';
 import { presentationInputSchema, type Presentation } from '../shared/presentation.ts';
 import { proactiveUpdateSchema, sourceReadSchema } from '../shared/proactivity.ts';
 import { appPages } from '../shared/app-links.ts';
@@ -96,6 +97,7 @@ const parentTools = new Set([
 ]);
 const parallelTools = new Set([
   'nod_docs',
+  'flights',
   'delegate',
   'share_file',
   'create_audio',
@@ -140,6 +142,7 @@ const delimitedTools = new Set([
   'get_search_content',
   'source_check',
   'codemode',
+  'flights',
 ]);
 export function webTarget(name: string, params: unknown, redact: (text: string) => string) {
   const input = (params ?? {}) as Record<string, unknown>;
@@ -213,6 +216,7 @@ export function createAgentRuntime(dependencies: {
   workspace: Workspace;
   skills?: SkillLibrary;
   documentation?: Documentation;
+  flights?: FlightSearch;
   redactError?(text: string): string;
   redactCommand?(text: string): string;
   observe?(turnId: string, event: RuntimeObservation): void;
@@ -817,7 +821,7 @@ export function createAgentRuntime(dependencies: {
         };
       const bind = (turn: Turn, take: () => Promise<unknown>): AgentTool[] =>
         [
-          ...nodTools(turn, skills, dependencies.documentation),
+          ...nodTools(turn, skills, dependencies.documentation, dependencies.flights),
           ...(context.proactivity ? [] : connectedTools(turn)),
         ]
           .filter(
@@ -860,7 +864,7 @@ export function createAgentRuntime(dependencies: {
               description,
               parameters,
               ...(tool.eager ? { eager: true } : {}),
-              ...(tool.companions?.length ? { companions: tool.companions } : {}),
+              ...(tool.companions ? { companions: tool.companions } : {}),
               ...(deferred ? { deferred } : {}),
               parallel: Boolean(deferred) || parallelTools.has(name),
               execute: async (params, options) => {

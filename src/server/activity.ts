@@ -109,6 +109,7 @@ const toolLabels = new Map([
   ['web search', 'Searching the web'],
   ['fetch content', 'Reading a web page'],
   ['get search content', 'Reading search results'],
+  ['flights', 'Searching flights'],
   ['browser', 'Using the browser'],
   ['computer', 'Using an app'],
   ['delegate', 'Working with helpers'],

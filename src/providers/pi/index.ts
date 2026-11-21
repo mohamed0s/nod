@@ -793,7 +793,11 @@ export function createPiAgent(options: {
           executionMode: tool.parallel ? 'parallel' : 'sequential',
           execute: async (id, args, signal) => {
             const active = activation?.getActiveTools() ?? [];
-            const missing = (budget.compact ? [] : (tool.companions ?? [])).filter(
+            const companions =
+              typeof tool.companions === 'function'
+                ? tool.companions(args as Record<string, unknown>)
+                : tool.companions;
+            const missing = (budget.compact ? [] : (companions ?? [])).filter(
               (name) => !active.includes(name) && input.tools.some((item) => item.name === name),
             );
             if (missing.length) activation?.setActiveTools([...active, ...missing]);

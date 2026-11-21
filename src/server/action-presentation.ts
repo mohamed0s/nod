@@ -399,6 +399,7 @@ const tools: Record<string, string> = {
   'get search content': 'Read search results',
   'source check': 'Checked a source',
   'read source': 'Read a source',
+  flights: 'Searched flights',
   browser: 'Used the browser',
   'sign in': 'Signed in',
   pay: 'Entered a card',

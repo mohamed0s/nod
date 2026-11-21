@@ -39,6 +39,7 @@ import { untrustedBlock } from '../shared/untrusted.ts';
 import { withoutSchemaPatterns } from '../shared/json-schema.ts';
 import type { Turn } from './turn.ts';
 import { jobsToolDescription, jobsToolParameters, runJobsTool } from './jobs-tool.ts';
+import type { FlightOption, FlightSearch } from '../ports/flights.ts';
 
 export const taskRouting =
   'Keep quick answers, simple lookups and status questions in chat. Website, sign-in, payment and desktop work always runs in a task you start; its questions belong to that task. Start a saved task for substantial work, including multi-step work you can finish in one sitting, an outside wait, or work the owner asks you to track. A new independent request during other work starts its own task; keep each goal together and send corrections or related updates to the existing task with task reply. If the owner explicitly asks to retry in response to a finished task’s result, use task reply with that task’s id from taskLedger and retry:true. Start tasks without asking the owner for an execution mode, and let each one finish its assigned work. A task brief grants no permission or schedule.';
@@ -200,9 +201,23 @@ function modelInput<S extends z.ZodType>(name: string, schema: S) {
   return Type.Unsafe<z.input<S>>({ ...json, [Kind]: name });
 }
 
+const flightReferences = z.looseObject({
+  type: z.literal('flights'),
+  options: z
+    .array(
+      z.strictObject({
+        id: z.string(),
+        recommended: z.boolean().optional(),
+        label: z.string().optional(),
+      }),
+    )
+    .min(1)
+    .max(8),
+});
 TypeRegistry.Set(
   'NodPresentation',
-  (_schema, value) => presentationInputSchema.safeParse(value).success,
+  (_schema, value) =>
+    presentationInputSchema.safeParse(value).success || flightReferences.safeParse(value).success,
 );
 const { $schema, ...presentationJsonSchema } = z.toJSONSchema(presentationInputSchema, {
   target: 'draft-7',
@@ -231,6 +246,37 @@ export const toolDefinitions = {
         { additionalProperties: false },
       ),
     ]),
+  ),
+  flights: defineTool(
+    'flights',
+    'Search live Google Flights fares and schedules. Each search is one way, or a round trip with returnDate. Put nearby airports in one search, and list up to six searches to compare dates or routes in one call. For a multi-city trip or stopover, search each leg; those are separate tickets. Use IATA codes, the conversation language code and the owner\'s currency. Prices are totals for all travellers with taxes, before bags and seat fees. Show options with send_message presentation {version:1,type:"flights",title,options:[{id,recommended?,label?}]}; Nod fills each id from these results with its source. Join legs of one trip with +, such as A3+B2, and Nod shows them as one itinerary with the total price.',
+    Type.Object(
+      {
+        searches: Type.Array(
+          Type.Object(
+            {
+              from: Type.Array(Type.String({ pattern: '^[A-Z]{3}$' }), {
+                minItems: 1,
+                maxItems: 4,
+              }),
+              to: Type.Array(Type.String({ pattern: '^[A-Z]{3}$' }), { minItems: 1, maxItems: 4 }),
+              date: Type.String({ pattern: '^\\d{4}-\\d{2}-\\d{2}$' }),
+              returnDate: Type.Optional(Type.String({ pattern: '^\\d{4}-\\d{2}-\\d{2}$' })),
+            },
+            { additionalProperties: false },
+          ),
+          { minItems: 1, maxItems: 6 },
+        ),
+        adults: Type.Optional(Type.Integer({ minimum: 1, maximum: 9 })),
+        children: Type.Optional(Type.Integer({ minimum: 0, maximum: 8 })),
+        infants: Type.Optional(Type.Integer({ minimum: 0, maximum: 4 })),
+        cabin: Type.Optional(literals(['economy', 'premium_economy', 'business', 'first'])),
+        maxStops: Type.Optional(Type.Integer({ minimum: 0, maximum: 2 })),
+        currency: Type.String({ pattern: '^[A-Z]{3}$' }),
+        language: Type.String({ pattern: '^[a-z]{2,3}(-[A-Z]{2})?$' }),
+      },
+      { additionalProperties: false },
+    ),
   ),
   skills: defineTool(
     'skills',
@@ -727,7 +773,7 @@ interface NodTool<P extends TSchema = TSchema> {
   description: string;
   parameters: P;
   eager?: boolean;
-  companions?: readonly string[];
+  companions?: AgentToolMetadata['companions'];
   execute(params: Static<P>): Promise<unknown>;
 }
 
@@ -864,8 +910,74 @@ export function nodTools(
   turn: Turn,
   skills?: SkillLibrary,
   documentation?: Documentation,
+  flights?: FlightSearch,
 ): NodTool[] {
   const { context, computer, pause, confirm } = turn;
+  const found = new Map<
+    string,
+    {
+      option: FlightOption;
+      amount?: number;
+      upperBound: boolean;
+      currency: string;
+      money: Intl.NumberFormat;
+      source: { label: string; url: string };
+      searchedAt: string;
+      asOf: (at: string) => string;
+    }
+  >();
+  let searched = 0;
+  const withFlights = (value: unknown) => {
+    const references = flightReferences.safeParse(value);
+    if (!references.success) return value;
+    const parts = references.data.options.map(({ id }) =>
+      id.split('+').map((part) => {
+        const result = found.get(part.trim());
+        if (!result)
+          throw new Error(
+            `Flight option ${part.trim()} is not in this turn's flights results. Search again or include its journeys.`,
+          );
+        return result;
+      }),
+    );
+    const { sources: _sources, asOf: _asOf, ...rest } = references.data;
+    const cited = parts.flat();
+    const sources = [...new Map(cited.map((leg) => [leg.source.url, leg.source])).values()];
+    if (sources.length > 8) throw new Error('One flight card can cite at most eight searches.');
+    return {
+      version: 1,
+      ...rest,
+      options: references.data.options.map(({ recommended, label }, index) => {
+        const legs = parts[index]!;
+        const journeys = legs.flatMap((leg) => leg.option.journeys);
+        if (journeys.length > 6)
+          throw new Error('One flight card option can hold at most six journeys.');
+        const total =
+          legs.every((leg) => leg.amount !== undefined) &&
+          legs.every((leg) => leg.currency === legs[0]!.currency)
+            ? legs.reduce((sum, leg) => sum + leg.amount!, 0)
+            : undefined;
+        return {
+          ...(legs.length === 1
+            ? legs[0]!.option
+            : {
+                id: legs.map((leg) => leg.option.id).join('-'),
+                status: 'option' as const,
+                ...(total === undefined
+                  ? {}
+                  : {
+                      price: `${legs.some((leg) => leg.upperBound) ? '≤ ' : ''}${legs[0]!.money.format(total)}`,
+                    }),
+                journeys,
+              }),
+          ...(recommended ? { recommended } : {}),
+          ...(label ? { label } : {}),
+        };
+      }),
+      sources,
+      asOf: cited[0]!.asOf(cited.map((leg) => leg.searchedAt).sort()[0]!),
+    };
+  };
   const { browserId } = turn.execution;
   const { signal } = context;
   const screenshot = async () => {
@@ -985,44 +1097,103 @@ export function nodTools(
           ),
         ]
       : []),
-    bind(toolDefinitions.skills, async (p) => {
-      if (p.action === 'list') return skills?.catalog ?? [];
-      if (p.action === 'read') {
-        const guide = mcpNamespaces(context.mcpServers ?? []).find(
-          ({ namespace }) => p.name === `mcp__${namespace}`,
-        );
-        if (guide) {
-          if (p.file) throw new Error('An MCP server guide has no reference files.');
+    ...(flights
+      ? [
+          bind(toolDefinitions.flights, async (p) => {
+            const first = searched;
+            searched += p.searches.length;
+            const result = await flights.search(
+              {
+                ...p,
+                adults: p.adults ?? 1,
+                children: p.children ?? 0,
+                infants: p.infants ?? 0,
+                cabin: p.cabin ?? 'economy',
+                first,
+              },
+              signal,
+            );
+            const clock = new Intl.DateTimeFormat(p.language, {
+              dateStyle: 'medium',
+              timeStyle: 'short',
+              timeZone: context.timeZone,
+            });
+            const asOf = (at: string) => clock.format(new Date(at));
+            const money = new Intl.NumberFormat(p.language, {
+              style: 'currency',
+              currency: p.currency,
+              maximumFractionDigits: 0,
+            });
+            return {
+              searchedAt: result.searchedAt,
+              pricesCover: result.travellers,
+              searches: result.searches.map((search) => {
+                if ('error' in search) return search;
+                const { options, upperBound, ...rest } = search;
+                const source = { label: 'Google Flights', url: search.url };
+                for (const { option, amount } of options)
+                  found.set(option.id, {
+                    option,
+                    amount,
+                    upperBound: Boolean(upperBound),
+                    currency: p.currency,
+                    money,
+                    source,
+                    searchedAt: result.searchedAt,
+                    asOf,
+                  });
+                return { ...rest, options: options.map((item) => item.summary) };
+              }),
+            };
+          }),
+        ]
+      : []),
+    {
+      ...bind(toolDefinitions.skills, async (p) => {
+        if (p.action === 'list') return skills?.catalog ?? [];
+        if (p.action === 'read') {
+          const guide = mcpNamespaces(context.mcpServers ?? []).find(
+            ({ namespace }) => p.name === `mcp__${namespace}`,
+          );
+          if (guide) {
+            if (p.file) throw new Error('An MCP server guide has no reference files.');
+            return untrustedBlock(
+              `${guide.namespace} MCP server guide`,
+              guide.server.instructions || 'This server supplied no guide.',
+            );
+          }
+          if (
+            skills?.core?.includes(p.name) ||
+            skills?.catalog.some((skill) => skill.name === p.name)
+          ) {
+            const guide = skills.read(p.name, p.file);
+            return p.name === 'visual-replies' && guide.file === 'SKILL.md'
+              ? { ...guide, presentationSchema: presentationJsonSchema }
+              : guide;
+          }
+          if (p.file) throw new Error('A learned skill has no reference files.');
           return untrustedBlock(
-            `${guide.namespace} MCP server guide`,
-            guide.server.instructions || 'This server supplied no guide.',
+            'learned skill',
+            JSON.stringify(await context.manage('skill_read', { name: p.name })),
           );
         }
-        if (
-          skills?.core?.includes(p.name) ||
-          skills?.catalog.some((skill) => skill.name === p.name)
-        ) {
-          const guide = skills.read(p.name, p.file);
-          return p.name === 'visual-replies' && guide.file === 'SKILL.md'
-            ? { ...guide, presentationSchema: presentationJsonSchema }
-            : guide;
-        }
-        if (p.file) throw new Error('A learned skill has no reference files.');
-        return untrustedBlock(
-          'learned skill',
-          JSON.stringify(await context.manage('skill_read', { name: p.name })),
-        );
-      }
-      if (turn.execution.parentRunId)
-        throw new Error(
-          'A subagent cannot save skills. Include what you learned in your answer to the parent agent.',
-        );
-      const { action, ...args } = p;
-      return context.manage(`skill_${action}`, { action, ...args });
-    }),
+        if (turn.execution.parentRunId)
+          throw new Error(
+            'A subagent cannot save skills. Include what you learned in your answer to the parent agent.',
+          );
+        const { action, ...args } = p;
+        return context.manage(`skill_${action}`, { action, ...args });
+      }),
+      companions: (args: Record<string, unknown>) =>
+        args.action === 'read' && typeof args.name === 'string'
+          ? (skills?.tools?.(args.name) ?? [])
+          : [],
+    },
     bind(toolDefinitions.send_message, async (p) => {
       const visual =
-        p.presentation === undefined ? undefined : presentationInputSchema.parse(p.presentation);
+        p.presentation === undefined
+          ? undefined
+          : presentationInputSchema.parse(withFlights(p.presentation));
       if (!p.text.trim() && !visual) throw new Error('A text answer or visual is required.');
       const delivery =
         p.intent === 'handoff'

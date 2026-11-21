@@ -173,6 +173,7 @@ Tool definitions live in [`src/runtime/tools.ts`](https://github.com/n8n-io/nod/
 | `share_file`                                                        | Attaches a workspace file to Nod's next reply or question, or sends it alone when a turn finishes or fails without one.                                       |
 | `create_audio`                                                      | Turns text into speech and sends it to you.                                                                                                                   |
 | `web_search`, `fetch_content`, `get_search_content`, `source_check` | Web research from the pinned `pi-web-access` extension. It never reads local files.                                                                           |
+| `flights`                                                           | Searches Google Flights from the server and returns options that `send_message` can show by ID. Reading the `travel` guide loads it.                          |
 | `mcp__<server>__<tool>`                                             | One tool for each tool of a connected MCP server, such as `mcp__n8n__validate_workflow`. Each call runs like `apps`, after the trust check.                   |
 | `tool_search`                                                       | Finds connected MCP server tools by meaning and loads the matches for the next model call.                                                                    |
 | `codemode`                                                          | Runs a model-written script that calls workspace, web and connected MCP server tools.                                                                         |
@@ -206,7 +207,7 @@ flowchart TD
 
 `apps` and `manage_personal_context` calls run in parallel with each other and with subagents. The trust check covers app actions, changes to schedules, notification settings, the owner's rules and spending limits, and forgetting a note or turning memory on, off or clearing it, and those checks run in parallel too. Other `manage_personal_context` operations, such as saving a note and reads, have no trust check and count as decided as soon as they reach the server.
 
-Public web reads also run in parallel when the model requests independent searches or pages in one step. Each call passes the same turn guard. Browser steps run in sequence.
+Public web reads and flight searches also run in parallel when the model requests independent searches or pages in one step. Each call passes the same turn guard. Browser steps run in sequence.
 
 Managed app requests use the request's time limit, or the client's default, for the whole response. Nod keeps that deadline and the caller's Stop signal active after headers arrive. The SDK keeps its normal lazy parsing: a raw response is available at headers, and Nod does not read an extra copy first. Completed parsing removes the timer and Stop listener without aborting the retained raw response. Without parsing, a raw response with a body keeps those guards until its deadline or Stop. Client and request options cannot enable retries.
 

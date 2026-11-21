@@ -71,6 +71,7 @@ const tools = [
   'apps',
   'codemode',
   'files',
+  'flights',
   'history_search',
   'limits_update',
   'memory_learn',

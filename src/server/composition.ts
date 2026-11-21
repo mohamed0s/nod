@@ -122,6 +122,8 @@ import { createFeedbackRedactor } from './feedback-redaction.ts';
 import { withFailureLog, type FailureLogSink } from './failure-log.ts';
 import { createPiMemoryCurator } from '../providers/pi/memory-curator.ts';
 import { createPublicLinkPreviewProvider } from '../providers/public-web/link-preview.ts';
+import { createGoogleFlights } from '../providers/google-flights.ts';
+import type { FlightSearch } from '../ports/flights.ts';
 import { createAgentRuntime } from '../runtime/index.ts';
 import { coreSkills } from '../runtime/prompt.ts';
 import { createApp } from './app.ts';
@@ -268,6 +270,7 @@ export interface ApplicationAdapters {
   trustCurator?: MemoryCurator;
   messaging?: MessagingTransport;
   linkPreviews?: LinkPreviewProvider;
+  flights?: FlightSearch;
   feedback?: FeedbackDelivery;
   traces?: ModelTraceGate;
   telemetry?: UsageTelemetry;
@@ -657,6 +660,7 @@ export function createDefaultAdapters(
       },
     },
     linkPreviews: createPublicLinkPreviewProvider(),
+    flights: createGoogleFlights(),
     onboardingEmail: createN8nOnboardingEmail({
       url:
         env.NOD_ONBOARDING_EMAIL_URL ??
@@ -953,6 +957,7 @@ async function initializeApplication(
     documentation: createDocumentation(
       fileURLToPath(new URL('../../docs/src/content/docs/', import.meta.url)),
     ),
+    flights: adapters.flights,
     computer,
     workspace,
     redactError: createErrorRedactor(secrets),
