@@ -50,14 +50,23 @@ export function createChatTitles(options: {
       )
     ).rows[0];
     if (!chat) return;
+    let reply: unknown;
     try {
-      const parsed = answer.safeParse(
-        await options.curator.curate({
-          task: 'title',
-          instructions,
-          input: { request: redactSecretText(chat.request), reply: redactSecretText(chat.reply) },
-        }),
+      reply = await options.curator.curate({
+        task: 'title',
+        instructions,
+        input: { request: redactSecretText(chat.request), reply: redactSecretText(chat.reply) },
+      });
+    } catch (error) {
+      logFailure('chat_title_failed', error);
+      await options.pool.query(
+        "UPDATE tasks SET title_by='line' WHERE id=$1 AND owner_id=$2 AND title_by='model'",
+        [chat.id, options.ownerId],
       );
+      return;
+    }
+    try {
+      const parsed = answer.safeParse(reply);
       const title = parsed.success ? chatTitle(parsed.data.title) : undefined;
       if (!title) throw new Error('The title model returned no usable chat title.');
       const { rowCount } = await options.pool.query(

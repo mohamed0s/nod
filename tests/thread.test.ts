@@ -2894,6 +2894,7 @@ test(
           const asked: unknown[] = [];
           const topics: Array<[string, string]> = [];
           let during: (() => Promise<void>) | undefined;
+          let busy = false;
           const titles = createChatTitles({
             pool: db.pool,
             ownerId,
@@ -2903,6 +2904,7 @@ test(
               async curate({ task, input }) {
                 assert.equal(task, 'title');
                 asked.push(input);
+                if (busy) throw new Error('Synthetic title model is busy');
                 await during?.();
                 return { title: '"Synthetic deal checks."' };
               },
@@ -2986,6 +2988,23 @@ test(
           await tasks.initialize();
           await titles.name(older.turnId);
           assert.equal(await title(older.sessionId), 'Synthetic deal checks');
+
+          const unlucky = await start('Synthetic request about lighthouses');
+          busy = true;
+          await titles.name(unlucky.turnId);
+          busy = false;
+          assert.equal(await title(unlucky.sessionId), 'Synthetic request about lighthouses');
+          const again = await userMessages.submit('Synthetic lighthouse follow-up', [], {
+            replyToMessageId: (
+              await db.pool.query<{ id: string }>(
+                "SELECT id FROM messages WHERE turn_id=$1 AND role='assistant' LIMIT 1",
+                [unlucky.turnId],
+              )
+            ).rows[0]!.id,
+          });
+          await waitFor(settled(again.turnId));
+          await titles.name(again.turnId);
+          assert.equal(await title(unlucky.sessionId), 'Synthetic deal checks');
 
           const topic = await start('Synthetic chat from an owner topic');
           await db.pool.query("UPDATE tasks SET title_by='topic' WHERE id=$1", [topic.sessionId]);
