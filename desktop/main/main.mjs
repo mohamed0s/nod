@@ -3147,7 +3147,10 @@ else {
         const windows = process.platform === 'win32';
         if (windows)
           await clearInstalledWindowsUpdates(windowsUpdates, app.getVersion()).catch(() => {});
-        updateSource = createUpdateSource({ sourceUrl: nodBuild?.updateSourceUrl });
+        updateSource = createUpdateSource({
+          sourceUrl: nodBuild?.updateSourceUrl,
+          repository: nodBuild?.updateRepository,
+        });
         updates = createDesktopUpdater({
           source: updateSource,
           currentVersion: app.getVersion(),

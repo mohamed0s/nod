@@ -35,6 +35,9 @@ if (
     /[?#]/.test(updateSourceUrl))
 )
   throw new Error('The desktop update source must be a credential-free HTTPS URL.');
+const updateRepository = process.env.NOD_DESKTOP_UPDATE_REPOSITORY;
+if (updateRepository && !/^[A-Za-z0-9-]+\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(updateRepository))
+  throw new Error('The desktop update repository must look like owner/name.');
 const manifest = JSON.parse(await readFile(join(assets, 'manifest.json'), 'utf8'));
 if (
   manifest.platform !== 'win32-x64' ||
@@ -77,6 +80,7 @@ configuration.nodBuild = {
   builtAt: new Date().toISOString(),
   platform: 'win32-x64',
   ...(updateSourceUrl ? { updateSourceUrl } : {}),
+  ...(updateRepository ? { updateRepository } : {}),
   ...buildOptions,
 };
 delete configuration.devDependencies;

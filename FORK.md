@@ -91,6 +91,16 @@ in Windows' power options (they are by default).
 | Back up now                | `powershell -ExecutionPolicy Bypass -File scripts\windows\backup.ps1`       |
 | Stop the morning wake      | `Unregister-ScheduledTask -TaskPath '\Nod\' -TaskName wake -Confirm:$false` |
 
+## A Windows app for someone else
+
+n8n's own release workflow runs only in n8n's repository: it needs their paid build machines and signing keys. This fork has its own workflow instead.
+
+1. On GitHub, open **Actions → Fork Windows release → Run workflow**, choose the `mine` branch, and enter a version such as `0.9.1`. Use a higher version for each new build.
+2. It builds the runtime and the installer on GitHub's machines (about an hour), installs and checks the app, then publishes the release `nod-v<version>` on this fork.
+3. Send the release link. The installer isn't code-signed, so Windows SmartScreen asks to confirm it once. It needs Windows 11 x64, WSL 2 and 20 GB of free disk space.
+
+A build made this way downloads its runtime and later updates from this fork's releases, never from n8n's, so it keeps this fork's changes. Each person's data stays on their own computer.
+
 ## Troubleshooting
 
 - **"Could not resolve host" or "no such host" during the first start.**
