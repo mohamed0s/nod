@@ -1367,6 +1367,46 @@ test('a pinned check gives later models no live request once its time budget is 
   ]);
 });
 
+test('a pinned check moves past a model that hangs at its own deadline, and a Stop never moves on', async () => {
+  const { pinnedReview } = await import('../src/server/model-fallback.ts');
+  const seen: string[] = [];
+  const hang = async (_instructions: string, _input: object, signal?: AbortSignal) => {
+    seen.push('hang');
+    await new Promise((_resolve, reject) =>
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true }),
+    );
+    return { run: true };
+  };
+  const next = async () => {
+    seen.push('next');
+    return { run: false };
+  };
+  const check = (closed: boolean, signal?: AbortSignal) =>
+    pinnedReview(
+      async () => [hang, next],
+      async () => undefined,
+      (review, _last, limit) => {
+        const answer = review('Check the synthetic action.', {}, limit);
+        return closed ? answer.catch(() => ({ run: false, closed: true })) : answer;
+      },
+      { ms: 400, ...(signal ? { signal } : {}) },
+    );
+  for (const closed of [false, true]) {
+    seen.length = 0;
+    const started = performance.now();
+    assert.deepEqual(await check(closed), { run: false });
+    assert.deepEqual(seen, ['hang', 'next']);
+    assert.ok(performance.now() - started < 1000);
+  }
+
+  seen.length = 0;
+  const stop = new AbortController();
+  const stopped = check(false, stop.signal);
+  globalThis.setTimeout(() => stop.abort(), 50);
+  await assert.rejects(stopped);
+  assert.deepEqual(seen, ['hang']);
+});
+
 test('localhost access requires the owner key and rejects foreign Host, Origin and cross-site requests', async () => {
   const root = await mkdtemp(join(tmpdir(), 'nod-access-'));
   const app = Fastify();

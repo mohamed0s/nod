@@ -288,18 +288,14 @@ export function ModelSentences() {
           </p>
         ))}
       </div>
-      {chat && (data.backupsSuggested || backups.length < 3) && (
+      {chat && backups.length < 3 && (
         <p className="model-sentences-note">
-          {data.backupsSuggested &&
-            'Nod chose these backups from your other connections. You can change them. '}
-          {backups.length < 3 && (
-            <ModelPicker
-              appearance="statement"
-              manageConnections={false}
-              target={backupTarget(data, backups.length)}
-              label="Add a backup model"
-            />
-          )}
+          <ModelPicker
+            appearance="statement"
+            manageConnections={false}
+            target={backupTarget(data, backups.length)}
+            label="Add a backup model"
+          />
         </p>
       )}
       {chat?.audio && (

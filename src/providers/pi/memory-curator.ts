@@ -236,7 +236,10 @@ export function createPiMemoryCurator(options: {
         let expired = false;
         const complete = async () => {
           attempt++;
-          const deadline = turnBound ? undefined : AbortSignal.timeout(bounded ? 10_000 : 45_000);
+          const deadline =
+            turnBound && (!chained || last)
+              ? undefined
+              : AbortSignal.timeout(bounded ? 10_000 : 45_000);
           const context: Context = {
             systemPrompt: instructions,
             messages: [

@@ -279,7 +279,6 @@ export function createAgentRuntime(dependencies: {
     let completed = false;
     let lastReply = '';
     let lastPresentation = '';
-    let fallbackNote: string | undefined;
     let fallbackNoted = false;
     let checkInSpent = context.checkIn?.spentUsd ?? 0;
     let checkInPlan = context.checkIn?.planUsd ?? 0;
@@ -362,10 +361,8 @@ export function createAgentRuntime(dependencies: {
         (trimmed === lastReply && (!visual || visual === lastPresentation))
       )
         return { delivered: false, presentation: outcome };
-      const note = trimmed && fallbackNote ? `${trimmed}\n\n${fallbackNote}` : trimmed;
-      if (note !== trimmed) fallbackNote = undefined;
-      if (handoff) await context.reply(note, id, replyToMessageId, presentation, true);
-      else await context.reply(note, id, replyToMessageId, presentation);
+      if (handoff) await context.reply(trimmed, id, replyToMessageId, presentation, true);
+      else await context.reply(trimmed, id, replyToMessageId, presentation);
       lastPresentation = visual;
       if (id) persistedStreams.add(id);
       lastReply = trimmed;
@@ -1243,7 +1240,6 @@ export function createAgentRuntime(dependencies: {
           if (event.type === 'fallback' && !fallbackNoted) {
             fallbackNoted = true;
             const note = `${event.from} was ${event.reason}, so this used ${event.to}.`;
-            if (speaks) fallbackNote = note;
             pendingReplies = pendingReplies.then(() =>
               context.emit('retry', note, { execution }).catch(() => {}),
             );

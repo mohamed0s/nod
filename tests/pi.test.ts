@@ -10293,6 +10293,42 @@ async function fallbackServer(
   return { requests, access };
 }
 
+test('a chained check whose model hangs moves to the backup at its own deadline, and a Stop never does', async (t) => {
+  const timeout = AbortSignal.timeout.bind(AbortSignal);
+  t.mock.method(AbortSignal, 'timeout', (milliseconds: number) =>
+    timeout(milliseconds === 45_000 ? 500 : milliseconds),
+  );
+  const { requests, access } = await fallbackServer(t, (model) =>
+    model === 'fixture-backup' ? { status: 200, text: '{"run":false}' } : { status: 0 },
+  );
+  const curator = createPiMemoryCurator({
+    provider: 'compatible',
+    configured: () => true,
+    resolve: async () => [access('fixture-primary'), access('fixture-backup')],
+  });
+  const review = (signal: AbortSignal) =>
+    curator.curate(
+      { task: 'review', instructions: 'Check the synthetic action.', input: {} },
+      signal,
+    );
+  assert.deepEqual(await review(new AbortController().signal), { run: false });
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-primary', 'fixture-backup'],
+  );
+
+  requests.length = 0;
+  const stop = new AbortController();
+  const stopped = review(stop.signal);
+  setTimeout(100).then(() => stop.abort());
+  await assert.rejects(stopped);
+  await setTimeout(600);
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-primary'],
+  );
+});
+
 test('curator checks retry a busy model once, then use the next backup, and never on a request error', async (t) => {
   const { modelUnavailable, retryDelayMs, fallbackWait } =
     await import('../src/shared/model-fallback.ts');
@@ -10311,6 +10347,7 @@ test('curator checks retry a busy model once, then use the next backup, and neve
     ['404 model not found (HTTP 404)', undefined],
     ['Provider finish_reason: content_filter (HTTP 200)', undefined],
     ['Context length exceeded: maximum context is 8192 tokens.', undefined],
+    ['503 The input exceeds the maximum context length of 8192 tokens (HTTP 503)', undefined],
     ['Rate limit reached for tokens per minute (TPM). Please retry after 2s.', 'busy'],
     ['400 Your credit balance is too low to access the Anthropic API. (HTTP 400)', 'quota'],
     ['400 Provider returned error (HTTP 400)', undefined],
@@ -10929,6 +10966,40 @@ test('a busy work model hands the same request to a backup and records each atte
     requests.map(({ model }) => model),
     ['fixture-primary', 'fixture-backup'],
   );
+});
+
+test('a turn with backups replaces the Pi retry check, so a Pi upgrade cannot silently turn the fallback off', async (t) => {
+  const { AgentSession } = await import('@earendil-works/pi-coding-agent');
+  assert.equal(
+    typeof (AgentSession.prototype as unknown as { _isRetryableError?: unknown })._isRetryableError,
+    'function',
+    'Pi no longer has AgentSession._isRetryableError, which the turn fallback replaces to retry on a backup model.',
+  );
+  const directory = await mkdtemp(join(tmpdir(), 'nod-fallback-hook-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { access } = await fallbackServer(t, () => ({ status: 200, text: 'Synthetic answer.' }));
+  let created: object | undefined;
+  const agent = createPiAgent({
+    provider: 'compatible',
+    resolve: async () => [access('fixture-primary'), access('fixture-backup')],
+    sessionRoot: directory,
+    createSession: async (options) => {
+      const result = await createAgentSession(options);
+      created = result.session;
+      return result;
+    },
+  });
+  t.after(() => agent.dispose());
+  const session = await agent.open({
+    ...fakeExecution(randomUUID()),
+    ...sandbox,
+    systemPrompt: 'Synthetic fixture',
+    tools: [],
+    shouldStop: () => false,
+    onEvent: () => {},
+  });
+  assert.ok(created && Object.hasOwn(created, '_isRetryableError'));
+  await session.dispose();
 });
 
 test('action review failures identify the task, model, provider, and bounded provider reason', async (t) => {

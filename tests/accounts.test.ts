@@ -5612,7 +5612,7 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     assert.doesNotMatch(JSON.stringify(settings()), /fixture-|connectionId|modelId/);
   });
 
-  test('backup models fill in once from other priced connections, most reliable first', async (t) => {
+  test('backup models are only the ones the owner picks, in order, and survive a restart', async (t) => {
     const f = await fixture(t);
     const { createServer } = await import('node:http');
     const { createPiModelBackend } = await import('../src/providers/pi/models.ts');
@@ -5640,37 +5640,18 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     const global = openai.find((row) => row !== eu)!;
     const luna = eu.models.find((model) => model.id === 'gpt-6-luna')!;
     await owner.select({ connectionId: local, modelId: 'fixture-local', effort: 'off' });
-    await owner.setRoute('schedule', {
-      connectionId: eu.id,
-      modelId: luna.id,
-      effort: luna.efforts.at(-1)!,
-    });
     assert.deepEqual(owner.view().backups, []);
+    assert.deepEqual((await f.create(ownerId, backend)).view().backups, []);
 
-    await f.database.query('UPDATE model_settings SET backups=NULL WHERE owner_id=$1', [ownerId]);
-    await f.database.query(
-      'CREATE TABLE model_usage(id text PRIMARY KEY,owner_id text NOT NULL,created_at timestamptz NOT NULL DEFAULT now(),details jsonb NOT NULL)',
-    );
-    for (const [model, status] of [
-      ['gpt-6.1-sol', 'succeeded'],
-      ['gpt-6.1-sol', 'failed'],
-      ['gpt-6.1-sol', 'failed'],
-      ['gpt-6.1-sol', 'failed'],
-      ['gpt-6-luna', 'succeeded'],
-      ['gpt-6-luna', 'succeeded'],
-      ['gpt-6-luna', 'succeeded'],
-    ])
-      await f.database.query('INSERT INTO model_usage(id,owner_id,details) VALUES($1,$2,$3)', [
-        randomUUID(),
-        ownerId,
-        { provider: 'openai', model, status },
-      ]);
+    await owner.setBackups([
+      { connectionId: eu.id, modelId: luna.id, effort: luna.efforts.at(-1)! },
+      { connectionId: global.id, modelId: 'gpt-6.1-sol', effort: 'high' },
+    ]);
     const restarted = await f.create(ownerId, backend);
     assert.deepEqual(restarted.view().backups, [
       { connectionId: eu.id, modelId: 'gpt-6-luna', effort: luna.efforts.at(-1) },
       { connectionId: global.id, modelId: 'gpt-6.1-sol', effort: 'high' },
     ]);
-    assert.equal(restarted.view().backupsSuggested, true);
     assert.deepEqual(
       (await restarted.candidates('work')).map((access) => access.definition.choice.id),
       ['fixture-local', 'gpt-6-luna', 'gpt-6.1-sol'],
@@ -5681,7 +5662,6 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
       { connectionId: eu.id, modelId: 'gpt-6.1-sol', effort: 'high' },
       { connectionId: local, modelId: 'fixture-local', effort: 'off' },
     ]);
-    assert.equal(restarted.view().backupsSuggested, undefined);
     assert.deepEqual(
       (await restarted.candidates('small')).map((access) => [
         access.definition.spec.baseUrl,
