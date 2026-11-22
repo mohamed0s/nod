@@ -30,7 +30,7 @@ Download [nod-Setup-x64.exe](https://github.com/mohamed0s/nod/releases/latest/do
 
 After that, the app updates itself from this fork's releases, the way n8n's app updates from n8n's. It checks when it starts and every six hours, downloads the new installer in the background, checks it against the release's SHA-256, and offers **Restart to update**. A new release follows each n8n release the fork takes in, so releases can trail the `mine` branch. Each person's data stays on their own computer.
 
-The first release, 0.9.1, can't update itself. If you installed it, install the latest release by hand once.
+The first release, 0.9.1, can't update itself: it downloads each new installer and refuses it, again and again. If you installed it, install the latest release by hand once.
 
 ### From source on Windows 11
 
