@@ -135,7 +135,13 @@ class Telegram extends TelegramAdapter {
     try {
       return super.throwTelegramApiError(method, status, data);
     } catch (cause) {
-      throw Object.assign(cause as Error, { refusal: telegramRefusal(status, data) });
+      throw Object.assign(cause as Error, {
+        refusal: telegramRefusal(status, data),
+        forbidden:
+          (data.error_code ?? status) === 403
+            ? data.description || 'Telegram refused it with status 403.'
+            : undefined,
+      });
     }
   }
 
@@ -204,8 +210,9 @@ class Telegram extends TelegramAdapter {
       { signal },
     ).catch((cause: unknown) => {
       this.topicState = undefined;
-      const refusal = (cause as { refusal?: unknown } | undefined)?.refusal;
-      throw typeof refusal === 'string' ? new MessagingRefusedError(refusal, { cause }) : cause;
+      const { refusal, forbidden } = (cause ?? {}) as { refusal?: unknown; forbidden?: unknown };
+      const reason = typeof refusal === 'string' ? refusal : forbidden;
+      throw typeof reason === 'string' ? new MessagingRefusedError(reason, { cause }) : cause;
     });
     return String(z.number().int().positive().parse(topic.message_thread_id));
   }

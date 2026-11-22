@@ -30,9 +30,10 @@ import type { ChatConfirmationInput } from './approvals.ts';
 import { channelText } from './channel-text.ts';
 import { appPages } from '../shared/app-links.ts';
 import { pendingAnswerChoicesSql } from './answer-choices.ts';
+import { ownerStarted } from './turn-chain.ts';
 
 const laterReply = `EXISTS (SELECT 1 FROM messages n WHERE n.turn_id=u.id AND n.owner_id=u.owner_id AND n.role='assistant'
-  AND n.hidden_at IS NULL AND (n.text<>'' OR n.presentation IS NOT NULL) AND n.created_at>m.created_at)`;
+  AND n.hidden_at IS NULL AND (n.text<>'' OR n.presentation IS NOT NULL) AND (n.created_at,n.id)>(m.created_at,m.id))`;
 const sentBefore = (time: string, number: string) =>
   `(CASE WHEN ${number}::bigint IS NULL OR cardinality(o.provider_message_ids)=0
       OR EXISTS (SELECT 1 FROM unnest(o.provider_message_ids) p WHERE p !~ '^-?[0-9]+:[0-9]+$')
@@ -193,6 +194,7 @@ interface OutboxRow extends ChannelIdentity {
   browser_handoff: boolean;
   web: boolean;
   quiet: boolean;
+  created_at: Date;
 }
 const messageSchema = z
   .object({
@@ -1442,8 +1444,8 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     const mirrored = `FROM messages m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
       WHERE m.owner_id=$1 AND m.created_at>now()-interval '10 minutes' AND m.role='assistant'
         AND m.hidden_at IS NULL AND u.channel='web' AND u.session_id::text=to_jsonb(u)->>'task_id'
-        AND (SELECT f.source FROM turns f WHERE f.owner_id=u.owner_id AND f.session_id=u.session_id
-          ORDER BY f.created_at,f.id LIMIT 1) IN ('user','task','resume')
+        AND EXISTS (SELECT 1 FROM (SELECT f.source FROM turns f WHERE f.owner_id=u.owner_id AND f.session_id=u.session_id
+          ORDER BY f.created_at,f.id LIMIT 1) f WHERE ${ownerStarted('f')})
         AND NOT EXISTS (SELECT 1 FROM channel_outbox q WHERE q.message_id=m.id)`;
     if (!(await pool.query(`SELECT 1 ${mirrored} LIMIT 1`, [ownerId])).rowCount) return;
     const [route] = await topicRoutes((mode) => mode.enabled);
@@ -1599,7 +1601,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
             AND u.status IN ('queued','running') AND m.created_at>now()-interval '15 seconds' AND NOT ${laterReply})
           ORDER BY m.created_at,m.id FOR UPDATE OF o SKIP LOCKED LIMIT 1
       ) RETURNING message_id,source_id,presentation
-    ) SELECT c.message_id,m.owner_id,m.thread_id AS message_thread_id,i.provider,i.account_id,i.sender_id,i.thread_id,i.topic_id AS source_topic_id,m.turn_id,
+    ) SELECT c.message_id,m.owner_id,m.created_at,m.thread_id AS message_thread_id,i.provider,i.account_id,i.sender_id,i.thread_id,i.topic_id AS source_topic_id,m.turn_id,
       (SELECT to_jsonb(u)->>'task_id' FROM turns u WHERE u.id=m.turn_id AND u.owner_id=m.owner_id) AS task_id,m.text,m.attachments,m.reply_to_message_id,c.presentation,m.presentation AS message_presentation,m.answer_choices,(${pendingAnswerChoicesSql}) AS answer_choices_pending,
       EXISTS (SELECT 1 FROM turns u WHERE u.id=m.turn_id AND u.owner_id=m.owner_id AND u.handoff_browser_id IS NOT NULL
         AND m.id=(SELECT id FROM messages WHERE turn_id=u.id AND owner_id=u.owner_id AND role='assistant' ORDER BY created_at DESC,id DESC LIMIT 1)) AS browser_handoff,
@@ -1622,12 +1624,14 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       reason: string,
       state: 'preparing' | 'sending' = 'preparing',
       database: Pool | PoolClient = pool,
-    ) =>
-      database.query(
+    ) => {
+      sendRetry.delete(row.message_id);
+      return database.query(
         `UPDATE channel_outbox SET state='blocked',reason=$2,claim_id=NULL,updated_at=now()
          WHERE message_id=$1 AND claim_id=$3 AND state=$4`,
         [row.message_id, reason, claimId, state],
       );
+    };
     let reason: string | null =
       row.owner_id !== ownerId
         ? 'message_owner_changed'
@@ -1785,12 +1789,22 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
         topicFailure = cause;
         return undefined;
       });
-      if (row.web && !topicId) {
-        if (topicFailure === undefined || topicFailure instanceof MessagingRefusedError) {
-          sendRetry.delete(row.message_id);
-          await block('topic_unavailable', 'sending');
-          return true;
-        }
+      const silent =
+        row.quiet &&
+        !(
+          await pool.query(
+            "SELECT 1 FROM approvals WHERE confirmation_message_id=$1 AND owner_id=$2 AND status='pending'",
+            [row.message_id, ownerId],
+          )
+        ).rowCount;
+      const retryable =
+        topicFailure !== undefined && !(topicFailure instanceof MessagingRefusedError);
+      if (
+        !topicId &&
+        retryable &&
+        Date.now() - new Date(row.created_at).getTime() < 1_800_000 &&
+        (row.web || modes.get(`${row.provider}:${row.account_id}`)?.ownerTopics)
+      ) {
         const tries = (sendRetry.get(row.message_id)?.tries ?? 0) + 1;
         sendRetry.set(row.message_id, {
           at: Date.now() + Math.min(300_000, 15_000 * 2 ** (tries - 1)),
@@ -1804,14 +1818,13 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
         return true;
       }
       sendRetry.delete(row.message_id);
-      const silent =
-        row.quiet &&
-        !(
-          await pool.query(
-            "SELECT 1 FROM approvals WHERE confirmation_message_id=$1 AND owner_id=$2 AND status='pending'",
-            [row.message_id, ownerId],
-          )
-        ).rowCount;
+      if (row.web && !topicId) {
+        await block(
+          !retryable ? 'topic_unavailable' : silent ? 'copy_expired' : 'topic_unreachable',
+          'sending',
+        );
+        return true;
+      }
       const target = row.reply_to_message_id
         ? ((
             await pool.query(
@@ -2017,7 +2030,10 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
   async function mainTopicFor(row: OutboxRow, ownerTopics: boolean, signal: AbortSignal) {
     const main = await mainTopic(row);
     if (main && row.source_topic_id === main) return main;
-    return ownerTopics ? (main ?? (await openMainTopic(row, signal))) : undefined;
+    if (!ownerTopics) return undefined;
+    const topicId = main ?? (await openMainTopic(row, signal));
+    if (!topicId) throw new Error('The Main topic is unavailable.');
+    return topicId;
   }
 
   async function nameTopic(

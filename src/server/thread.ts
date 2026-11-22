@@ -29,6 +29,7 @@ import { cancellationTransaction, pool } from './db.ts';
 import { afterCommit, afterRollback, transaction } from './transaction.ts';
 import {
   laterSupersedingTurnSql,
+  ownerStarted,
   turnChainSql,
   withdrawnSql,
   workKindSql,
@@ -116,7 +117,7 @@ export const stopSignal = () => {
 export const stopSession = (sessionId: string) => sessionStops.set(sessionId, ++stops);
 
 export type TurnSource = 'user' | 'schedule' | 'event' | 'resume' | 'task';
-export const ownerStarted = (turn = 'u') => `${turn}.source IN ('user','task','resume')`;
+export { ownerStarted };
 export interface TurnRef {
   threadId: string;
   turnId: string;

@@ -2,6 +2,8 @@ import type { TurnRef } from './thread.ts';
 
 export const browserOf = (turn: TurnRef) => turn.browserId ?? turn.threadId;
 
+export const ownerStarted = (turn = 'u') => `${turn}.source IN ('user','task','resume')`;
+
 export const taskMessageSql =
   '(t.message_id=m.id OR mt.task_id=t.id OR m.reply_to_message_id=t.message_id OR pt.task_id=t.id)';
 

@@ -7271,10 +7271,17 @@ test(
 
     const createdBefore = created.length;
     gone.add(701);
+    creating = 'busy';
     const lost = await say(await turn(general.channel), 'Synthetic main after delete');
     await service.drain();
-    assert.equal(await outbox(lost), 'pending');
     await service.drain();
+    assert.equal(await outbox(lost), 'pending');
+    never('Synthetic main after delete');
+    creating = 'ok';
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    t.mock.timers.tick(301_000);
+    await service.drain();
+    t.mock.timers.reset();
     assert.equal(created.length, createdBefore + 1);
     assert.deepEqual(created.at(-1), { chat_id: '123456', name: 'Main' });
     const main = newest();
