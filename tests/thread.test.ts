@@ -2454,12 +2454,33 @@ test(
           assert.equal(await hiddenStatus(), 'pending');
           assert.equal(await turnStatus(asked.turnId), 'waiting');
           await waitFor(settled(plain.turnId));
+          const channel = 'telegram:synthetic';
+          for (const other of [
+            {},
+            { shownMessageId: approval.confirmation_message_id },
+            { shownMessageId: started.messageId },
+            { replyToMessageId: started.messageId },
+            { replyToMessageId: approval.confirmation_message_id },
+          ])
+            assert.notEqual(
+              (await chatMessages.answer(consent, { channel, ...other }))?.approvalId,
+              hidden.id,
+            );
+          assert.equal(
+            (
+              await chatMessages.answer(consent, {
+                channel,
+                replyToMessageId: hidden.confirmation_message_id,
+              })
+            )?.approvalId,
+            hidden.id,
+          );
           const answered = await chatMessages.submit(consent, [], {
+            channel,
             replyToMessageId: hidden.confirmation_message_id,
           });
           assert.equal(await hiddenStatus(), 'confirmed');
           await waitFor(settled(answered.turnId));
-          const channel = 'telegram:synthetic';
           const topicAsked = await chatMessages.submit('Synthetic chat approval', [], {
             sessionId: randomUUID(),
             channel,
