@@ -10744,6 +10744,118 @@ test('a check that times out moves to the next model without retrying the same o
   assert.equal(requests.filter(({ model }) => model === 'fixture-backup').length, 1);
 });
 
+test('a turn fallback names each new backup it moves to, and an owner Stop reported as an error never moves on', async () => {
+  const { createTurnFallback } = await import('../src/providers/pi/fallback.ts');
+  const model = (id: string) =>
+    ({
+      provider: 'compatible',
+      id,
+      api: 'openai-completions',
+      input: ['text'],
+      contextWindow: 131_072,
+    }) as never;
+  const reply = (
+    target: { provider: string; id: string; api: string },
+    error?: string,
+    stop?: AbortController,
+  ) => {
+    stop?.abort();
+    const message = {
+      ...fauxAssistantMessage(error ? '' : 'Synthetic answer.'),
+      provider: target.provider,
+      model: target.id,
+      api: target.api,
+      ...(error ? { stopReason: 'error' as const, errorMessage: error } : {}),
+    } as AssistantMessage;
+    const stream = createAssistantMessageEventStream();
+    stream.push(
+      error
+        ? { type: 'error', reason: 'error', error: message }
+        : { type: 'done', reason: 'stop', message },
+    );
+    stream.end(message);
+    return stream;
+  };
+  const busy = '503 Service Unavailable (HTTP 503)';
+  const choice = (id: string): ModelAccess => ({
+    provider: 'compatible',
+    method: 'api_key',
+    effort: 'off',
+    read: async () => undefined,
+    definition: {
+      choice: { id, name: id, efforts: ['off'], images: false, contextWindow: 131_072 },
+      spec: {},
+    },
+  });
+  const setup = (script: Record<string, Array<string | undefined>>, stop?: AbortController) => {
+    const calls: string[] = [];
+    const connection = (id: string) => ({
+      model: model(id),
+      retryAfter: () => 1,
+      runtime: {
+        streamSimple: (target: never) => {
+          calls.push(id);
+          const outcome = script[id]!.shift();
+          return reply(
+            target,
+            outcome === 'stop' ? busy : outcome,
+            outcome === 'stop' ? stop : undefined,
+          );
+        },
+      },
+    });
+    const work = connection('fixture-work');
+    const served: Array<[number, string, number]> = [];
+    const switched: number[] = [];
+    const fallback = createTurnFallback({
+      primary: {
+        access: choice('fixture-work'),
+        connection: work as never,
+        stream: work.runtime.streamSimple as never,
+      },
+      backups: [choice('fixture-first'), choice('fixture-second')],
+      start: 0,
+      automatic: false,
+      connect: async (backup) => connection(backup.definition.choice.id) as never,
+      floor: () => 0,
+      switched: (at) => switched.push(at),
+      served: (at, reason, from) => served.push([at, reason, from]),
+    });
+    const send = (signal?: AbortSignal) =>
+      fallback.stream(work.model, { messages: [] }, signal ? { signal } : undefined).result();
+    return { calls, served, switched, fallback, send };
+  };
+
+  const moving = setup({
+    'fixture-work': [busy, busy],
+    'fixture-first': [undefined, busy, busy],
+    'fixture-second': [undefined],
+  });
+  for (let attempt = 0; attempt < 6; attempt++) await moving.send();
+  assert.deepEqual(moving.calls, [
+    'fixture-work',
+    'fixture-work',
+    'fixture-first',
+    'fixture-first',
+    'fixture-first',
+    'fixture-second',
+  ]);
+  assert.deepEqual(moving.served, [
+    [1, 'busy', 0],
+    [2, 'busy', 1],
+  ]);
+
+  const stop = new AbortController();
+  const stopped = setup({ 'fixture-work': ['stop', undefined] }, stop);
+  const message = await stopped.send(stop.signal);
+  assert.equal(message.stopReason, 'error');
+  assert.equal(stopped.fallback.retries(message), undefined);
+  assert.equal(stopped.fallback.switched(), false);
+  assert.deepEqual(stopped.switched, []);
+  await stopped.send();
+  assert.deepEqual(stopped.calls, ['fixture-work', 'fixture-work']);
+});
+
 test('a backup request uses its own connection timeout, not the work model one', async () => {
   const { createTurnFallback } = await import('../src/providers/pi/fallback.ts');
   const { localModelSilenceMs } = await import('../src/providers/pi/models.ts');
