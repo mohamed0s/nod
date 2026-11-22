@@ -247,7 +247,7 @@ export function ModelSentences() {
             If it’s busy or unavailable, Nod tries{' '}
             {backups.length
               ? backups.map((choice, index) => (
-                  <Fragment key={`${choice.connectionId}:${choice.modelId}`}>
+                  <Fragment key={index}>
                     {index ? ', then ' : ''}
                     <ModelPicker
                       appearance="statement"
