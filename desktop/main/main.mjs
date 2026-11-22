@@ -118,6 +118,7 @@ const developmentDataRoot =
   !app.isPackaged || testInstall ? process.env.NOD_DESKTOP_USER_DATA : undefined;
 if (developmentDataRoot && !isAbsolute(developmentDataRoot))
   throw new Error('The development profile path must be absolute.');
+const watchingSources = !app.isPackaged && !['0', 'false'].includes(process.env.NOD_DESKTOP_WATCH);
 app.setPath(
   'userData',
   developmentDataRoot || join(app.getPath('appData'), testInstall ? 'nod Setup Test' : 'nod'),
@@ -236,6 +237,11 @@ let pendingPreload;
 let stopUpdateChecks;
 let disposeArtifactFiles;
 let closingEngine = false;
+let keepEngineWindows = false;
+let stopSourceWatch;
+let webBuild;
+let webReload;
+const keyboardInput = new WeakMap();
 let tray;
 let engineOrigin = '';
 let engineBound = false;
@@ -1919,7 +1925,7 @@ function stayAwake(working) {
   }
 }
 
-async function stopEngine() {
+async function stopEngine({ graceful = false } = {}) {
   void computerHelper.cancel().catch(() => {});
   stayAwake(false);
   enginePreferencesReady = false;
@@ -1950,7 +1956,8 @@ async function stopEngine() {
       clearTimeout(finalTimeout);
       accept();
     });
-    child.kill();
+    if (graceful) child.postMessage({ type: 'nod-shutdown' });
+    else child.kill();
   });
   if (engine === child) engine = undefined;
   closingEngine = false;
@@ -2530,6 +2537,95 @@ async function restartForUpdate() {
   await quit(installUpdate, undefined, true);
 }
 
+async function restartForSource() {
+  await preparing;
+  if (quitting || remoteConnection || status.phase === 'updating') return { outcome: 'skipped' };
+  if (!engine && status.phase === 'error')
+    return { outcome: 'restarted', status: await prepare({ retry: true }) };
+  if (!engine || !enginePreferencesReady || closingEngine || status.phase !== 'ready')
+    return { outcome: 'skipped' };
+  let running;
+  try {
+    const response = await engineRequest('/api/desktop/status');
+    if (!response.ok) return { outcome: 'waiting', reason: `HTTP ${response.status}` };
+    running = (await response.json()).running;
+  } catch (error) {
+    return { outcome: 'waiting', reason: error.message };
+  }
+  if (!Array.isArray(running)) return { outcome: 'waiting', reason: 'unexpected status' };
+  if (running.length) return { outcome: 'waiting', running: running.length };
+  if (quitting || closingEngine || status.phase !== 'ready') return { outcome: 'skipped' };
+  resumePort = Number(URL.parse(engineOrigin)?.port) || resumePort;
+  keepEngineWindows = true;
+  try {
+    await stopEngine({ graceful: true });
+  } finally {
+    keepEngineWindows = false;
+  }
+  if (quitting) return { outcome: 'skipped' };
+  const restarted = await prepare();
+  if (!engine) {
+    void persistCurrentZoomFactor().catch(
+      (error) => void writeDiagnostic(error.message).catch(() => {}),
+    );
+    for (const window of engineWindows) if (!window.isDestroyed()) window.destroy();
+    engineWindows.clear();
+    void showSettings('general', true);
+  } else
+    for (const window of engineWindows) {
+      if (window.isDestroyed()) continue;
+      const url = URL.parse(window.webContents.getURL());
+      if (engineOrigin && url?.protocol === 'http:' && url.origin !== engineOrigin)
+        void window.loadURL(`${engineOrigin}${url.pathname}${url.search}`).catch(() => {});
+    }
+  return { outcome: 'restarted', status: restarted };
+}
+
+function startWebBuild() {
+  const child = utilityProcess.fork(join(engineRoot, 'desktop', 'scripts', 'web-build.mjs'), [], {
+    cwd: engineRoot,
+    env: {
+      ...Object.fromEntries(
+        Object.entries(baseEnvironment()).filter(([key]) => !/^(?:NOD_|OTEL_|AWS_)/.test(key)),
+      ),
+      NODE_ENV: 'production',
+    },
+    stdio: 'inherit',
+    serviceName: 'Nod web build',
+  });
+  child.on('message', (message) => {
+    if (message?.type === 'nod-web-build-failed')
+      console.error(`Nod: the web app did not build: ${message.message}`);
+    if (message?.type === 'nod-web-built' && message.reload) reloadWebApp();
+  });
+  child.on('exit', (code) => {
+    if (webBuild === child) webBuild = undefined;
+    if (!quitting)
+      console.error(
+        `Nod: the web build stopped (code ${code}). Quit Nod and start it again to keep the web app current.`,
+      );
+  });
+  return child;
+}
+
+function reloadWebApp(wait = 300) {
+  clearTimeout(webReload);
+  webReload = setTimeout(() => {
+    webReload = undefined;
+    const windows = [...engineWindows].filter(
+      (window) => !window.isDestroyed() && !pendingRenderers.has(window),
+    );
+    if (quitting || !windows.length) return;
+    if (!engineBound || closingEngine || status.phase !== 'ready') return reloadWebApp(1000);
+    const typed = Math.max(
+      0,
+      ...windows.map((window) => keyboardInput.get(window.webContents) ?? 0),
+    );
+    if (Date.now() - typed < 2000) return reloadWebApp(2000 - (Date.now() - typed));
+    for (const window of windows) window.webContents.reload();
+  }, wait);
+}
+
 async function rememberState(window) {
   session.fromPartition(clientPartition).flushStorageData();
   const state = JSON.stringify({
@@ -2684,6 +2780,9 @@ async function quit(complete, failure = 'Nod could not finish shutting down.', u
   );
   await zoomPersistence;
   stopUpdateChecks?.();
+  void stopSourceWatch?.();
+  clearTimeout(webReload);
+  webBuild?.kill();
   const stoppingUpdates = updates?.dispose();
   updateReadinessNotice();
   stopNotifications?.();
@@ -2907,7 +3006,7 @@ async function startEngine({ runtime, signal, pending = false }) {
     authToken = '';
     engineRuntimeReady = false;
     update({ engineReady: false });
-    if (status.phase !== 'updating') {
+    if (status.phase !== 'updating' && !keepEngineWindows) {
       void persistCurrentZoomFactor().catch(
         (error) => void writeDiagnostic(error.message).catch(() => {}),
       );
@@ -3243,6 +3342,20 @@ else {
         });
       }
       nativeTheme.on('updated', publishPreferences);
+      if (watchingSources) {
+        app.on('web-contents-created', (_event, contents) =>
+          contents.on('before-input-event', (_input, input) => {
+            if (input.type === 'keyDown') keyboardInput.set(contents, Date.now());
+          }),
+        );
+        webBuild = startWebBuild();
+        void import('../scripts/source-watch.mjs')
+          .then(({ watchSources }) => watchSources({ root: engineRoot, restart: restartForSource }))
+          .then((stop) => {
+            stopSourceWatch = stop;
+          })
+          .catch((error) => console.error(`Nod could not watch its source: ${error.message}`));
+      }
       configureAppSession();
       const image = nativeImage.createFromPath(join(desktopRoot, 'main', 'trayTemplate.png'));
       image.setTemplateImage(true);

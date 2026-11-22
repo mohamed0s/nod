@@ -302,6 +302,7 @@ The packaged engine includes only the packages in `dependencies` and what they d
 | Build a DMG with the runtime inside | `pnpm --dir desktop run build --full`                                                    |
 | Inspect the packaged engine only    | `pnpm --dir desktop run build --stage-only`, then look in `dist/desktop-staging/engine`  |
 | Run the app without packaging       | `pnpm run desktop:dev`                                                                   |
+| Run it without following your edits | `NOD_DESKTOP_WATCH=0 pnpm run desktop:dev`                                               |
 | Replay onboarding                   | `pnpm --dir desktop start --onboarding`                                                  |
 | Use a fresh, throwaway profile      | `NOD_DESKTOP_USER_DATA=/tmp/nod-onboarding-review pnpm --dir desktop start --onboarding` |
 
@@ -325,6 +326,25 @@ Run `pnpm run desktop:windows:prepare` on a Linux x64 Docker builder. Then, on W
 To make the app download its runtime and updates from your own GitHub releases, set `NOD_DESKTOP_UPDATE_REPOSITORY` to `owner/name` for the build. An unsigned build with another repository than `n8n-io/nod` accepts unsigned installers from that repository's releases; see [How installed apps update](/contribute/desktop-releases/#how-installed-apps-update).
 
 </details>
+
+### Edit while it runs
+
+An unpackaged run follows your checkout. Save a file and Nod picks up the change:
+
+| You change                                                                                                                                        | What happens                                                                                                                                                                                                                                                                                          |
+| ------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The web app: `src/web`, `src/shared`, `index.html` or `public`                                                                                    | A separate build process rebuilds `dist/web`, usually within seconds, and the window reloads. If you're typing, the reload waits until you pause. A build error shows in the terminal, and the window keeps the last good build.                                                                      |
+| Anything in `src` outside `src/web`, such as server code, skills and bundled apps                                                                 | Nod restarts its engine on the same address once no reply, task, scheduled run or background check is running. Until then, the terminal says what it's waiting for. The window stays open and shows **Reconnecting…** for a few seconds. Telegram, WhatsApp and schedules pause during those seconds. |
+| The docs in `docs/src/content/docs`                                                                                                               | Nothing restarts. Pi's docs search picks up the change at the next engine restart.                                                                                                                                                                                                                    |
+| The desktop app: `desktop/main`, `desktop/preload`, `desktop/ui` or `desktop/runtime`                                                             | The terminal tells you to quit Nod and start it again.                                                                                                                                                                                                                                                |
+| A file built into the runtime images, such as `Dockerfile.workspace`, `jobs/workspace` or the browser worker in `src/providers/container-browser` | The terminal tells you the runtime is out of date. Prepare a new runtime, then reopen Nod.                                                                                                                                                                                                            |
+| `package.json`, a lockfile or the installed packages                                                                                              | Nothing follows these. Run `pnpm install`, then quit Nod and start it again.                                                                                                                                                                                                                          |
+
+Before a restart, Nod checks that the changed scripts parse. If one doesn't, the engine keeps running the previous version, and the terminal names the file and line. If the new engine can't start, the setup window shows the error, and your next save tries again. If Nod can't check for running work, it keeps waiting; quit Nod and start it again to restart anyway.
+
+The engine serves `dist/web` exactly as a release app does, with the same headers and checks. The build process gets no keys. Rebuilds keep earlier files in `dist/web` so open pages can still load them; `pnpm run build` clears them. If `dist/web` doesn't exist yet, run `pnpm run build` once before the first run.
+
+To turn this off, start the run with `NOD_DESKTOP_WATCH=0`. In PowerShell, run `$env:NOD_DESKTOP_WATCH='0'; pnpm run desktop:dev`. The run then serves whatever `pnpm run build` last wrote to `dist/web`. Packaged apps never watch files.
 
 ## Related resources
 

@@ -91,10 +91,14 @@ process.on('SIGINT', () => {
 process.on('SIGTERM', () => {
   void shutdown();
 });
-if (desktopMode)
+if (desktopMode) {
   process.on('disconnect', () => {
     void shutdown(true);
   });
+  parent?.on('message', (event) => {
+    if ((event.data as { type?: string })?.type === 'nod-shutdown') void shutdown();
+  });
+}
 await app.listen({
   port,
   host,
