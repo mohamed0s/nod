@@ -1239,9 +1239,7 @@ export function createPiAgent(options: {
       const auxiliarySeen = new Set(manager.getEntries().map((entry) => entry.id));
       const usagePricing = (usage: { provider: string; model: string } | undefined) => {
         const target =
-          usage &&
-          (fallback?.model(usage.provider, usage.model) ??
-            runtime.getModel(usage.provider, usage.model));
+          usage && (fallback?.model(usage) ?? runtime.getModel(usage.provider, usage.model));
         return modelPricingSignature(target?.cost, target?.api);
       };
       const observeUsage = createPiUsageTracker({

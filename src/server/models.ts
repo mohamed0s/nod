@@ -1360,7 +1360,14 @@ export function createModelService(options: {
         const row = rows.find((item) => item.id === work.connectionId);
         return (
           requested(row, work.modelId).some((id) => (row?.retry?.[id] ?? 0) > Date.now()) &&
-          backups.every(choicePaused)
+          backups
+            .filter(
+              (choice) =>
+                backup('work', choice) &&
+                `${choice.connectionId}:${choice.modelId}` !==
+                  `${work.connectionId}:${work.modelId}`,
+            )
+            .every(choicePaused)
         );
       } catch {
         return false;
