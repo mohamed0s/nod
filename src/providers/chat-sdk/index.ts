@@ -16,7 +16,11 @@ import type {
 } from '../../ports/messaging.ts';
 import { telegramSecret, telegramUserId } from '../../ports/channel-settings.ts';
 import { logRepeatedFailure } from '../../ports/failure-log.ts';
-import { MessagingConnectionError, MessagingTopicError } from '../../ports/messaging.ts';
+import {
+  MessagingConnectionError,
+  MessagingRefusedError,
+  MessagingTopicError,
+} from '../../ports/messaging.ts';
 import {
   telegramAttachments,
   telegramMessage,
@@ -200,7 +204,8 @@ class Telegram extends TelegramAdapter {
       { signal },
     ).catch((cause: unknown) => {
       this.topicState = undefined;
-      throw cause;
+      const refusal = (cause as { refusal?: unknown } | undefined)?.refusal;
+      throw typeof refusal === 'string' ? new MessagingRefusedError(refusal, { cause }) : cause;
     });
     return String(z.number().int().positive().parse(topic.message_thread_id));
   }

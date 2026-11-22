@@ -4,6 +4,8 @@ export class MessagingConnectionError extends Error {}
 
 export class MessagingTopicError extends Error {}
 
+export class MessagingRefusedError extends Error {}
+
 export class MessagingAttachmentError extends Error {
   constructor(readonly maxBytes: number) {
     super('The channel file is too large.');
