@@ -1012,16 +1012,20 @@ export function createLedger({
       : '';
     const priced = `count(${sampleCost})=count(*) AND (sum(${sampleCost})>0 ${zeroWithTokens})
       AND count(*) FILTER (WHERE ${unpricedZero})=0`;
-    const { rows } = await pool.query<WorkUsage & { recordedUsd: number }>(
-      `WITH recent AS (
-        SELECT m.turn_id FROM model_usage m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
-        WHERE m.owner_id=$1 AND u.status='succeeded' GROUP BY m.turn_id
+    const { rows } = await pool.query<WorkUsage & { recordedUsd: number; work: boolean }>(
+      `WITH priced AS (
+        SELECT m.turn_id,(u.source IN ('task','schedule') OR u.task_id IS NOT NULL) AS work,
+          row_number() OVER (PARTITION BY u.source IN ('task','schedule') OR u.task_id IS NOT NULL
+            ORDER BY max(m.created_at) DESC,m.turn_id DESC) AS position
+        FROM model_usage m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
+        WHERE m.owner_id=$1 AND u.status='succeeded' GROUP BY m.turn_id,u.source,u.task_id
         HAVING ${priced}
-        ORDER BY max(m.created_at) DESC,m.turn_id DESC LIMIT 20
-      ), candidates AS (
-        SELECT turn_id FROM recent UNION ALL SELECT $2::uuid WHERE NOT EXISTS (SELECT 1 FROM recent)
+      ), recent AS (SELECT turn_id,work FROM priced WHERE position<=20),
+      candidates AS (
+        SELECT turn_id,work FROM recent
+        UNION ALL SELECT $2::uuid,false WHERE NOT EXISTS (SELECT 1 FROM recent)
       )
-      SELECT sum(${sampleCost})::float8 AS "recordedUsd",${columns}
+      SELECT sum(${sampleCost})::float8 AS "recordedUsd",bool_or(c.work) AS work,${columns}
       FROM model_usage m JOIN candidates c ON c.turn_id=m.turn_id
       WHERE m.owner_id=$1 GROUP BY m.turn_id
       HAVING ${priced}`,

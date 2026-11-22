@@ -17,7 +17,7 @@ export type AgentReactionResult =
   | { status: 'updated' | 'unchanged' }
   | {
       status: 'skipped';
-      reason: 'cooldown' | 'already_reacted' | 'unavailable' | 'unsupported' | 'delivery_failed';
+      reason: 'already_reacted' | 'unavailable' | 'unsupported' | 'delivery_failed';
     };
 export interface Message {
   id: string;

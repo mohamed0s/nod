@@ -2072,6 +2072,16 @@ test(
             [savedTask, ownerId, taskTurn, anchor],
           );
           await db.pool.query('UPDATE turns SET task_id=$1 WHERE id=$2', [savedTask, taskTurn]);
+          await db.pool.query('UPDATE turns SET outside_action_at=now() WHERE id=$1', [foreground]);
+          const presented: unknown[] = [];
+          const presentBefore = presentInterruption;
+          presentInterruption = async (_threadId, input) => {
+            presented.push(input);
+            return interruptedText;
+          };
+          t.after(() => {
+            presentInterruption = presentBefore;
+          });
           await thread.startThreadWorkers(dependencies);
           await waitFor(async () => (await turnStatus(missingJob)) === 'succeeded');
           assert.deepEqual(ran(missingJob)?.connectedApps, []);
@@ -2089,6 +2099,11 @@ test(
             assert.equal(Boolean(ran(id)), false);
           }
           assert.equal(ran(firstUserTurnId)?.firstConversationTurn, true);
+          const outside = presented.map(
+            (input) => (input as { outsideAction?: boolean }).outsideAction,
+          );
+          assert.equal(outside.filter((value) => value === true).length, 1);
+          assert.ok(outside.filter((value) => value === false).length >= 2);
           const interruptedReplies = async (id: string) =>
             (
               await db.pool.query(
@@ -3781,6 +3796,63 @@ test(
           }
         },
       );
+
+      await t.test('tasks started after more messages arrive keep their own requests', async () => {
+        const prompt = `steer-requests-${randomUUID()}`;
+        const original = dependencies.runTurn;
+        const outcomes: string[] = [];
+        block(prompt);
+        dependencies.runTurn = async (context) => {
+          if (context.prompt !== prompt) return original(context);
+          runs.push(context);
+          await waiting.get(prompt);
+          const [later] = await context.takeMessages!();
+          const start = (request?: string) =>
+            context.task!({
+              action: 'start',
+              title: `Synthetic work for ${request ?? 'an unnamed request'}`,
+              message: 'Starting the synthetic work.',
+              doneWhen: 'Synthetic work is done',
+              now: 'Working',
+              ...(request ? { request } : {}),
+            });
+          for (const request of [undefined, randomUUID()])
+            await start(request).then(
+              () => outcomes.push('started'),
+              (error: Error) => outcomes.push(error.message),
+            );
+          await start(context.currentMessageId);
+          await start(later!.id);
+          return { status: 'succeeded' };
+        };
+        try {
+          const active = await thread.submitUserMessage(prompt, [], { channel: 'web' });
+          await waitFor(() => Boolean(ran(active.turnId)));
+          const later = await thread.submitUserMessage('Synthetic second request', [], {
+            channel: 'web',
+          });
+          release(prompt);
+          await waitFor(settled(active.turnId));
+          assert.deepEqual(outcomes, [
+            'The owner sent several messages during this turn. Set request to the messageId of the one this work serves.',
+            'request must be currentMessageId or the messageId of an owner message sent while you worked.',
+          ]);
+          const { rows } = await db.pool.query<{ source: string; prompt: string }>(
+            `SELECT t.source_message_id::text AS source,u.prompt FROM tasks t
+             JOIN turns u ON u.session_id=t.session_id AND u.source='task'
+             WHERE t.title LIKE 'Synthetic work for %' AND t.source_message_id IN ($1,$2)
+             ORDER BY t.created_at,t.id`,
+            [active.messageId, later.messageId],
+          );
+          assert.deepEqual(rows, [
+            { source: active.messageId, prompt },
+            { source: later.messageId, prompt: 'Synthetic second request' },
+          ]);
+        } finally {
+          release(prompt);
+          dependencies.runTurn = original;
+        }
+      });
 
       await t.test(
         'analytics separate automatic work from owner requests across resumed sessions',

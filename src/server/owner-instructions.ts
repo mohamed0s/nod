@@ -266,35 +266,24 @@ export async function captureOwnerInstructions(
       : users.find((row) => row.can_authorize);
   if (!latest) return undefined;
   const answered = (
-    taskId
-      ? await pool.query<{ id: string; text: string; presentation: unknown }>(
-          `WITH latest AS (SELECT m.id,m.created_at,m.reply_to_message_id,u.channel FROM messages m
-               JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id WHERE m.id=$3 AND m.owner_id=$1),
-             answered AS (SELECT a.id,a.owner_id,a.text,a.presentation,a.turn_id FROM messages a, latest
-               WHERE a.owner_id=$1 AND a.thread_id=$2 AND a.role='assistant' AND (a.text<>'' OR a.presentation IS NOT NULL) AND a.hidden_at IS NULL
-                 AND a.created_at>$5 AND (a.created_at,a.id)<(latest.created_at,latest.id)
-                 AND (a.id=latest.reply_to_message_id OR (latest.reply_to_message_id IS NULL
-                   AND EXISTS (SELECT 1 FROM turns c WHERE c.id=a.turn_id AND c.owner_id=$1 AND c.channel=latest.channel)))
-               ORDER BY a.created_at DESC,a.id DESC LIMIT 1)
-             SELECT id,text,presentation FROM answered WHERE (EXISTS (SELECT 1 FROM turns u WHERE u.owner_id=$1 AND u.id=answered.turn_id AND to_jsonb(u)->>'task_id'=$4::text)
-               OR EXISTS (SELECT 1 FROM tasks t WHERE t.id=$4::uuid AND t.owner_id=$1 AND t.message_id=answered.id))
-               AND NOT ${withdrawnSql('answered')}`,
-          [ownerId, threadId, latest.id, taskId, since],
-        )
-      : await pool.query<{ id: string; text: string; presentation: unknown }>(
-          `WITH latest AS (SELECT m.id,m.created_at,m.reply_to_message_id,u.channel FROM messages m
-               JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
-               WHERE m.id=$3 AND m.owner_id=$1 AND m.thread_id=$2),
-             answered AS (SELECT m.id,m.owner_id,m.turn_id,m.text,m.presentation FROM messages m CROSS JOIN latest
-               WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.role='assistant' AND (m.text<>'' OR m.presentation IS NOT NULL) AND m.hidden_at IS NULL
-                 AND m.created_at>$4 AND (m.created_at,m.id)<(latest.created_at,latest.id)
-                 AND (m.id=latest.reply_to_message_id OR (latest.reply_to_message_id IS NULL
-                   AND EXISTS (SELECT 1 FROM turns c WHERE c.id=m.turn_id AND c.owner_id=$1 AND c.channel=latest.channel)))
-                 AND m.turn_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM turns u WHERE u.owner_id=$1 AND u.id=m.turn_id AND to_jsonb(u)->>'task_id' IS NOT NULL)
-               ORDER BY m.created_at DESC,m.id DESC LIMIT 1)
-             SELECT id,text,presentation FROM answered WHERE NOT ${withdrawnSql('answered')}`,
-          [ownerId, threadId, latest.id, since],
-        )
+    await pool.query<{ id: string; text: string; presentation: unknown }>(
+      `WITH latest AS (SELECT m.id,m.created_at,m.reply_to_message_id,u.channel FROM messages m
+           JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
+           WHERE m.id=$3 AND m.owner_id=$1 AND m.thread_id=$2),
+         answered AS (SELECT m.id,m.owner_id,m.turn_id,m.text,m.presentation FROM messages m CROSS JOIN latest
+           WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.role='assistant' AND (m.text<>'' OR m.presentation IS NOT NULL) AND m.hidden_at IS NULL
+             AND m.created_at>$4 AND (m.created_at,m.id)<(latest.created_at,latest.id)
+             AND (m.id=latest.reply_to_message_id OR (latest.reply_to_message_id IS NULL
+               AND EXISTS (SELECT 1 FROM turns c WHERE c.id=m.turn_id AND c.owner_id=$1 AND c.channel=latest.channel)))
+             AND m.turn_id IS NOT NULL
+           ORDER BY m.created_at DESC,m.id DESC LIMIT 1)
+         SELECT id,text,presentation FROM answered WHERE NOT ${withdrawnSql('answered')}
+           AND ($5::uuid IS NULL
+             OR EXISTS (SELECT 1 FROM turns u WHERE u.owner_id=$1 AND u.id=answered.turn_id AND to_jsonb(u)->>'task_id'=$5::text)
+             OR EXISTS (SELECT 1 FROM tasks t WHERE t.id=$5::uuid AND t.owner_id=$1
+               AND (t.message_id=answered.id OR t.source_message_id=$3::uuid)))`,
+      [ownerId, threadId, latest.id, since, taskId],
+    )
   ).rows[0];
   const visual = answered && presentationSchema.safeParse(answered.presentation);
   const before = answered && {

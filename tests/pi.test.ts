@@ -1,4 +1,4 @@
-import type { ModelSelection } from '../src/shared/models.ts';
+import { lightestEffort, type ModelSelection } from '../src/shared/models.ts';
 import type { Context } from '@earendil-works/pi-ai';
 import type { ModelAccess } from '../src/ports/models.ts';
 import { createPiModelBackend, createPiModelRuntime } from '../src/providers/pi/models.ts';
@@ -12657,12 +12657,12 @@ test('OpenRouter free routing can prepare a task when reasoning cannot be disabl
   assert.equal(calls, 1);
 });
 
-test('Ollama models with on or off thinking complete tasks without a named effort', async (t) => {
+test('new and saved Ollama models keep the effort value the server reads', async (t) => {
   const original = globalThis.fetch;
   t.after(() => (globalThis.fetch = original));
   for (const thinking of [undefined, { values: [false, true] }, { values: [true] }]) {
     const onlyOn = thinking?.values.length === 1;
-    const enabled: Array<boolean | undefined> = [];
+    const efforts: Array<string | undefined> = [];
     globalThis.fetch = async (input, init) => {
       const request = new Request(input, init);
       const path = new URL(request.url).pathname;
@@ -12676,10 +12676,14 @@ test('Ollama models with on or off thinking complete tasks without a named effor
           thinking,
         });
       assert.equal(path, '/v1/chat/completions');
-      const body = (await request.json()) as { reasoning_effort?: string; think?: boolean };
-      assert.equal(body.reasoning_effort, undefined);
-      assert.equal(typeof body.think, thinking ? 'boolean' : 'undefined');
-      enabled.push(body.think);
+      const body = (await request.json()) as { reasoning_effort?: string; think?: unknown };
+      assert.equal(body.think, undefined);
+      efforts.push(body.reasoning_effort);
+      if (body.reasoning_effort === 'true')
+        return Response.json(
+          { error: { message: 'invalid reasoning value: "true"' } },
+          { status: 400 },
+        );
       return reply({ role: 'assistant', content: 'The synthetic task is complete.' });
     };
     const credential = { type: 'endpoint' as const, url: 'http://127.0.0.1:1/v1' };
@@ -12689,22 +12693,82 @@ test('Ollama models with on or off thinking complete tasks without a named effor
       definition.choice.efforts,
       thinking ? (onlyOn ? ['high'] : ['off', 'high']) : ['off'],
     );
-    const { runtime, model } = await createPiModelRuntime({
+    for (const saved of thinking ? [false, true] : [false]) {
+      const loaded = structuredClone(definition);
+      if (saved) (loaded.spec.thinkingLevelMap as Record<string, unknown>).high = 'true';
+      const { runtime, model } = await createPiModelRuntime({
+        provider: 'compatible',
+        method: 'api_key',
+        definition: loaded,
+        effort: 'high',
+        read: async () => credential,
+      });
+      for (const reasoning of ['high', 'off'] as const) {
+        const result = await runtime.completeSimple(
+          model,
+          { messages: [{ role: 'user', content: 'Finish the synthetic task.', timestamp: 1 }] },
+          { reasoning: reasoning === 'off' ? undefined : reasoning },
+        );
+        assert.equal(result.stopReason, 'stop');
+      }
+      assert.deepEqual(
+        efforts.splice(0),
+        !thinking ? [undefined, undefined] : onlyOn ? ['high', undefined] : ['high', 'none'],
+      );
+    }
+  }
+});
+
+test('selected-model checks use the lightest advertised Ollama effort without retrying', async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => (globalThis.fetch = original));
+  for (const values of [[false, true], [true]]) {
+    const efforts: Array<string | undefined> = [];
+    globalThis.fetch = async (input, init) => {
+      const request = new Request(input, init);
+      const path = new URL(request.url).pathname;
+      if (path === '/v1/models') return Response.json({ data: [{ id: 'qwen3:8b' }] });
+      if (path === '/api/version') return Response.json({ version: '0.40.16' });
+      if (path === '/api/v1/models') return new Response(null, { status: 404 });
+      if (path === '/api/show')
+        return Response.json({
+          capabilities: ['completion', 'tools', 'thinking'],
+          model_info: { 'qwen3.context_length': 65536 },
+          thinking: { values, default: true },
+        });
+      assert.equal(path, '/v1/chat/completions');
+      const body = (await request.json()) as { reasoning_effort?: string };
+      efforts.push(body.reasoning_effort);
+      return body.reasoning_effort === 'none'
+        ? reply({ role: 'assistant', content: '{"ok":true}' })
+        : reply({ role: 'assistant', content: '' }, 'length');
+    };
+    const credential = { type: 'endpoint' as const, url: 'http://127.0.0.1:1/v1' };
+    const [definition] = await createPiModelBackend({ fetch: globalThis.fetch }).catalog(
+      'compatible',
+      'api_key',
+      credential,
+    );
+    const canDisable = values.includes(false);
+    assert.deepEqual(definition.choice.efforts, canDisable ? ['off', 'high'] : ['high']);
+    const selected: ModelAccess = {
       provider: 'compatible',
       method: 'api_key',
       definition,
-      effort: 'high',
+      effort: lightestEffort(definition.choice.efforts),
       read: async () => credential,
+    };
+    const curator = createPiMemoryCurator({
+      provider: 'compatible',
+      resolve: async () => selected,
     });
-    for (const reasoning of ['high', 'off'] as const) {
-      const result = await runtime.completeSimple(
-        model,
-        { messages: [{ role: 'user', content: 'Finish the synthetic task.', timestamp: 1 }] },
-        { reasoning: reasoning === 'off' ? undefined : reasoning },
-      );
-      assert.equal(result.stopReason, 'stop');
-    }
-    assert.deepEqual(enabled, thinking ? [true, onlyOn] : [undefined, undefined]);
+    const result = curator.curate(
+      { task: 'check', instructions: 'Return only {"ok":true}.', input: {}, automatic: false },
+      AbortSignal.timeout(30_000),
+    );
+    if (canDisable) assert.deepEqual(await result, { ok: true });
+    else await assert.rejects(result, /The reply stopped at the token limit/);
+    assert.deepEqual(efforts, [canDisable ? 'none' : 'high']);
   }
 });
 

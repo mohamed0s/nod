@@ -378,6 +378,19 @@ test(
           await expectMonthly(0.01);
           pricing = { ...original, input: 2.2 };
           await expectMonthly((1.94 + 0.24) / 2);
+
+          const taskTurn = await thread.enqueueTurn('Synthetic task sample', {
+            source: 'task',
+            background: true,
+          });
+          sampleTurns.push(taskTurn);
+          await db.pool.query("UPDATE turns SET status='succeeded' WHERE id=$1", [taskTurn]);
+          await db.pool.query(
+            `INSERT INTO model_usage(id,owner_id,turn_id,cost_usd,details)
+             VALUES($1,$2,$3,0.1,'{"category":"agent","inputTokens":50000}')`,
+            [randomUUID(), ownerId, taskTurn],
+          );
+          await expectMonthly(0.11);
         } finally {
           await request('DELETE', `/api/schedules/${schedule.id}`);
           await db.pool.query('DELETE FROM model_usage WHERE turn_id=ANY($1::uuid[])', [
