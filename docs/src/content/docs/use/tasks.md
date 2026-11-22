@@ -152,7 +152,7 @@ The task list sends one message per task. You can reply to that message, the tas
 
 A status message that shows a pending question keeps a link to that exact question. Your approval applies only to the saved action it shows. An old status message cannot approve a later action.
 
-With [Telegram topics](/use/channels/#telegram-topics) on, each task has its own topic. Its messages, questions, approvals, files and result arrive there. The main chat stays in General, or in a topic named **Main** when BotFather lets you create topics. Anything you write in the topic goes to that task, without the Reply control, and `/status` or `/stop` there applies to that task only. A topic you start yourself becomes a new chat. A task started inside a scheduled run stays with that run.
+With [Telegram topics](/use/channels/#telegram-topics) on, each task has its own topic, including chats you start in the web app. Its messages, questions, approvals, files and result arrive there. The main chat stays in General, or in a topic named **Main** when BotFather lets you create topics. Anything you write in the topic goes to that task, without the Reply control, and `/status` or `/stop` there applies to that task only. A topic you start yourself becomes a new chat. A task started inside a scheduled run stays with that run.
 
 Telegram, WhatsApp and web use the same task record and saved session. Task commands do not grant permission for an outside action. Private sign-in and payment steps still use Nod's private forms.
 

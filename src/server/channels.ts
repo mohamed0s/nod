@@ -180,6 +180,8 @@ interface OutboxRow extends ChannelIdentity {
   answer_choices: unknown;
   answer_choices_pending: boolean;
   browser_handoff: boolean;
+  web: boolean;
+  quiet: boolean;
 }
 const messageSchema = z
   .object({
@@ -1382,6 +1384,29 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       ON CONFLICT(message_id) DO NOTHING`,
       [ownerId],
     );
+    if (!transport.topics) return;
+    const mirrored = `FROM messages m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
+      WHERE m.owner_id=$1 AND m.created_at>now()-interval '10 minutes' AND m.role='assistant'
+        AND m.hidden_at IS NULL AND u.channel='web' AND to_jsonb(u)->>'task_id' IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM channel_outbox q WHERE q.message_id=m.id)`;
+    if (!(await pool.query(`SELECT 1 ${mirrored} LIMIT 1`, [ownerId])).rowCount) return;
+    const signal = AbortSignal.any([receiving.signal, AbortSignal.timeout(30_000)]);
+    for (const route of await routes()) {
+      const mode = await topicMode(route, signal).catch((cause: unknown) => {
+        logRepeatedFailure('channel_topic_failed', route.provider, cause, {
+          provider: route.provider,
+        });
+      });
+      if (!mode?.enabled) continue;
+      await pool.query(
+        `INSERT INTO channel_outbox(message_id,source_id) SELECT m.id,$2 ${mirrored}
+           AND EXISTS (SELECT 1 FROM tasks t WHERE t.id=(to_jsonb(u)->>'task_id')::uuid
+             AND t.owner_id=u.owner_id AND t.session_id=t.id)
+         ON CONFLICT(message_id) DO NOTHING`,
+        [ownerId, route.source_id],
+      );
+      return;
+    }
   }
 
   async function routes() {
@@ -1473,12 +1498,20 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     const result = await pool.query<OutboxRow>(
       `WITH claimed AS (
       UPDATE channel_outbox SET state='preparing',claim_id=$2,updated_at=now() WHERE message_id=(
-        SELECT o.message_id FROM channel_outbox o JOIN channel_inbox i ON i.source_id=o.source_id JOIN messages m ON m.id=o.message_id WHERE o.state='pending' AND i.owner_id=$1 AND m.owner_id=$1 AND NOT(i.provider=ANY($3::text[])) ORDER BY m.created_at,m.id FOR UPDATE OF o SKIP LOCKED LIMIT 1
+        SELECT o.message_id FROM channel_outbox o JOIN channel_inbox i ON i.source_id=o.source_id JOIN messages m ON m.id=o.message_id WHERE o.state='pending' AND i.owner_id=$1 AND m.owner_id=$1 AND NOT(i.provider=ANY($3::text[]))
+          AND NOT EXISTS (SELECT 1 FROM turns u WHERE u.id=m.turn_id AND u.owner_id=m.owner_id AND u.channel='web'
+            AND u.status IN ('queued','running') AND m.created_at>now()-interval '15 seconds'
+            AND NOT EXISTS (SELECT 1 FROM messages n WHERE n.turn_id=u.id AND n.owner_id=u.owner_id AND n.role='assistant' AND (n.created_at,n.id)>(m.created_at,m.id)))
+          ORDER BY m.created_at,m.id FOR UPDATE OF o SKIP LOCKED LIMIT 1
       ) RETURNING message_id,source_id,presentation
     ) SELECT c.message_id,m.owner_id,m.thread_id AS message_thread_id,i.provider,i.account_id,i.sender_id,i.thread_id,i.topic_id AS source_topic_id,m.turn_id,
       (SELECT to_jsonb(u)->>'task_id' FROM turns u WHERE u.id=m.turn_id AND u.owner_id=m.owner_id) AS task_id,m.text,m.attachments,m.reply_to_message_id,c.presentation,m.presentation AS message_presentation,m.answer_choices,(${pendingAnswerChoicesSql}) AS answer_choices_pending,
       EXISTS (SELECT 1 FROM turns u WHERE u.id=m.turn_id AND u.owner_id=m.owner_id AND u.handoff_browser_id IS NOT NULL
-        AND m.id=(SELECT id FROM messages WHERE turn_id=u.id AND owner_id=u.owner_id AND role='assistant' ORDER BY created_at DESC,id DESC LIMIT 1)) AS browser_handoff
+        AND m.id=(SELECT id FROM messages WHERE turn_id=u.id AND owner_id=u.owner_id AND role='assistant' ORDER BY created_at DESC,id DESC LIMIT 1)) AS browser_handoff,
+      EXISTS (SELECT 1 FROM turns u WHERE u.id=m.turn_id AND u.owner_id=m.owner_id AND u.channel='web') AS web,
+      EXISTS (SELECT 1 FROM turns u WHERE u.id=m.turn_id AND u.owner_id=m.owner_id AND u.channel='web'
+        AND (u.status IN ('queued','running') OR EXISTS (SELECT 1 FROM messages n WHERE n.turn_id=u.id AND n.owner_id=u.owner_id
+          AND n.role='assistant' AND (n.created_at,n.id)>(m.created_at,m.id)))) AS quiet
       FROM claimed c JOIN channel_inbox i ON i.source_id=c.source_id JOIN messages m ON m.id=c.message_id`,
       [ownerId, claimId, unavailable],
     );
@@ -1649,6 +1682,18 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
         logFailure('channel_topic_failed', cause);
         return undefined;
       });
+      if (row.web && !topicId) {
+        await block('topic_unavailable', 'sending');
+        return true;
+      }
+      const silent =
+        row.quiet &&
+        !(
+          await pool.query(
+            "SELECT 1 FROM approvals WHERE confirmation_message_id=$1 AND owner_id=$2 AND status='pending'",
+            [row.message_id, ownerId],
+          )
+        ).rowCount;
       const target = row.reply_to_message_id
         ? ((
             await pool.query(
@@ -1686,6 +1731,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
           accountId: row.account_id,
           threadId: row.thread_id,
           ...(topicId ? { topicId } : {}),
+          ...(silent ? { silent } : {}),
           text,
           ...(approval
             ? {
@@ -1816,7 +1862,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
         )
       : undefined;
     const found = task?.rows[0];
-    if (!found) return mainTopicFor(row, mode.ownerTopics, target.signal);
+    if (!found) return row.web ? undefined : mainTopicFor(row, mode.ownerTopics, target.signal);
     if (found.topic_id) {
       if (found.name !== found.title)
         await nameTopic(row, found.topic_id, found.title, found.name === null, target.signal);

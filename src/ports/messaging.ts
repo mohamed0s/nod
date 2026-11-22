@@ -116,6 +116,7 @@ export interface MessagingTransport {
     attachments?: MessagingAttachment[];
     replyToMessageId?: string;
     replyToText?: string;
+    silent?: boolean;
     attachmentFailure?: (files: { name: string; reason?: string }[]) => Promise<string | undefined>;
   }): Promise<{ id: string; ids?: string[]; approvalButtons?: true }>;
   topics?(input: {
