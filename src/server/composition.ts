@@ -509,7 +509,7 @@ export function createDefaultAdapters(
     },
     models,
     agent: createPiAgent({
-      resolve: (choice) => models.resolve(false, choice),
+      resolve: (choice) => models.candidates(choice),
       provider,
       model,
       sessionRoot: join(dataRoot, 'sessions'),

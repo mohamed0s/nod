@@ -35,13 +35,14 @@ import {
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
 import { createPiModelRuntime, localModelSilenceMs } from './models.ts';
+import { createTurnFallback, modelKey } from './fallback.ts';
 import { modelContext } from './context.ts';
 import { createContextOutput, toolOutputReference } from './context-output.ts';
 import { audioContext, audioEntries, audioMessage, readsNativeAudio } from './audio.ts';
 import { piModelTrace } from './traces.ts';
 import type { ModelTraces } from '../../ports/traces.ts';
-import type { ModelAccess } from '../../ports/models.ts';
-import type { Agent } from '../../ports/agent.ts';
+import { ModelPausedError, type ModelAccess } from '../../ports/models.ts';
+import type { Agent, AgentEvent } from '../../ports/agent.ts';
 import {
   closeInterruptedCalls,
   completeAssistantMessage,
@@ -444,9 +445,25 @@ function completeAssistantMessages(pi: ExtensionAPI) {
 
 const tokenRateLimit = /\b(?:tokens? per (?:minute|day)|[tr]p[md])\b/i;
 
+function planBilled(event: AgentEvent): AgentEvent {
+  return event.type === 'model_usage'
+    ? { ...event, costUsd: null, estimateUsd: event.costUsd, costSource: 'unavailable' }
+    : event.type === 'provider_usage'
+      ? {
+          ...event,
+          usage: {
+            ...event.usage,
+            costUsd: null,
+            estimateUsd: event.usage.costUsd,
+            pricing: 'unavailable',
+          },
+        }
+      : event;
+}
+
 export function createPiAgent(options: {
   provider: string;
-  resolve?: (choice?: ModelSelection) => Promise<ModelAccess>;
+  resolve?: (choice?: ModelSelection) => Promise<ModelAccess | ModelAccess[]>;
   model?: string;
   apiKey?: string;
   sessionRoot: string;
@@ -461,41 +478,51 @@ export function createPiAgent(options: {
   >();
   let disposed = false;
   const warming = new Map<string, () => Promise<void>>();
+  const turnModels = new Map<string, string>();
   return {
     async open(input) {
       if (disposed) throw new Error('The agent service has stopped.');
-      const access = await options.resolve?.(input.model);
-      if (input.automatic)
-        await access?.prepareRequest?.(
-          access.textModel?.definition.choice.id ?? access.definition.choice.id,
-          true,
-        );
+      const resolved = await options.resolve?.(input.model);
+      const [access, ...backups] = resolved === undefined ? [] : [resolved].flat();
+      const chain = access ? [access, ...backups] : [];
+      const shared = turnModels.get(input.turnId);
+      let start = Math.max(
+        0,
+        chain.findIndex((item) => modelKey(item) === shared),
+      );
+      if (input.automatic && access) {
+        let paused: unknown;
+        for (; start < chain.length; start++) {
+          const item = chain[start]!;
+          try {
+            await item.prepareRequest?.(
+              item.textModel?.definition.choice.id ?? item.definition.choice.id,
+              true,
+            );
+            break;
+          } catch (error) {
+            paused ??= error;
+            if (!(error instanceof ModelPausedError)) throw error;
+          }
+        }
+        if (start >= chain.length) throw paused;
+      }
       if (!access && !options.apiKey)
         throw new Error('Configure the selected model provider to enable the assistant.');
-      if (access?.method === 'subscription') {
+      let billing = (_provider: string, _model: string) => access?.method;
+      if (chain.some((item) => item.method === 'subscription')) {
         const observe = input.onEvent;
         input = {
           ...input,
           onEvent: (event) =>
             observe(
-              event.type === 'model_usage'
-                ? {
-                    ...event,
-                    costUsd: null,
-                    estimateUsd: event.costUsd,
-                    costSource: 'unavailable',
-                  }
+              (event.type === 'model_usage'
+                ? billing(event.provider, event.model)
                 : event.type === 'provider_usage'
-                  ? {
-                      ...event,
-                      usage: {
-                        ...event.usage,
-                        costUsd: null,
-                        estimateUsd: event.usage.costUsd,
-                        pricing: 'unavailable',
-                      },
-                    }
-                  : event,
+                  ? billing(event.usage.provider, event.usage.model ?? '')
+                  : undefined) === 'subscription'
+                ? planBilled(event)
+                : event,
             ),
         };
       }
@@ -505,34 +532,34 @@ export function createPiAgent(options: {
       await warming.get(directory)?.();
       await mkdir(directory, { recursive: true, mode: 0o700 });
       const traces = options.traces;
+      const runtimeOptions: Parameters<typeof createPiModelRuntime>[1] = {
+        automatic: input.automatic,
+        trace:
+          traces &&
+          ((call) => {
+            if (traces.active())
+              traces.record(
+                piModelTrace(
+                  call,
+                  {
+                    source: 'agent',
+                    session_id: input.sessionId,
+                    turn_id: input.turnId,
+                    run_id: input.runId,
+                    ...(input.parentRunId ? { parent_run_id: input.parentRunId } : {}),
+                  },
+                  input.ownerContext,
+                ),
+              );
+          }),
+        reportCacheUsage: (usage) =>
+          input.onEvent({
+            type: 'provider_usage',
+            usage: { ...usage, turnId: input.turnId },
+          }),
+      };
       const connection = access
-        ? await createPiModelRuntime(access, {
-            automatic: input.automatic,
-            trace:
-              traces &&
-              ((call) => {
-                if (traces.active())
-                  traces.record(
-                    piModelTrace(
-                      call,
-                      {
-                        source: 'agent',
-                        session_id: input.sessionId,
-                        turn_id: input.turnId,
-                        run_id: input.runId,
-                        ...(input.parentRunId ? { parent_run_id: input.parentRunId } : {}),
-                      },
-                      input.ownerContext,
-                    ),
-                  );
-              }),
-            readAudio: input.readAudio,
-            reportCacheUsage: (usage) =>
-              input.onEvent({
-                type: 'provider_usage',
-                usage: { ...usage, turnId: input.turnId },
-              }),
-          })
+        ? await createPiModelRuntime(access, { ...runtimeOptions, readAudio: input.readAudio })
         : undefined;
       const runtime = connection
         ? connection.runtime
@@ -661,6 +688,40 @@ export function createPiAgent(options: {
         const stream = runtime.streamSimple.bind(runtime);
         runtime.streamSimple = (target, context, options) =>
           stream(target, context, { ...options, cacheRetention: 'long' });
+      }
+      const fallback =
+        access && connection && backups.length
+          ? createTurnFallback({
+              primary: { access, connection, stream: runtime.streamSimple.bind(runtime) },
+              backups,
+              start,
+              automatic: Boolean(input.automatic),
+              connect: (backup) => createPiModelRuntime(backup, runtimeOptions),
+              floor: () =>
+                Math.max(
+                  0,
+                  chain.findIndex((item) => modelKey(item) === turnModels.get(input.turnId)),
+                ),
+              switched: (at) => turnModels.set(input.turnId, modelKey(chain[at]!)),
+              retrying: () => {
+                const retry = settings.getRetrySettings();
+                return retry.enabled && session.retryAttempt < retry.maxRetries;
+              },
+              served: (at, from) =>
+                input.onEvent({
+                  type: 'fallback',
+                  from: chain[from]!.definition.choice.name,
+                  to: chain[at]!.definition.choice.name,
+                }),
+              failed: (message) => {
+                const usage = observeUsage(message);
+                if (usage) input.onEvent({ ...usage, pricingSignature: usagePricing(message) });
+              },
+            })
+          : undefined;
+      if (fallback) {
+        runtime.streamSimple = fallback.stream;
+        billing = fallback.method;
       }
       if (restart)
         manager.appendCompaction(
@@ -912,6 +973,7 @@ export function createPiAgent(options: {
             }),
           (pi: ExtensionAPI) =>
             pi.on('cache_warming_decision', async () => {
+              if (fallback?.switched()) return { action: 'stop' as const };
               try {
                 await access?.prepareRequest?.(connection?.textModel?.id ?? model.id, true);
               } catch {
@@ -1165,7 +1227,10 @@ export function createPiAgent(options: {
         { id: string; started: number; error?: string; requests: AssistantMessage[] } | undefined;
       const auxiliarySeen = new Set(manager.getEntries().map((entry) => entry.id));
       const usagePricing = (usage: { provider: string; model: string } | undefined) => {
-        const target = usage && runtime.getModel(usage.provider, usage.model);
+        const target =
+          usage &&
+          (fallback?.model(usage.provider, usage.model) ??
+            runtime.getModel(usage.provider, usage.model));
         return modelPricingSignature(target?.cost, target?.api);
       };
       const observeUsage = createPiUsageTracker({
@@ -1244,7 +1309,7 @@ export function createPiAgent(options: {
         if (event.type === 'auto_retry_start')
           input.onEvent({
             type: 'retry',
-            model: (session.model ?? model).name,
+            model: fallback?.current() ?? (session.model ?? model).name,
             attempt: event.attempt,
             attempts: event.maxAttempts,
           });
@@ -1296,7 +1361,9 @@ export function createPiAgent(options: {
           if (event.message.stopReason === 'error')
             input.onEvent({
               type: 'error',
-              message: `${event.message.provider} / ${event.message.model}: ${event.message.errorMessage?.trim() || 'The provider gave no reason.'}`,
+              message:
+                fallback?.describe(event.message) ??
+                `${event.message.provider} / ${event.message.model}: ${event.message.errorMessage?.trim() || 'The provider gave no reason.'}`,
               ...(overflow ? { contextExhausted: true } : {}),
             });
           if (event.message.stopReason === 'stop') {
@@ -1335,6 +1402,7 @@ export function createPiAgent(options: {
         active.delete(session);
       };
       const dispose = async () => {
+        if (!input.parentRunId) turnModels.delete(input.turnId);
         if (disposed || !input.keepWarm || session.cacheWarmingStatus?.state === 'inactive')
           return close();
         idle = true;

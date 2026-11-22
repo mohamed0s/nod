@@ -11,6 +11,7 @@ import type {
 import {
   ModelAuthError,
   ModelCatalogError,
+  ModelPausedError,
   ModelWorkspaceSelectionError,
 } from '../ports/models.ts';
 import { ModelRequestError } from '../ports/agent.ts';
@@ -534,7 +535,7 @@ export function createModelService(options: {
           ),
         ).get(modelId);
         if (automatic && failure && Date.now() < failure.retryAt)
-          throw new ConnectionError(
+          throw new ModelPausedError(
             `${modelProviderNames[row.provider]} failed the last request to ${modelId} (${failure.reason}). Automatic requests to this model are paused until a request succeeds. Check this connection in ${appPages['/settings/models']} or ask again to make a new request.`,
           );
         return async (error, status) => {
@@ -1215,8 +1216,18 @@ export function createModelService(options: {
     paused(origin: WorkOrigin) {
       try {
         const { selection: work } = service.workModel(origin);
-        const row = rows.find((item) => item.id === work.connectionId);
-        return requested(row, work.modelId).some((id) => (row?.retry?.[id] ?? 0) > Date.now());
+        const paused = (choice: ModelSelection) => {
+          const row = rows.find((item) => item.id === choice.connectionId);
+          return requested(row, choice.modelId).some((id) => (row?.retry?.[id] ?? 0) > Date.now());
+        };
+        return (
+          paused(work) &&
+          backups.every(
+            (choice) =>
+              rows.find((item) => item.id === choice.connectionId)?.status !== 'connected' ||
+              paused(choice),
+          )
+        );
       } catch {
         return false;
       }
@@ -1224,14 +1235,26 @@ export function createModelService(options: {
     async automaticRequestsAllowed(origin: WorkOrigin, auxiliary = false) {
       try {
         const work = service.workModel(origin);
-        for (const access of [
-          await service.resolve(false, work.selection),
-          ...(auxiliary ? [await service.resolve(true)] : []),
+        for (const group of [
+          await service.candidates(work.selection),
+          ...(auxiliary ? [[await service.resolve(true)]] : []),
         ]) {
-          await access.prepareRequest?.(
-            access.textModel?.definition.choice.id ?? access.definition.choice.id,
-            true,
-          );
+          let allowed = false;
+          for (const access of group) {
+            allowed = await Promise.resolve()
+              .then(() =>
+                access.prepareRequest?.(
+                  access.textModel?.definition.choice.id ?? access.definition.choice.id,
+                  true,
+                ),
+              )
+              .then(
+                () => true,
+                () => false,
+              );
+            if (allowed) break;
+          }
+          if (!allowed) return false;
         }
         return true;
       } catch {

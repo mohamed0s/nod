@@ -1,3 +1,4 @@
+import { ModelRequestError } from './agent.ts';
 import type {
   ModelChoice,
   ModelProvider,
@@ -33,6 +34,8 @@ export class ModelAuthError extends Error {
     super(message, options);
   }
 }
+
+export class ModelPausedError extends ModelRequestError {}
 
 export class ModelWorkspaceSelectionError extends ModelAuthError {
   constructor(readonly workspaces: ModelWorkspace[]) {

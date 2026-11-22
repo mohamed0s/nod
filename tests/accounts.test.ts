@@ -4341,6 +4341,8 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
       false,
     );
     await assert.rejects(curator.curate(request), /Automatic requests to this model are paused/);
+    const { ModelPausedError } = await import('../src/ports/models.ts');
+    await assert.rejects(curator.curate(request), ModelPausedError);
     assert.equal(calls, 2);
     const ledger = createLedger({
       pool: { query: async () => ({ rows: [] }) } as never,
