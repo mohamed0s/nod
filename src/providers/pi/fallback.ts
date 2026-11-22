@@ -19,7 +19,7 @@ import {
   type ModelUnavailable,
 } from '../../shared/model-fallback.ts';
 import type { createPiModelRuntime } from './models.ts';
-import { readsNativeAudio } from './audio.ts';
+import { hasNativeAudio, readsNativeAudio } from './audio.ts';
 
 type Connection = Awaited<ReturnType<typeof createPiModelRuntime>>;
 type Stream = Connection['runtime']['streamSimple'];
@@ -81,6 +81,7 @@ export function createTurnFallback(options: {
   let at = Math.min(options.start, candidates.length - 1);
   let failures = 0;
   const handled = new WeakSet<AssistantMessage>();
+  const served = new WeakMap<object, Model<Api>>();
   const unsent = new WeakSet<AssistantMessage>();
   let wait = 0;
   let exhausted = false;
@@ -186,7 +187,7 @@ export function createTurnFallback(options: {
       if (
         (streamOptions?.maxTokens === 1 && streamOptions.maxRetries === 0) ||
         target.api === 'pi-virtual' ||
-        readsNativeAudio(target)
+        (readsNativeAudio(target) && hasNativeAudio(context))
       )
         return options.primary.stream(target, context, streamOptions);
       const out = createAssistantMessageEventStream();
@@ -194,6 +195,7 @@ export function createTurnFallback(options: {
       let model = target;
       let settled = false;
       const finish = (message: AssistantMessage) => {
+        served.set(message, model);
         if (streamOptions?.signal?.aborted) return;
         handled.add(message);
         if (settled) return;
@@ -254,13 +256,15 @@ export function createTurnFallback(options: {
       });
       return candidates[index ?? at]!.access.method;
     },
-    model(provider: string, id: string) {
+    model(usage: { provider: string; model: string }) {
+      const exact = served.get(usage);
+      if (exact) return exact;
       for (const index of new Set([at, ...ready.keys()])) {
-        const served = ready.get(index)?.model;
-        if (served?.provider === provider && served.id === id) return served;
+        const current = ready.get(index)?.model;
+        if (current?.provider === usage.provider && current.id === usage.model) return current;
       }
       for (const connection of ready.values()) {
-        const listed = connection.runtime.getModel(provider, id);
+        const listed = connection.runtime.getModel(usage.provider, usage.model);
         if (listed) return listed;
       }
       return undefined;
