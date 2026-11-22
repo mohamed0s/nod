@@ -32,8 +32,7 @@ export interface ModelState {
   selection: ModelSelection | null;
   selectionSet: boolean;
   routes: ModelRoutes;
-  backups: ModelSelection[] | null;
-  backupsSuggested: boolean;
+  backups: ModelSelection[];
   hostId: string;
 }
 
@@ -78,10 +77,9 @@ export function createDatabaseModelStore(options: {
         selection_set: boolean;
         routes: ModelRoutes | null;
         backups: ModelSelection[] | null;
-        backups_suggested: boolean;
         host_id: string;
       }>(
-        'SELECT selection,selection_set,routes,backups,backups_suggested,host_id FROM model_settings WHERE owner_id=$1',
+        'SELECT selection,selection_set,routes,backups,host_id FROM model_settings WHERE owner_id=$1',
         [ownerId],
       )
     ).rows[0];
@@ -90,8 +88,7 @@ export function createDatabaseModelStore(options: {
       selection: settings?.selection ?? null,
       selectionSet: settings?.selection_set ?? false,
       routes: settings?.routes ?? {},
-      backups: settings?.backups ?? null,
-      backupsSuggested: settings?.backups_suggested ?? false,
+      backups: settings?.backups ?? [],
       hostId: settings.host_id,
     };
   }
@@ -108,8 +105,7 @@ export function createDatabaseModelStore(options: {
         CREATE TABLE IF NOT EXISTS model_settings(owner_id text PRIMARY KEY,selection jsonb,selection_set boolean NOT NULL DEFAULT false);
         ALTER TABLE model_settings ADD COLUMN IF NOT EXISTS host_id uuid NOT NULL DEFAULT gen_random_uuid();
         ALTER TABLE model_settings ADD COLUMN IF NOT EXISTS routes jsonb NOT NULL DEFAULT '{}';
-        ALTER TABLE model_settings ADD COLUMN IF NOT EXISTS backups jsonb;
-        ALTER TABLE model_settings ADD COLUMN IF NOT EXISTS backups_suggested boolean NOT NULL DEFAULT false;`);
+        ALTER TABLE model_settings ADD COLUMN IF NOT EXISTS backups jsonb NOT NULL DEFAULT '[]';`);
       await database.query(
         'INSERT INTO model_settings(owner_id) VALUES($1) ON CONFLICT DO NOTHING',
         [ownerId],
@@ -176,14 +172,11 @@ export function createDatabaseModelStore(options: {
             ownerId,
             JSON.stringify(state.routes),
           ]);
-        if (
-          JSON.stringify(state.backups) !== JSON.stringify(previous.backups) ||
-          state.backupsSuggested !== previous.backupsSuggested
-        )
-          await client.query(
-            'UPDATE model_settings SET backups=$2,backups_suggested=$3 WHERE owner_id=$1',
-            [ownerId, state.backups && JSON.stringify(state.backups), state.backupsSuggested],
-          );
+        if (JSON.stringify(state.backups) !== JSON.stringify(previous.backups))
+          await client.query('UPDATE model_settings SET backups=$2 WHERE owner_id=$1', [
+            ownerId,
+            JSON.stringify(state.backups),
+          ]);
         signal?.throwIfAborted();
         return result;
       };

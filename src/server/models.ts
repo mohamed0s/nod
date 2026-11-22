@@ -138,50 +138,6 @@ function memoryEffort(definition: ModelDefinition) {
   );
 }
 
-export function suggestedBackups(state: ModelState, rates: Map<string, number>): ModelSelection[] {
-  const connected = state.connections.filter(
-    (row) => row.status === 'connected' && !modelProviderInfo[row.provider].speechOnly,
-  );
-  if (connected.length < 2) return [];
-  return connected
-    .filter((row) => row.id !== state.selection?.connectionId)
-    .flatMap((row) => {
-      const usable = row.models
-        .filter(
-          (model) =>
-            !model.choice.audio &&
-            model.choice.efforts.length > 0 &&
-            boundedPrice(modelPricing(model)),
-        )
-        .map((model) => model.choice);
-      const routed = Object.values(state.routes).find(
-        (route): route is ModelSelection =>
-          !!route &&
-          route !== 'light' &&
-          route.connectionId === row.id &&
-          usable.some((model) => model.id === route.modelId),
-      );
-      const choice = routed
-        ? usable.find((model) => model.id === routed.modelId)!
-        : defaultModel(row.provider, usable, row.method);
-      if (!choice) return [];
-      return [
-        {
-          connectionId: row.id,
-          modelId: choice.id,
-          effort:
-            routed && choice.efforts.includes(routed.effort)
-              ? routed.effort
-              : defaultEffort(row.provider, choice),
-          rate: rates.get(`${row.provider}:${choice.id}`) ?? 0.5,
-        },
-      ];
-    })
-    .sort((a, b) => b.rate - a.rate)
-    .slice(0, 3)
-    .map(({ rate: _, ...choice }) => choice);
-}
-
 export interface WorkOrigin {
   kind: WorkKind;
   task?: ModelSelection | null;
@@ -448,7 +404,6 @@ export function createModelService(options: {
   let selection: ModelSelection | null = null;
   let routes: ModelRoutes = {};
   let backups: ModelSelection[] = [];
-  let backupsSuggested = false;
   let starting: Promise<unknown> = Promise.resolve();
   const pendingControllers = new Set<AbortController>();
   let closed = false;
@@ -540,8 +495,7 @@ export function createModelService(options: {
     });
     selection = state.selection;
     routes = state.routes;
-    backups = state.backups ?? [];
-    backupsSuggested = state.backupsSuggested;
+    backups = state.backups;
     checkSelection(state);
     options.changed?.();
   }
@@ -1448,7 +1402,7 @@ export function createModelService(options: {
         (state) => {
           const key = (choice: ModelSelection) =>
             `${choice.connectionId}:${choice.modelId}:${choice.effort}`;
-          const saved = new Set((state.backups ?? []).map(key));
+          const saved = new Set(state.backups.map(key));
           const seen = new Set<string>();
           state.backups = list.filter((choice) => {
             if (!saved.has(key(choice))) textChoice(state.connections, choice);
@@ -1457,7 +1411,6 @@ export function createModelService(options: {
             seen.add(model);
             return true;
           });
-          state.backupsSuggested = false;
           return state.backups;
         },
         undefined,
@@ -1465,7 +1418,6 @@ export function createModelService(options: {
       );
       await settle(client, () => {
         backups = saved;
-        backupsSuggested = false;
       });
     },
     light: lightModel,
@@ -1599,7 +1551,6 @@ export function createModelService(options: {
         ...(selectionIssue ? { selectionIssue } : {}),
         routes,
         backups,
-        ...(backupsSuggested && backups.length ? { backupsSuggested } : {}),
         light: lightModel(),
         ...(unpriced ? { unpricedPreparationModel: unpriced } : {}),
       };
@@ -1613,7 +1564,7 @@ export function createModelService(options: {
         );
         if (!state.connections.some((row) => row.id === state.selection?.connectionId))
           state.selection = null;
-        state.backups &&= state.backups.filter((choice) =>
+        state.backups = state.backups.filter((choice) =>
           state.connections.some((row) => row.id === choice.connectionId),
         );
         for (const row of state.connections) {
@@ -1649,30 +1600,6 @@ export function createModelService(options: {
           { managed: true, status: connected ? 'connected' : 'reconnect' },
         );
       }
-      if ((await store.read()).backups !== null) return;
-      const rates = new Map<string, number>();
-      try {
-        const usage = await options.database.query<{
-          provider: string;
-          model: string;
-          succeeded: number;
-          total: number;
-        }>(
-          `SELECT details->>'provider' AS provider,details->>'model' AS model,
-            count(*) FILTER (WHERE details->>'status'='succeeded')::int AS succeeded,count(*)::int AS total
-           FROM model_usage WHERE owner_id=$1 AND created_at>now()-interval '30 days'
-             AND details->>'status' IN ('succeeded','failed') GROUP BY 1,2`,
-          [options.ownerId],
-        );
-        for (const row of usage.rows)
-          if (row.total >= 3) rates.set(`${row.provider}:${row.model}`, row.succeeded / row.total);
-      } catch {}
-      await store.change((state) => {
-        if (state.backups !== null) return;
-        state.backups = suggestedBackups(state, rates);
-        state.backupsSuggested = state.backups.length > 0;
-      });
-      await reload();
     },
     async addKey(
       provider: ModelProvider,
@@ -1781,7 +1708,7 @@ export function createModelService(options: {
             ([, route]) => route === 'light' || route?.connectionId !== id,
           ),
         );
-        state.backups &&= state.backups.filter((choice) => choice.connectionId !== id);
+        state.backups = state.backups.filter((choice) => choice.connectionId !== id);
         return { row, selectionCleared };
       });
       if (removed.selectionCleared)

@@ -54,6 +54,7 @@ export function createTrust(options: {
   const pinned = <T>(
     run: (review: ModelReview, last: boolean, signal?: AbortSignal) => Promise<T>,
     signal?: AbortSignal,
+    modelMs?: number,
   ) =>
     pinnedReview(
       options.reviewers &&
@@ -63,7 +64,11 @@ export function createTrust(options: {
           )),
       review,
       run,
-      { ms: checkBudgetMs, signal },
+      {
+        ...(options.decisions ? {} : { ms: checkBudgetMs }),
+        ...(modelMs === undefined ? {} : { modelMs }),
+        signal,
+      },
     );
 
   async function check(
@@ -408,13 +413,15 @@ export function createTrust(options: {
       name,
       choices,
     };
-    const result = await pinned(async (review, _last, limit) => {
-      const timeout = AbortSignal.timeout(10_000);
-      const deadline = limit ? AbortSignal.any([limit, timeout]) : timeout;
-      const result = await review(instructions, input, deadline, question);
-      deadline.throwIfAborted();
-      return result;
-    }, signal);
+    const result = await pinned(
+      async (review, _last, limit) => {
+        const result = await review(instructions, input, limit, question);
+        limit?.throwIfAborted();
+        return result;
+      },
+      signal,
+      10_000,
+    );
     if (!result || typeof result !== 'object') return 'uncertain';
     const { probability } = result as { probability?: unknown };
     if (

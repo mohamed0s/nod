@@ -26,6 +26,7 @@ export function modelUnavailable(
   retryable = false,
 ): ModelUnavailable | undefined {
   if (!text || refusal.test(text)) return;
+  if (overflow.test(text) && !tokenRate.test(text)) return;
   const status = httpStatus(text);
   if (status === 402 || (status === 400 && /credit balance is too low/i.test(text))) return 'quota';
   if (status === 408) return 'busy';
@@ -37,7 +38,6 @@ export function modelUnavailable(
     return [500, 502, 503, 504, 529].includes(status) || (status >= 520 && status <= 524)
       ? 'busy'
       : undefined;
-  if (overflow.test(text) && !tokenRate.test(text)) return;
   if (quota.test(text)) return 'quota';
   if (retryable || busy.test(text)) return 'busy';
 }

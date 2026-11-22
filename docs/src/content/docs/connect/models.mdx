@@ -268,22 +268,22 @@ Background work, such as memory upkeep, uses a smaller model from the same conne
 
 When the model a request uses is busy or unavailable, Nod can try up to three backup models in order. In **Settings > Models**, the sentence **If it's busy or unavailable, Nod tries …** lists them. Select a backup to replace it or choose **No backup** to remove it, and select **Add a backup model** to add one.
 
-New installs start with no backups. The first time Nod starts with this setting, and you already have two or more connections, it fills the list in once with a model from each of your other connections: the model you chose for schedules or work Nod starts on its own on that connection, else its recommended model. Models with a better success rate in the last 30 days come first. Nod skips models without a known price, because automatic work can't spend on a model it can't bound. **Settings > Models** says Nod chose them, and you can change or clear them. Nod doesn't fill the list in again.
+The list starts empty, and Nod never adds a backup on its own. Only the models you choose there stand in, so no request moves to another service or account unless you picked it.
 
 Nod moves to a backup only when the model is busy or unavailable:
 
 - A rate limit or overload, such as HTTP 429 or "at capacity", and HTTP 500, 502, 503, 504 or 529.
 - A timeout or a network error, such as a reset connection or an address that doesn't resolve.
-- A quota or credit error. Nod keeps the provider's own words and doesn't call it a billing problem.
+- A quota or credit error, including HTTP 402 and an HTTP 400 that says the credit balance is too low. Nod keeps the provider's own words and doesn't call it a billing problem.
 - Automatic work on a model that's paused after a failure.
 
-Nod doesn't move for an invalid request, a key, permission or model access error (HTTP 400, 401, 403 or 404), a provider refusal or content filter, a reply cut off at its length limit, a conversation too long for the model, or when you stop the work.
+Nod doesn't move for any other invalid request, a key, permission or model access error (HTTP 400, 401, 403 or 404), a provider refusal or content filter, a reply cut off at its length limit, a conversation too long for the model, or when you stop the work.
 
 Before it moves, Nod tries the same model once more. It waits for the provider's retry delay when one is sent, up to about 3 seconds for checks and about 15 seconds for other work, and never past the work's own deadline or your **Stop**. Each backup gets the same single retry. A quota error, a timed-out request, or a model that's paused moves straight to the next one.
 
-- **Chat, tasks, schedules and work Nod starts on its own** continue the same request on the backup, including compaction and helpers. The rest of that turn stays on the backup, and the next turn tries its own model first again. The reply ends with one short line, such as "Gemini 3.8 Flash was busy, so this used GPT-6 Luna." Audio requests that include a recording stay on the audio model.
-- **Checks** use the backups too: memory, writing, image reading, account-access email checks and the small classifier for app activity. Task classification for usage data doesn't, so it keeps its one cheap model. Checks that use your selected model try each backup at its lightest effort, the small checker uses only the small models on your backups' connections, and image reading uses only backups that accept images.
-- **Action checks** keep one model for all their steps. If that model is busy, the whole check starts again from its first step on the next backup, so its answers never mix models. After 90 seconds across all its models, the check stops and fails closed. Decision checks never move to a model. See [Select the action checker](#select-the-action-checker).
+- **Chat, tasks, schedules and work Nod starts on its own** continue the same request on the backup, including compaction and helpers. The rest of that turn stays on the backup, and the next turn tries its own model first again. The status line shows the switch, such as "Gemini 3.8 Flash was busy, so this used GPT-6 Luna". Audio requests that include a recording stay on the audio model.
+- **Checks** use the backups too: memory, writing, image reading, account-access email checks and the small classifier for app activity. Task classification for usage data doesn't, so it keeps its one cheap model. Checks that use your selected model try each backup at its lightest effort, the small checker uses only the small models on your backups' connections, and image reading uses only backups that accept images. A check that runs during a turn has no deadline of its own, so each model but the last gets 45 seconds before Nod moves on.
+- **Action checks** keep one model for all their steps. If that model is busy, unavailable or doesn't answer in time, the whole check starts again from its first step on the next backup, so its answers never mix models. Each model gets an even share of the time left, at most 45 seconds, and after 90 seconds across all its models the check stops and fails closed. Your **Stop** never moves a check to the next model. With `decision`, a decision model's answer never moves to an LLM and the check has no 90-second limit. See [Select the action checker](#select-the-action-checker).
 
 Backups count toward the same check-in, monthly limit and preparation allowance, and Usage shows each attempt with the model that ran and its cost. A model billed through a plan counts at its API price estimate. A backup without a known price can't run automatic preparation, just like your selected model.
 
