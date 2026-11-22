@@ -86,7 +86,13 @@ Access keys, logs, diagnostics, speech model downloads and analytics IDs stay be
 
 6. Open the desktop app with the same `NOD_DESKTOP_USER_DATA`.
 
-7. When everything works, send the staging folder and the backup folder to the Recycle Bin. They hold a full copy of your database, browser sign-ins and workspace.
+7. Make it your everyday Nod. The install script points `\Nod\start` and `\Nod\backup` at the desktop app, so it starts at every sign-in, backs up every night and gets a **Nod** desktop shortcut. Nod can stay open. Add `-WakeAt 07:20` if you used the morning wake.
+
+   ```powershell
+   scripts\windows\install.ps1 -Desktop $env:NOD_DESKTOP_USER_DATA
+   ```
+
+8. When everything works, send the staging folder and the backup folder to the Recycle Bin. They hold a full copy of your database, browser sign-ins and workspace.
 
 </Steps>
 
@@ -122,6 +128,8 @@ The source install isn't changed. To use it again, quit the desktop app, then tu
 Get-ScheduledTask -TaskPath '\Nod\' | Enable-ScheduledTask
 Start-ScheduledTask -TaskPath '\Nod\' -TaskName start
 ```
+
+If you ran `install.ps1 -Desktop`, run `scripts\windows\install.ps1` without `-Desktop` instead. It points the tasks back at the source install, keeps your `.env` and starts Nod. Delete the **Nod** desktop shortcut too, so the desktop app isn't opened by mistake while the source install polls the same Telegram bot.
 
 WhatsApp keeps one linked session. If the desktop app used it, link WhatsApp again in the source install.
 

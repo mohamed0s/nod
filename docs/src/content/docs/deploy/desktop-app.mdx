@@ -308,6 +308,8 @@ The packaged engine includes only the packages in `dependencies` and what they d
 
 `NOD_DESKTOP_USER_DATA` works in development and in the deliberately marked [isolated test build](/contribute/desktop-releases/#test-a-local-mac-build). Normal packaged apps always use their own profile.
 
+If `ELECTRON_RUN_AS_NODE` is set in your shell, Electron runs as plain Node and the app doesn't open. Programs that VS Code starts can inherit it. Clear it first, in PowerShell with `Remove-Item Env:ELECTRON_RUN_AS_NODE`.
+
 To test a local connection service, run the unpackaged app with a new, absolute profile path and a proxy origin:
 
 ```sh title="Terminal"
