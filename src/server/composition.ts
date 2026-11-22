@@ -671,6 +671,11 @@ export function createDefaultAdapters(
   };
 }
 
+function pinnedReviewers(curator: MemoryCurator, review: (model: MemoryCurator) => ModelReview) {
+  return async () =>
+    curator.configured ? (await curator.pinned?.().catch(() => undefined))?.map(review) : undefined;
+}
+
 function alternativeModel(models: ApplicationAdapters['models']) {
   const view = models?.view();
   const other = view?.connections.find(
@@ -911,17 +916,21 @@ async function initializeApplication(
     ),
   );
   const decisions = adapters.decisions && ledger.decisions(adapters.decisions);
-  const review: ModelReview = async (instructions, input, signal, question, responseSchema) => {
-    if (question) {
-      const result = await decisions?.check({ instructions, input, question }, signal);
-      if (result !== undefined) return result;
-      const values = question.choices.map(({ value }) => value);
-      instructions += `\nReply with only JSON with one property, ${JSON.stringify(question.name)}. Its value must be one of: ${values.map((value) => JSON.stringify(value)).join(', ')}.`;
-    }
-    return onboardingCurator.configured
-      ? onboardingCurator.curate({ task: 'review', instructions, input, responseSchema }, signal)
-      : undefined;
-  };
+  const reviewWith =
+    (model: MemoryCurator): ModelReview =>
+    async (instructions, input, signal, question, responseSchema) => {
+      if (question) {
+        const result = await decisions?.check({ instructions, input, question }, signal);
+        if (result !== undefined) return result;
+        const values = question.choices.map(({ value }) => value);
+        instructions += `\nReply with only JSON with one property, ${JSON.stringify(question.name)}. Its value must be one of: ${values.map((value) => JSON.stringify(value)).join(', ')}.`;
+      }
+      return model.configured
+        ? model.curate({ task: 'review', instructions, input, responseSchema }, signal)
+        : undefined;
+    };
+  const review = reviewWith(onboardingCurator);
+  const reviewers = pinnedReviewers(onboardingCurator, reviewWith);
   const mailCheck = createMailCheck({ curator, decisions });
   const skillLibrary = createSkillLibrary(
     [
@@ -1064,6 +1073,7 @@ async function initializeApplication(
     review,
     canDeliverLiteral: (channel, text, literal) =>
       channels?.canDeliverLiteral(channel, text, literal) ?? false,
+    reviewers,
     preferences: async () =>
       (await memory.load()).entries
         .filter(
@@ -2189,10 +2199,9 @@ async function initializeApplication(
         : adapters.classificationCurator
           ? ledger.curator(adapters.classificationCurator)
           : curator;
-  const trust = createTrust({
-    pool,
-    ownerId,
-    review: async (instructions, input, signal, question) => {
+  const trustReview =
+    (model: MemoryCurator): ModelReview =>
+    async (instructions, input, signal, question) => {
       if (question) {
         const values = question.choices.map(({ value }) => JSON.stringify(value)).join(', ');
         instructions +=
@@ -2200,10 +2209,15 @@ async function initializeApplication(
             ? `\nReply with only JSON containing exactly two properties: ${JSON.stringify(question.name)} set to one of ${values}, and "probability" set to a number from 0 to 1 expressing confidence in that label.`
             : `\nReply with only JSON with one property, ${JSON.stringify(question.name)}. Its value must be one of: ${values}.`;
       }
-      return trustCurator.configured
-        ? trustCurator.curate({ task: 'review', instructions, input }, signal)
+      return model.configured
+        ? model.curate({ task: 'review', instructions, input }, signal)
         : undefined;
-    },
+    };
+  const trust = createTrust({
+    pool,
+    ownerId,
+    review: trustReview(trustCurator),
+    reviewers: pinnedReviewers(trustCurator, trustReview),
     ...(adapters.trustModel === 'decision' && adapters.trustDecisions
       ? { decisions: ledger.decisions(adapters.trustDecisions) }
       : {}),
