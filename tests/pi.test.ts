@@ -10856,7 +10856,7 @@ test('a turn fallback names each new backup it moves to, and an owner Stop repor
   assert.deepEqual(stopped.calls, ['fixture-work', 'fixture-work']);
 });
 
-test('a backup request uses its own connection timeout, not the work model one', async () => {
+test('a backup request keeps the timeout the caller set', async () => {
   const { createTurnFallback } = await import('../src/providers/pi/fallback.ts');
   const { localModelSilenceMs } = await import('../src/providers/pi/models.ts');
   const reply = (model: { provider: string; id: string; api: string }, error?: string) => {
@@ -10900,8 +10900,8 @@ test('a backup request uses its own connection timeout, not the work model one',
     },
   });
   for (const [primary, backup, expected] of [
-    ['compatible', 'openai', 300_000],
-    ['openai', 'compatible', localModelSilenceMs],
+    ['compatible', 'openai', localModelSilenceMs],
+    ['openai', 'compatible', 300_000],
   ] as const) {
     timeouts.length = 0;
     const work = connection(primary, 'fixture-work', true);

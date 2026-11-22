@@ -18,7 +18,7 @@ import {
   timedOut,
   type ModelUnavailable,
 } from '../../shared/model-fallback.ts';
-import { localModelSilenceMs, type createPiModelRuntime } from './models.ts';
+import type { createPiModelRuntime } from './models.ts';
 import { readsNativeAudio } from './audio.ts';
 
 type Connection = Awaited<ReturnType<typeof createPiModelRuntime>>;
@@ -165,7 +165,6 @@ export function createTurnFallback(options: {
             ? {}
             : { onPayload: undefined, cacheRetention: undefined }),
           reasoning: level === 'off' ? undefined : level,
-          timeoutMs: candidate.access.provider === 'compatible' ? localModelSilenceMs : 300_000,
         } as SimpleStreamOptions);
       } catch (error) {
         streamOptions?.signal?.throwIfAborted();
