@@ -2,8 +2,10 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { open, readFile, realpath, stat } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { basename, join, win32 } from 'node:path';
 import { finished } from 'node:stream/promises';
+import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
 import { parseCredentialKey } from '../../../src/providers/environment/key-store.ts';
 import { openVaultValue } from '../../../src/server/vault-crypto.ts';
@@ -193,17 +195,17 @@ function decoded(bytes: Buffer) {
   return text.replaceAll('﻿', '').replaceAll('\0', '');
 }
 
-export function run(
-  command: string,
-  args: string[],
-  options: {
-    input?: string | { file: string };
-    output?: string;
-    env?: NodeJS.ProcessEnv;
-    timeoutMs?: number;
-    label?: string;
-  } = {},
-) {
+export type RunOptions = {
+  input?: string | { file: string };
+  output?: string;
+  env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
+  label?: string;
+};
+
+export type Docker = (args: string[], options: RunOptions & { label: string }) => Promise<string>;
+
+export function run(command: string, args: string[], options: RunOptions = {}) {
   const label =
     options.label ??
     `${basename(command)} ${args.find((arg) => !arg.startsWith('-')) ?? ''}`.trim();
@@ -274,4 +276,145 @@ export function run(
       });
     });
   });
+}
+
+export function wsl() {
+  if (!process.env.SYSTEMROOT) throw new Error('This step runs on Windows only.');
+  return join(process.env.SYSTEMROOT, 'System32', 'wsl.exe');
+}
+
+export async function distributions(running: boolean) {
+  return (
+    await run(wsl(), ['--list', '--quiet', ...(running ? ['--running'] : [])], {
+      label: running ? 'Listing running WSL distributions' : 'Listing WSL distributions',
+    }).catch((error: Error) => {
+      if (running && /no running distributions/i.test(error.message)) return '';
+      throw error;
+    })
+  )
+    .split(/\r?\n/)
+    .map((name) => name.trim())
+    .filter(Boolean);
+}
+
+export function desktopNames(identity: string) {
+  if (!/^[a-f0-9]{12}$/.test(identity)) throw new Error('The desktop identity is invalid.');
+  return {
+    containers: {
+      postgres: `nod-postgres-${identity}`,
+      workspace: `nod-workspace-${identity}`,
+      browser: `nod-browser-${identity}`,
+    },
+    volumes: {
+      postgres: `nod-postgres-${identity}`,
+      workspace: `nod-workspace-${identity}`,
+      browser: `nod-browser-${identity}`,
+      tools: `nod-tools-${identity}`,
+    },
+  };
+}
+
+export function privateComputer(distribution: string, identity: string) {
+  const guest = ['--distribution', distribution, '--user', 'root', '--exec'];
+  const docker: Docker = (args, options) =>
+    run(wsl(), [...guest, '/usr/local/bin/docker', ...args], {
+      ...options,
+      label: `${options.label} (docker ${args[0]})`,
+    });
+  return {
+    docker,
+    start: () =>
+      run(wsl(), [...guest, '/usr/bin/python3', '/usr/local/lib/nod/windows-guest.py', 'start'], {
+        input: JSON.stringify({ identity }),
+        timeoutMs: 900_000,
+        label: 'Starting the private computer',
+      }),
+    stop: () =>
+      run(wsl(), ['--terminate', distribution], { label: 'Stopping the private computer' }),
+  };
+}
+
+export async function withDatabase<T>(docker: Docker, container: string, work: () => Promise<T>) {
+  await docker(['start', container], { label: 'Starting the desktop database' });
+  let failed = false;
+  try {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await docker(['exec', container, 'pg_isready', '-U', 'nod', '-d', 'nod'], {
+          label: 'Waiting for the desktop database',
+        });
+        break;
+      } catch (error) {
+        if (attempt > 60) throw error;
+        await new Promise((done) => setTimeout(done, 1000));
+      }
+    }
+    return await work();
+  } catch (error) {
+    failed = true;
+    throw error;
+  } finally {
+    try {
+      await docker(['stop', container], { label: 'Stopping the desktop database' });
+    } catch (error) {
+      if (!failed) throw error;
+    }
+  }
+}
+
+export function dumpDatabase(docker: Docker, container: string, output: string, label: string) {
+  return docker(['exec', container, 'pg_dump', '--format=custom', '-U', 'nod', '-d', 'nod'], {
+    output,
+    label,
+  });
+}
+
+export function inVolume(
+  docker: Docker,
+  options: RunOptions & {
+    image: string;
+    volume: string;
+    script: string;
+    label: string;
+    readOnly?: boolean;
+  },
+) {
+  const { image, volume, script, readOnly, ...io } = options;
+  return docker(
+    [
+      'run',
+      '--rm',
+      '-i',
+      '--network',
+      'none',
+      '--user',
+      '0:0',
+      '--mount',
+      `type=volume,source=${volume},target=/target${readOnly ? ',readonly' : ''}`,
+      '--entrypoint',
+      '/bin/sh',
+      image,
+      '-c',
+      script,
+    ],
+    io,
+  );
+}
+
+export function electronPath(given?: string) {
+  if (given) return given;
+  const desktop = fileURLToPath(new URL('../../../desktop/package.json', import.meta.url));
+  try {
+    return createRequire(desktop)('electron') as string;
+  } catch (error) {
+    throw new Error(
+      `Electron is not installed in desktop/node_modules. Run pnpm --dir desktop install first. ${(error as Error).message}`,
+    );
+  }
+}
+
+export function electronEnvironment(extra: NodeJS.ProcessEnv = {}) {
+  const env = { ...process.env, ...extra };
+  delete env.ELECTRON_RUN_AS_NODE;
+  return env;
 }

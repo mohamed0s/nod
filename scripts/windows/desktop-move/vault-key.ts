@@ -1,28 +1,22 @@
 import { spawn } from 'node:child_process';
 import { stat } from 'node:fs/promises';
-import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { appRunning, checkPlanKey, readPlan, readVaultKey, stagedFiles } from './shared.ts';
+import {
+  appRunning,
+  checkPlanKey,
+  electronEnvironment,
+  electronPath,
+  readPlan,
+  readVaultKey,
+  stagedFiles,
+} from './shared.ts';
 
 const helper = fileURLToPath(new URL('vault-key-electron.mjs', import.meta.url));
 const electronTimeoutMs = 90_000;
 
-function electronPath(given?: string) {
-  if (given) return given;
-  const desktop = fileURLToPath(new URL('../../../desktop/package.json', import.meta.url));
-  try {
-    return createRequire(desktop)('electron') as string;
-  } catch (error) {
-    throw new Error(
-      `Electron is not installed in desktop/node_modules. Run pnpm --dir desktop install first. ${(error as Error).message}`,
-    );
-  }
-}
-
 export function runElectron(electron: string, args: string[], timeoutMs = electronTimeoutMs) {
-  const env = { ...process.env };
-  delete env.ELECTRON_RUN_AS_NODE;
+  const env = electronEnvironment();
   return new Promise<string>((resolve, reject) => {
     const child = spawn(electron, [helper, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
     const output: Buffer[] = [];

@@ -4,19 +4,20 @@ import { dirname, join, relative } from 'node:path';
 import { parseArgs } from 'node:util';
 import {
   appRunning,
+  desktopNames,
+  distributions,
+  type Docker,
+  dumpDatabase,
+  inVolume,
   type Plan,
+  privateComputer,
   profileOwner,
   readPlan,
-  run,
   sha256,
   stagedFiles,
+  withDatabase,
 } from './shared.ts';
 import { setVaultKey } from './vault-key.ts';
-
-export type Docker = (
-  args: string[],
-  options: Parameters<typeof run>[2] & { label: string },
-) => Promise<string>;
 
 export const importMarker = 'desktop-move-import.json';
 
@@ -89,51 +90,6 @@ export async function restoreDatabase(options: {
   );
 }
 
-export function desktopNames(identity: string) {
-  if (!/^[a-f0-9]{12}$/.test(identity)) throw new Error('The desktop identity is invalid.');
-  return {
-    containers: {
-      postgres: `nod-postgres-${identity}`,
-      workspace: `nod-workspace-${identity}`,
-      browser: `nod-browser-${identity}`,
-    },
-    volumes: {
-      postgres: `nod-postgres-${identity}`,
-      workspace: `nod-workspace-${identity}`,
-      browser: `nod-browser-${identity}`,
-      tools: `nod-tools-${identity}`,
-    },
-  };
-}
-
-async function withDatabase<T>(docker: Docker, container: string, work: () => Promise<T>) {
-  await docker(['start', container], { label: 'Starting the desktop database' });
-  let failed = false;
-  try {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        await docker(['exec', container, 'pg_isready', '-U', 'nod', '-d', 'nod'], {
-          label: 'Waiting for the desktop database',
-        });
-        break;
-      } catch (error) {
-        if (attempt > 60) throw error;
-        await new Promise((done) => setTimeout(done, 1000));
-      }
-    }
-    return await work();
-  } catch (error) {
-    failed = true;
-    throw error;
-  } finally {
-    try {
-      await docker(['stop', container], { label: 'Stopping the desktop database' });
-    } catch (error) {
-      if (!failed) throw error;
-    }
-  }
-}
-
 export async function importData(options: {
   plan: Plan;
   staging: string;
@@ -178,12 +134,11 @@ export async function importData(options: {
 
   await withDatabase(docker, containers.postgres, async () => {
     log('Saving the current desktop database…');
-    await docker(
-      ['exec', containers.postgres, 'pg_dump', '--format=custom', '-U', 'nod', '-d', 'nod'],
-      {
-        output: join(backup, 'database.dump'),
-        label: 'Saving the current desktop database',
-      },
+    await dumpDatabase(
+      docker,
+      containers.postgres,
+      join(backup, 'database.dump'),
+      'Saving the current desktop database',
     );
     log('Replacing the desktop database…');
     await restoreDatabase({
@@ -194,26 +149,6 @@ export async function importData(options: {
     });
   });
 
-  const inVolume = (volume: string, script: string, label: string, io: Parameters<typeof run>[2]) =>
-    docker(
-      [
-        'run',
-        '--rm',
-        '-i',
-        '--network',
-        'none',
-        '--user',
-        '0:0',
-        '--mount',
-        `type=volume,source=${volume},target=/target`,
-        '--entrypoint',
-        '/bin/sh',
-        image,
-        '-c',
-        script,
-      ],
-      { ...io, label },
-    );
   const steps = [
     { archive: 'workspace', volume: volumes.workspace, folder: '.', name: 'workspace files' },
     { archive: 'tools', volume: volumes.tools, folder: '.', name: 'installed tools' },
@@ -227,18 +162,20 @@ export async function importData(options: {
   for (const step of steps) {
     if (!plan.archives[step.archive]) continue;
     log(`Copying ${step.name}…`);
-    await inVolume(
-      step.volume,
-      `if [ -e /target/${step.folder} ]; then tar -c -f - -C /target ${step.folder}; fi`,
-      `Saving the current desktop ${step.name}`,
-      { output: join(backup, `${step.archive}.tar`) },
-    );
-    await inVolume(
-      step.volume,
-      `${step.folder === '.' ? '' : `rm -rf /target/${step.folder} && `}tar -x -f - -C /target --no-same-owner && chown -R 1000:1000 /target/${step.folder}`,
-      `Copying ${step.name}`,
-      { input: { file: join(staging, `${step.archive}.tar`) } },
-    );
+    await inVolume(docker, {
+      image,
+      volume: step.volume,
+      script: `if [ -e /target/${step.folder} ]; then tar -c -f - -C /target ${step.folder}; fi`,
+      label: `Saving the current desktop ${step.name}`,
+      output: join(backup, `${step.archive}.tar`),
+    });
+    await inVolume(docker, {
+      image,
+      volume: step.volume,
+      script: `${step.folder === '.' ? '' : `rm -rf /target/${step.folder} && `}tar -x -f - -C /target --no-same-owner && chown -R 1000:1000 /target/${step.folder}`,
+      label: `Copying ${step.name}`,
+      input: { file: join(staging, `${step.archive}.tar`) },
+    });
   }
 }
 
@@ -284,25 +221,6 @@ export async function copyProfile(options: {
     verbatimSymlinks: true,
   });
   return { removed };
-}
-
-function wsl() {
-  if (!process.env.SYSTEMROOT) throw new Error('This step runs on Windows only.');
-  return join(process.env.SYSTEMROOT, 'System32', 'wsl.exe');
-}
-
-async function distributions(running: boolean) {
-  return (
-    await run(wsl(), ['--list', '--quiet', ...(running ? ['--running'] : [])], {
-      label: running ? 'Listing running WSL distributions' : 'Listing WSL distributions',
-    }).catch((error: Error) => {
-      if (running && /no running distributions/i.test(error.message)) return '';
-      throw error;
-    })
-  )
-    .split(/\r?\n/)
-    .map((name) => name.trim())
-    .filter(Boolean);
 }
 
 export async function checkDesktop(plan: Plan, staging: string) {
@@ -395,28 +313,11 @@ if (import.meta.main) {
     for (const line of await setVaultKey({ staging, env: values.env, electron: values.electron }))
       if (line) console.log(line);
     keyChanged = true;
-    const guest = ['--distribution', plan.distribution, '--user', 'root', '--exec'];
+    const computer = privateComputer(plan.distribution, plan.identity);
     console.log('Starting the private computer…');
-    await run(
-      wsl(),
-      [...guest, '/usr/bin/python3', '/usr/local/lib/nod/windows-guest.py', 'start'],
-      {
-        input: JSON.stringify({ identity: plan.identity }),
-        timeoutMs: 900_000,
-        label: 'Starting the private computer',
-      },
-    );
+    await computer.start();
     try {
-      await importData({
-        plan,
-        staging,
-        backup,
-        docker: (args, options) =>
-          run(wsl(), [...guest, '/usr/local/bin/docker', ...args], {
-            ...options,
-            label: `${options.label} (docker ${args[0]})`,
-          }),
-      });
+      await importData({ plan, staging, backup, docker: computer.docker });
       console.log('Copying profile files…');
       const { removed } = await copyProfile({
         staging,
@@ -431,9 +332,7 @@ if (import.meta.main) {
         `${JSON.stringify({ importedAt: new Date().toISOString(), conversion: plan.createdAt, backup }, null, 2)}\n`,
       );
     } finally {
-      await run(wsl(), ['--terminate', plan.distribution], {
-        label: 'Stopping the private computer',
-      }).catch((error: Error) => console.error(error.message));
+      await computer.stop().catch((error: Error) => console.error(error.message));
     }
     console.log('Done. Open Nod with the same NOD_DESKTOP_USER_DATA.');
   } catch (error) {
