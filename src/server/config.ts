@@ -12,6 +12,9 @@ export const ownerId = desktopMode
 export const dataRoot = resolve(process.env.NOD_DATA_ROOT || '.local');
 export const databaseUrl = process.env.DATABASE_URL || undefined;
 export const webRoot = resolve(process.env.NOD_WEB_ROOT || 'dist/web');
+export const webSource = desktopMode
+  ? process.env.NOD_DESKTOP_WATCH === 'true'
+  : process.env.NODE_ENV !== 'production';
 export const desktopAccess = desktopMode
   ? { token: process.env.NOD_DESKTOP_AUTH_TOKEN || '' }
   : undefined;
