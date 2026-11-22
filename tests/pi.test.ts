@@ -10481,6 +10481,242 @@ test('curator checks retry a busy model once, then use the next backup, and neve
   });
 });
 
+test('a turn that moves to a backup records the backup model price on its usage', async (t) => {
+  const { modelPricingSignature } = await import('../src/shared/models.ts');
+  const directory = await mkdtemp(join(tmpdir(), 'nod-fallback-price-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { access } = await fallbackServer(t, (model) =>
+    model === 'fixture-backup'
+      ? { status: 200, text: 'Synthetic backup answer.' }
+      : { status: 503, text: 'Service Unavailable' },
+  );
+  const prices = {
+    'fixture-primary': { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+    'fixture-backup': { input: 5, output: 10, cacheRead: 0, cacheWrite: 0 },
+  };
+  const priced = (id: keyof typeof prices) => {
+    const value = access(id);
+    value.definition = {
+      ...value.definition,
+      choice: { ...value.definition.choice, pricing: prices[id] },
+      spec: { ...value.definition.spec, cost: prices[id] },
+    };
+    return value;
+  };
+  const agent = createPiAgent({
+    provider: 'compatible',
+    resolve: async () => [priced('fixture-primary'), priced('fixture-backup')],
+    sessionRoot: directory,
+  });
+  t.after(() => agent.dispose());
+  const events: AgentEvent[] = [];
+  const session = await agent.open({
+    ...fakeExecution(randomUUID()),
+    ...sandbox,
+    systemPrompt: 'Synthetic fixture',
+    tools: [],
+    shouldStop: () => false,
+    onEvent: (event) => events.push(event),
+  });
+  await session.prompt('Synthetic question.', []);
+  await session.dispose();
+  const usage = events.flatMap((event) => (event.type === 'model_usage' ? [event] : []));
+  const backup = usage.find((event) => event.model === 'fixture-backup');
+  assert.ok(backup);
+  assert.equal(backup.status, 'succeeded');
+  const signature = modelPricingSignature(prices['fixture-backup'], 'openai-completions');
+  assert.ok(signature);
+  assert.equal(backup.pricingSignature, signature);
+  assert.notEqual(
+    backup.pricingSignature,
+    modelPricingSignature(prices['fixture-primary'], 'openai-completions'),
+  );
+  assert.ok(Math.abs((backup.costUsd ?? 0) - (10 * 5 + 5 * 10) / 1_000_000) < 1e-12);
+  for (const failed of usage.filter((event) => event.model === 'fixture-primary'))
+    assert.equal(
+      failed.pricingSignature,
+      modelPricingSignature(prices['fixture-primary'], 'openai-completions'),
+    );
+});
+
+test('a paused work model moves a turn and a pinned check to the backup only when the pause is an availability failure', async (t) => {
+  const { ModelUnavailableError } = await import('../src/ports/models.ts');
+  const { pinnedReview } = await import('../src/server/model-fallback.ts');
+  const directory = await mkdtemp(join(tmpdir(), 'nod-fallback-paused-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { requests, access } = await fallbackServer(t, (model) =>
+    model === 'fixture-backup'
+      ? { status: 200, text: '{"run":false}' }
+      : { status: 500, text: 'The paused model was called.' },
+  );
+  const quota = new ModelUnavailableError(
+    'Synthetic failed the last request (429 insufficient_quota). Automatic requests to this model are paused until a request succeeds.',
+    ['fixture-primary'],
+  );
+  const revoked = new Error(
+    'Synthetic failed the last request (401 Invalid API key). Automatic requests to this model are paused until a request succeeds.',
+  );
+  const paused = (error: Error): ModelAccess => ({
+    ...access('fixture-primary'),
+    prepareRequest: async (_id, automatic) => {
+      if (automatic) throw error;
+      return async () => {};
+    },
+  });
+  const turn = async (pause: Error) => {
+    const events: AgentEvent[] = [];
+    const agent = createPiAgent({
+      provider: 'compatible',
+      resolve: async () => [paused(pause), access('fixture-backup')],
+      sessionRoot: directory,
+    });
+    t.after(() => agent.dispose());
+    const session = await agent.open({
+      ...fakeExecution(randomUUID()),
+      ...sandbox,
+      automatic: true,
+      systemPrompt: 'Synthetic fixture',
+      tools: [],
+      shouldStop: () => false,
+      onEvent: (event) => events.push(event),
+    });
+    await session.prompt('Synthetic question.', []);
+    await session.dispose();
+    return events;
+  };
+  const moved = await turn(quota);
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-backup'],
+  );
+  assert.deepEqual(
+    moved.filter((event) => event.type === 'fallback'),
+    [{ type: 'fallback', from: 'fixture-primary', to: 'fixture-backup', reason: 'unavailable' }],
+  );
+  requests.length = 0;
+  await assert.rejects(turn(revoked), /401 Invalid API key/);
+  assert.deepEqual(requests, []);
+
+  const check = (pause: Error) => {
+    const curator = createPiMemoryCurator({
+      provider: 'compatible',
+      configured: () => true,
+      resolve: async () => [paused(pause), access('fixture-backup')],
+    });
+    return pinnedReview(
+      async () =>
+        (await curator.pinned!()).map(
+          (pinned) => (instructions: string, input: object, signal?: AbortSignal) =>
+            pinned.curate({ task: 'review', instructions, input, automatic: true }, signal),
+        ),
+      async () => undefined,
+      (review) => review('Check the synthetic action.', {}),
+    );
+  };
+  requests.length = 0;
+  assert.deepEqual(await check(quota), { run: false });
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-backup'],
+  );
+  requests.length = 0;
+  await assert.rejects(check(revoked), /401 Invalid API key/);
+  assert.deepEqual(requests, []);
+});
+
+test('errors the fallback does not handle keep Pi backoff instead of a fast retry burst', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-fallback-backoff-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { requests, access } = await fallbackServer(t, () => ({
+    status: 400,
+    text: 'Provider returned error',
+  }));
+  const delays: number[] = [];
+  const agent = createPiAgent({
+    provider: 'compatible',
+    resolve: async () => [access('fixture-primary'), access('fixture-backup')],
+    sessionRoot: directory,
+    createSession: async (options) => {
+      const result = await createAgentSession(options);
+      result.session.subscribe((event) => {
+        if (event.type === 'auto_retry_start') delays.push(event.delayMs);
+      });
+      return result;
+    },
+  });
+  t.after(() => agent.dispose());
+  const session = await agent.open({
+    ...fakeExecution(randomUUID()),
+    ...sandbox,
+    systemPrompt: 'Synthetic fixture',
+    tools: [],
+    shouldStop: () => false,
+    onEvent: () => {},
+  });
+  const pending = session.prompt('Synthetic question.', []);
+  while (!delays.length) await setTimeout(10);
+  await setTimeout(200);
+  assert.deepEqual(delays, [4000]);
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-primary'],
+  );
+  await session.abort();
+  await pending;
+  await session.dispose();
+  assert.equal(requests.length, 1);
+});
+
+test('helpers in a turn start on the backup the turn moved to, even when two backups share a model', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-fallback-helper-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { requests, access } = await fallbackServer(t, (_model, _attempt, path) =>
+    path.startsWith('/free/')
+      ? { status: 200, text: 'Synthetic answer.' }
+      : { status: 429, headers: { 'retry-after-ms': '5' }, text: 'Model is at capacity' },
+  );
+  const agent = createPiAgent({
+    provider: 'compatible',
+    resolve: async () => [
+      access('fixture-primary'),
+      access('fixture-shared', '/busy/v1'),
+      access('fixture-shared', '/free/v1'),
+    ],
+    sessionRoot: directory,
+  });
+  t.after(() => agent.dispose());
+  const execution = fakeExecution(randomUUID());
+  const open = (extra: object) =>
+    agent.open({
+      ...execution,
+      ...extra,
+      ...sandbox,
+      systemPrompt: 'Synthetic fixture',
+      tools: [],
+      shouldStop: () => false,
+      onEvent: () => {},
+    });
+  const main = await open({});
+  await main.prompt('Synthetic question.', []);
+  assert.deepEqual(
+    requests.map(({ path }) => path?.split('/chat')[0]),
+    ['/v1', '/v1', '/busy/v1', '/busy/v1', '/free/v1'],
+  );
+  requests.length = 0;
+  const helper = await open({
+    sessionId: randomUUID(),
+    runId: randomUUID(),
+    parentRunId: execution.runId,
+  });
+  await helper.prompt('Synthetic helper question.', []);
+  await helper.dispose();
+  await main.dispose();
+  assert.deepEqual(
+    requests.map(({ path }) => path?.split('/chat')[0]),
+    ['/free/v1'],
+  );
+});
+
 test('a check that times out moves to the next model without retrying the same one', async (t) => {
   const timeout = AbortSignal.timeout.bind(AbortSignal);
   t.mock.method(AbortSignal, 'timeout', (milliseconds: number) =>
@@ -10506,6 +10742,264 @@ test('a check that times out moves to the next model without retrying the same o
   assert.deepEqual(reports, ['failed', 'succeeded']);
   assert.ok(requests.filter(({ model }) => model === 'fixture-primary').length <= 1);
   assert.equal(requests.filter(({ model }) => model === 'fixture-backup').length, 1);
+});
+
+test('a backup request uses its own connection timeout, not the work model one', async () => {
+  const { createTurnFallback } = await import('../src/providers/pi/fallback.ts');
+  const { localModelSilenceMs } = await import('../src/providers/pi/models.ts');
+  const reply = (model: { provider: string; id: string; api: string }, error?: string) => {
+    const message = {
+      ...fauxAssistantMessage(error ? '' : 'Synthetic answer.'),
+      provider: model.provider,
+      model: model.id,
+      api: model.api,
+      ...(error ? { stopReason: 'error' as const, errorMessage: error } : {}),
+    };
+    const stream = createAssistantMessageEventStream();
+    stream.push(
+      error
+        ? { type: 'error', reason: 'error', error: message as AssistantMessage }
+        : { type: 'done', reason: 'stop', message: message as AssistantMessage },
+    );
+    stream.end(message as AssistantMessage);
+    return stream;
+  };
+  const model = (provider: string, id: string) =>
+    ({ provider, id, api: 'openai-completions', input: ['text'], contextWindow: 131_072 }) as never;
+  const timeouts: Array<[string, number | undefined]> = [];
+  const connection = (provider: string, id: string, failing: boolean) => ({
+    model: model(provider, id),
+    retryAfter: () => 1,
+    runtime: {
+      streamSimple: (target: never, _context: never, options?: { timeoutMs?: number }) => {
+        timeouts.push([id, options?.timeoutMs]);
+        return reply(target, failing ? '503 Service Unavailable (HTTP 503)' : undefined);
+      },
+    },
+  });
+  const choice = (provider: 'compatible' | 'openai', id: string): ModelAccess => ({
+    provider,
+    method: 'api_key',
+    effort: 'off',
+    read: async () => undefined,
+    definition: {
+      choice: { id, name: id, efforts: ['off'], images: false, contextWindow: 131_072 },
+      spec: {},
+    },
+  });
+  for (const [primary, backup, expected] of [
+    ['compatible', 'openai', 300_000],
+    ['openai', 'compatible', localModelSilenceMs],
+  ] as const) {
+    timeouts.length = 0;
+    const work = connection(primary, 'fixture-work', true);
+    const fallback = createTurnFallback({
+      primary: {
+        access: choice(primary, 'fixture-work'),
+        connection: work as never,
+        stream: work.runtime.streamSimple as never,
+      },
+      backups: [choice(backup, 'fixture-backup')],
+      start: 0,
+      automatic: false,
+      connect: async () => connection(backup, 'fixture-backup', false) as never,
+      floor: () => 0,
+      switched: () => {},
+      served: () => {},
+    });
+    const inherited = primary === 'compatible' ? localModelSilenceMs : 300_000;
+    for (let attempt = 0; attempt < 3; attempt++)
+      await fallback.stream(work.model, { messages: [] }, { timeoutMs: inherited }).result();
+    assert.deepEqual(timeouts, [
+      ['fixture-work', inherited],
+      ['fixture-work', inherited],
+      ['fixture-backup', expected],
+    ]);
+  }
+});
+
+test('a busy work model hands the same request to a backup and records each attempt', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-fallback-turn-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const answers: Record<string, () => { status: number; headers?: object; text?: string }> = {
+    'fixture-primary': () => ({
+      status: 429,
+      headers: { 'retry-after-ms': '5' },
+      text: 'Model is at capacity',
+    }),
+    'fixture-backup': () => ({ status: 200, text: 'Synthetic backup answer.' }),
+  };
+  const { requests, access } = await fallbackServer(t, (model) => answers[model]!());
+  const agent = createPiAgent({
+    provider: 'compatible',
+    resolve: async () => [access('fixture-primary'), access('fixture-backup')],
+    sessionRoot: directory,
+  });
+  t.after(() => agent.dispose());
+  const turn = async () => {
+    const events: AgentEvent[] = [];
+    const session = await agent.open({
+      ...fakeExecution(randomUUID()),
+      ...sandbox,
+      systemPrompt: 'Synthetic fixture',
+      tools: [],
+      shouldStop: () => false,
+      onEvent: (event) => events.push(event),
+    });
+    return { session, events };
+  };
+
+  const busy = await turn();
+  await busy.session.prompt('Synthetic question.', []);
+  await busy.session.dispose();
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-primary', 'fixture-primary', 'fixture-backup'],
+  );
+  assert.deepEqual(
+    busy.events.flatMap((event) =>
+      event.type === 'model_usage' ? [{ model: event.model, status: event.status }] : [],
+    ),
+    [
+      { model: 'fixture-primary', status: 'failed' },
+      { model: 'fixture-primary', status: 'failed' },
+      { model: 'fixture-backup', status: 'succeeded' },
+    ],
+  );
+  assert.deepEqual(
+    busy.events.filter((event) => event.type === 'fallback'),
+    [{ type: 'fallback', from: 'fixture-primary', to: 'fixture-backup', reason: 'busy' }],
+  );
+  assert.ok(
+    busy.events.some(
+      (event) => event.type === 'final' && event.text === 'Synthetic backup answer.',
+    ),
+  );
+
+  requests.length = 0;
+  answers['fixture-backup'] = () => ({ status: 503, text: 'Backend overloaded' });
+  const exhausted = await turn();
+  await exhausted.session.prompt('Synthetic question.', []);
+  await exhausted.session.dispose();
+  assert.equal(requests.length, 4);
+  const last = exhausted.events.filter((event) => event.type === 'error').at(-1);
+  assert.ok(last?.type === 'error');
+  assert.match(
+    last.message,
+    /^compatible \/ fixture-primary: .*capacity.*; then compatible \/ fixture-backup: .*Backend overloaded/,
+  );
+
+  requests.length = 0;
+  answers['fixture-primary'] = () => ({ status: 400, text: 'Model Not Exist' });
+  const rejected = await turn();
+  await rejected.session.prompt('Synthetic question.', []);
+  await rejected.session.dispose();
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-primary'],
+  );
+  assert.equal(rejected.events.filter((event) => event.type === 'fallback').length, 0);
+
+  requests.length = 0;
+  answers['fixture-primary'] = () => ({ status: 429, headers: { 'retry-after': '10' } });
+  answers['fixture-backup'] = () => ({ status: 200, text: 'Synthetic backup answer.' });
+  const stopped = await turn();
+  const started = performance.now();
+  const pending = stopped.session.prompt('Synthetic question.', []);
+  while (!requests.length) await setTimeout(10);
+  await setTimeout(50);
+  await stopped.session.abort();
+  await pending;
+  await stopped.session.dispose();
+  assert.ok(performance.now() - started < 5000);
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-primary'],
+  );
+  assert.deepEqual(
+    stopped.events.flatMap((event) => (event.type === 'model_usage' ? [event.status] : [])),
+    ['failed'],
+  );
+
+  requests.length = 0;
+  answers['fixture-primary'] = () => ({ status: 429, headers: { 'retry-after-ms': '5' } });
+  const tiny = access('fixture-tiny');
+  tiny.definition = {
+    choice: { ...tiny.definition.choice, contextWindow: 64 },
+    spec: { ...tiny.definition.spec, contextWindow: 64, maxTokens: 32 },
+  };
+  const small = createPiAgent({
+    provider: 'compatible',
+    resolve: async () => [access('fixture-primary'), tiny],
+    sessionRoot: directory,
+  });
+  t.after(() => small.dispose());
+  const skipped: AgentEvent[] = [];
+  const unsent = await small.open({
+    ...fakeExecution(randomUUID()),
+    ...sandbox,
+    systemPrompt: 'Synthetic fixture',
+    tools: [],
+    shouldStop: () => false,
+    onEvent: (event) => skipped.push(event),
+  });
+  await unsent.prompt('Synthetic question.', []);
+  await unsent.dispose();
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-primary', 'fixture-primary'],
+  );
+  assert.deepEqual(
+    skipped.flatMap((event) => (event.type === 'model_usage' ? [event.model] : [])),
+    ['fixture-primary', 'fixture-primary'],
+  );
+  const reason = skipped.filter((event) => event.type === 'error').at(-1);
+  assert.ok(reason?.type === 'error');
+  assert.match(reason.message, /fixture-tiny can't take this conversation/);
+
+  requests.length = 0;
+  answers['fixture-primary'] = () => ({ status: 504, text: 'upstream request timeout' });
+  const slow = await turn();
+  await slow.session.prompt('Synthetic question.', []);
+  await slow.session.dispose();
+  assert.deepEqual(
+    requests.map(({ model }) => model),
+    ['fixture-primary', 'fixture-backup'],
+  );
+});
+
+test('a turn with backups replaces the Pi retry check, so a Pi upgrade cannot silently turn the fallback off', async (t) => {
+  const { AgentSession } = await import('@earendil-works/pi-coding-agent');
+  assert.equal(
+    typeof (AgentSession.prototype as unknown as { _isRetryableError?: unknown })._isRetryableError,
+    'function',
+    'Pi no longer has AgentSession._isRetryableError, which the turn fallback replaces to retry on a backup model.',
+  );
+  const directory = await mkdtemp(join(tmpdir(), 'nod-fallback-hook-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { access } = await fallbackServer(t, () => ({ status: 200, text: 'Synthetic answer.' }));
+  let created: object | undefined;
+  const agent = createPiAgent({
+    provider: 'compatible',
+    resolve: async () => [access('fixture-primary'), access('fixture-backup')],
+    sessionRoot: directory,
+    createSession: async (options) => {
+      const result = await createAgentSession(options);
+      created = result.session;
+      return result;
+    },
+  });
+  t.after(() => agent.dispose());
+  const session = await agent.open({
+    ...fakeExecution(randomUUID()),
+    ...sandbox,
+    systemPrompt: 'Synthetic fixture',
+    tools: [],
+    shouldStop: () => false,
+    onEvent: () => {},
+  });
+  assert.ok(created && Object.hasOwn(created, '_isRetryableError'));
+  await session.dispose();
 });
 
 test('action review failures identify the task, model, provider, and bounded provider reason', async (t) => {
