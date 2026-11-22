@@ -18,7 +18,7 @@ import {
   timedOut,
   type ModelUnavailable,
 } from '../../shared/model-fallback.ts';
-import { localModelSilenceMs, type createPiModelRuntime } from './models.ts';
+import type { createPiModelRuntime } from './models.ts';
 import { readsNativeAudio } from './audio.ts';
 
 type Connection = Awaited<ReturnType<typeof createPiModelRuntime>>;
@@ -69,7 +69,7 @@ export function createTurnFallback(options: {
   connect(access: ModelAccess): Promise<Connection>;
   floor(): number;
   switched(at: number): void;
-  served(at: number, reason: ModelUnavailable): void;
+  served(at: number, reason: ModelUnavailable, from: number): void;
 }) {
   const candidates: Array<{ access: ModelAccess; connection?: Promise<Connection> }> = [
     { access: options.primary.access, connection: Promise.resolve(options.primary.connection) },
@@ -86,7 +86,8 @@ export function createTurnFallback(options: {
   let exhausted = false;
   let failed = at;
   let reason: ModelUnavailable | undefined = at > 0 ? 'quota' : undefined;
-  let announced = false;
+  let from = 0;
+  let announced = 0;
 
   const unavailable = (message: AssistantMessage) =>
     message.stopReason === 'error' && !isContextOverflow(message, window)
@@ -105,9 +106,9 @@ export function createTurnFallback(options: {
     if (message.stopReason !== 'error') {
       failures = wait = 0;
       tried.length = 0;
-      if (index > 0 && !announced) {
-        announced = true;
-        options.served(index, reason ?? 'busy');
+      if (index > 0 && index !== announced) {
+        announced = index;
+        options.served(index, reason ?? 'busy', from);
       }
       return;
     }
@@ -120,7 +121,8 @@ export function createTurnFallback(options: {
     failed = index;
     const kind = unavailable(message);
     if (!kind || index !== at) return;
-    reason ??= kind;
+    reason = kind;
+    from = index;
     failures++;
     if (kind === 'busy' && failures < 2 && !timedOut(message.errorMessage)) {
       wait = fallbackWait(ready.get(index)?.retryAfter(message), 15_000, 4000);
@@ -163,7 +165,6 @@ export function createTurnFallback(options: {
             ? {}
             : { onPayload: undefined, cacheRetention: undefined }),
           reasoning: level === 'off' ? undefined : level,
-          timeoutMs: candidate.access.provider === 'compatible' ? localModelSilenceMs : 300_000,
         } as SimpleStreamOptions);
       } catch (error) {
         streamOptions?.signal?.throwIfAborted();
@@ -193,6 +194,7 @@ export function createTurnFallback(options: {
       let model = target;
       let settled = false;
       const finish = (message: AssistantMessage) => {
+        if (streamOptions?.signal?.aborted) return;
         handled.add(message);
         if (settled) return;
         settled = true;

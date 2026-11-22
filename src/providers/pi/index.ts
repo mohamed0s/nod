@@ -704,10 +704,10 @@ export function createPiAgent(options: {
                   chain.findIndex((item) => modelKey(item) === turnModels.get(input.turnId)),
                 ),
               switched: (at) => turnModels.set(input.turnId, modelKey(chain[at]!)),
-              served: (at, reason) =>
+              served: (at, reason, from) =>
                 input.onEvent({
                   type: 'fallback',
-                  from: access.definition.choice.name,
+                  from: chain[from]!.definition.choice.name,
                   to: chain[at]!.definition.choice.name,
                   reason: reason === 'busy' ? 'busy' : 'unavailable',
                 }),

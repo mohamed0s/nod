@@ -279,7 +279,7 @@ export function createAgentRuntime(dependencies: {
     let completed = false;
     let lastReply = '';
     let lastPresentation = '';
-    let fallbackNoted = false;
+    let fallbackNoted: string | undefined;
     let checkInSpent = context.checkIn?.spentUsd ?? 0;
     let checkInPlan = context.checkIn?.planUsd ?? 0;
     let checkInBlocked = false;
@@ -1237,8 +1237,8 @@ export function createAgentRuntime(dependencies: {
             );
             void pendingReplies.catch(() => {});
           }
-          if (event.type === 'fallback' && !fallbackNoted) {
-            fallbackNoted = true;
+          if (event.type === 'fallback' && event.to !== fallbackNoted) {
+            fallbackNoted = event.to;
             const note = `${event.from} was ${event.reason}, so this used ${event.to}.`;
             pendingReplies = pendingReplies.then(() =>
               context.emit('retry', note, { execution }).catch(() => {}),
