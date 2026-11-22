@@ -9,16 +9,16 @@ import { Steps } from '@astrojs/starlight/components';
 
 This page moves a Windows source install (`pnpm start`, set up with `scripts\windows\install.ps1`) into a desktop app profile that you run with `pnpm run desktop:dev`. Your source install stays as it was, so you can go back to it.
 
+It works for the developer run only. The desktop app reads `NOD_DESKTOP_USER_DATA` only when it runs unpackaged, so an installed copy of Nod keeps its own profile in `%APPDATA%\nod`.
+
 The two installs use different owner IDs. The source owner is always `local-development`, while the desktop profile has its own ID in `profile.json`. Saved logins and connections are encrypted for one owner, so a plain copy wouldn't open. The move rewrites every place that names the old owner and keeps the same Vault key.
 
 ```mermaid
 flowchart LR
   source[Source install<br/>database, .local, Docker volumes]:::muted --> convert[convert.ts<br/>scratch database]
   convert --> staging[Staging folder]:::accent
-  staging --> key[vault-key.ts<br/>desktop settings]
-  staging --> import[import.ts<br/>desktop computer]
-  key --> desktop[Desktop profile]:::go
-  import --> desktop
+  staging --> import[import.ts<br/>Vault key, database,<br/>volumes, files]
+  import --> desktop[Desktop profile]:::go
 ```
 
 ## What moves
@@ -33,14 +33,14 @@ flowchart LR
 | Workspace files, installed tools, browser sign-ins                        | Copied into the desktop computer's volumes                     |
 | Telegram polling position                                                 | Kept, so old messages aren't answered again                    |
 
-Access keys, logs, diagnostics, speech model downloads and analytics IDs stay behind. The desktop app makes its own.
+Access keys, logs, diagnostics, speech model downloads and analytics IDs stay behind. The desktop app makes its own. An attachment whose file was already missing in the source stays as it was and is listed in the convert summary.
 
 ## Before you start
 
 - Run the commands in PowerShell from your source `nod` folder, after `pnpm --dir desktop install`.
 - Keep Docker Desktop running. The source data and a short-lived scratch database use it.
-- Have free space for about twice your `.local` folder and Docker volumes on the drive that holds the staging folder.
-- Pick a desktop folder and keep it in one variable. Every step and every later launch must use exactly the same text, including the drive letter's case.
+- Have free space for about three times your `.local` folder and Docker volumes on the drive that holds the staging folder. Import also saves the desktop's current data there before it replaces it.
+- Pick a desktop folder and keep it in one variable. Every step and every later launch must use exactly the same text, including the drive letter's case. Keep the desktop folder and the staging folder outside the source `.local` folder.
 
   ```powershell
   $env:NOD_DESKTOP_USER_DATA = 'D:\Nod\desktop'
@@ -60,7 +60,7 @@ Access keys, logs, diagnostics, speech model downloads and analytics IDs stay be
 
    ```powershell
    scripts\windows\stop.ps1
-   Disable-ScheduledTask -TaskPath '\Nod\' -TaskName start, wake, backup
+   Get-ScheduledTask -TaskPath '\Nod\' | Disable-ScheduledTask
    ```
 
 3. Start only the source database and back it up. The backup folder's `database.dump` is the input for the next step.
@@ -71,30 +71,26 @@ Access keys, logs, diagnostics, speech model downloads and analytics IDs stay be
    docker compose stop postgres
    ```
 
-4. Convert. Choose a new, empty `--out` folder. Nothing in the source changes.
+4. Convert. Choose a new, empty `--out` folder. Nothing in the source changes. Only your Windows user, SYSTEM and Administrators can open the new folder.
 
    ```powershell
    pnpm exec tsx scripts\windows\desktop-move\convert.ts --dump D:\Nod\move\backup\<stamp>\database.dump --source-root .local --env .env --user-data $env:NOD_DESKTOP_USER_DATA --out D:\Nod\move\staging
    ```
 
-5. Give the desktop profile your source Vault key. The old desktop settings are kept as `settings.json.before-move`.
+5. Check the import plan, then import.
 
    ```powershell
-   pnpm exec tsx scripts\windows\desktop-move\vault-key.ts --staging D:\Nod\move\staging --env .env
+   pnpm exec tsx scripts\windows\desktop-move\import.ts --staging D:\Nod\move\staging --env .env --dry-run
+   pnpm exec tsx scripts\windows\desktop-move\import.ts --staging D:\Nod\move\staging --env .env
    ```
 
-6. Check the import plan, then import.
+6. Open the desktop app with the same `NOD_DESKTOP_USER_DATA`.
 
-   ```powershell
-   pnpm exec tsx scripts\windows\desktop-move\import.ts --staging D:\Nod\move\staging --dry-run
-   pnpm exec tsx scripts\windows\desktop-move\import.ts --staging D:\Nod\move\staging
-   ```
-
-7. Open the desktop app with the same `NOD_DESKTOP_USER_DATA`.
+7. When everything works, send the staging folder and the backup folder to the Recycle Bin. They hold a full copy of your database, browser sign-ins and workspace.
 
 </Steps>
 
-Convert refuses to run while the source install is running. The Vault key and import steps refuse while the desktop app is open.
+Convert refuses to run while the source install is running. Import refuses while the desktop app or its private computer is running.
 
 ## What convert checks
 
@@ -102,21 +98,32 @@ Convert restores the dump into a scratch database and works there in one transac
 
 1. It opens every saved secret with your Vault key and the source owner. If one doesn't open, it stops and names the table, before anything is written.
 2. It encrypts each secret again for the desktop owner, checks that it opens, and checks that it no longer opens for the source owner.
-3. It replaces every value that is exactly the old owner ID, in any column of any table, including values inside JSON and lists. It fixes attachment paths, clears lock records and removes the old Vault key check, which the desktop app makes again.
-4. It searches every text and JSON column for the old owner, its hash and the source data folder. Your own messages, memory notes, task text and tool output can mention them, so those columns are allowed and reported. Any other match stops the move and names the column. If that column holds only text you or Nod wrote, add `--allow-content <schema.table.column>` and run convert again.
+3. It replaces the old owner ID in identifier columns, such as `owner_id` and other `*_id` and `*_key` columns, and in JSON values stored under an `owner` or `ownerId` key or used as a key. Your own text keeps its words, even a message that says only `local-development`. It also fixes attachment paths, clears lock records and removes the old Vault key check, which the desktop app makes again.
+4. It searches every text, JSON and binary column for the old owner, its hash and the source data folder. Your own messages, memory notes, task text and tool output can mention them, so those columns are allowed and reported. Any other match stops the move and names the column. If that column holds only text you or Nod wrote, add `--allow-content <schema.table.column>` and run convert again.
 
 The staging folder holds `plan.json`, the converted `database.dump`, the profile files and the volume archives. A folder without `plan.json` is unfinished, and import refuses it.
 
-Import replaces the desktop database in one transaction, then checks each table's row count against the plan. If import stops partway, run it again.
+## What import does
+
+1. It gives the desktop profile your source Vault key, keeps the old settings as `settings.json.before-move`, and checks in a second launch that the profile unlocks to the source key. It refuses if the profile's saved key doesn't open, because that means it isn't using the same Windows key store as Nod.
+2. It saves the desktop's current database, volumes and the profile files it will replace in a `before-import-<time>` folder inside the staging folder.
+3. It replaces the desktop database in one transaction and checks every table's row count before committing, so a wrong or damaged dump changes nothing.
+4. It copies the workspace, tools and browser data, then the profile files. When the source has no app identity, it moves the desktop's own one aside, so the desktop app makes a new one for the source key.
+
+Import starts with the key step, so don't open Nod until import says it's done. If import stops partway, run it again. To undo only the key step, copy `settings.json.before-move` over `settings.json` in the desktop profile.
+
+After a finished import, the desktop profile holds a `desktop-move-import.json` marker. A second import would replace everything the desktop app did since, so import refuses it unless you add `--again`.
 
 ## Go back to the source install
 
 The source install isn't changed. To use it again, quit the desktop app, then turn its autostart back on and start it.
 
 ```powershell
-Enable-ScheduledTask -TaskPath '\Nod\' -TaskName start, wake, backup
+Get-ScheduledTask -TaskPath '\Nod\' | Enable-ScheduledTask
 Start-ScheduledTask -TaskPath '\Nod\' -TaskName start
 ```
+
+WhatsApp keeps one linked session. If the desktop app used it, link WhatsApp again in the source install.
 
 To start the desktop profile over, choose **Remove all data** in the desktop app, or quit it and delete the desktop folder and its private computer.
 
