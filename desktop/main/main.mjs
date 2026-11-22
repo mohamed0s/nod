@@ -3181,6 +3181,7 @@ else {
                 resourcesPath: engineRoot,
                 signal,
                 includeRuntime,
+                publisher: nodBuild?.updatePublisher,
                 onProgress: (progress) => report('downloading', progress),
               });
               void updateEvent('download-finished', {

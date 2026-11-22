@@ -116,6 +116,7 @@ import { clearInstalledWindowsUpdates } from '../main/windows-update.mjs';
 import {
   protectWindowsProfile,
   stageWindowsUpdate,
+  unsignedWindowsFiles,
   windowsEnvironment,
 } from '../runtime/windows.mjs';
 import { buildDesktopUI } from '../scripts/build-ui.mjs';
@@ -8473,6 +8474,8 @@ async function updatePreparation({
   resourcesPath,
   request,
   runtime,
+  nodBuild = {},
+  unsigned = signed,
 }) {
   const source = await readFile(new URL('../main/main.mjs', import.meta.url), 'utf8');
   const start = source.indexOf('          prepareRuntime: async (candidate, signal, report) => {');
@@ -8485,6 +8488,7 @@ async function updatePreparation({
     {
       settings,
       windows,
+      nodBuild,
       windowsUpdates: directory,
       engineRoot: resourcesPath,
       pathToFileURL,
@@ -8497,7 +8501,7 @@ async function updatePreparation({
         url.endsWith('/windows.mjs')
           ? {
               stageWindowsUpdate: (candidate, options) =>
-                stageWindowsUpdate(candidate, { ...options, fetch: request, unsigned: signed }),
+                stageWindowsUpdate(candidate, { ...options, fetch: request, unsigned }),
             }
           : { prepareRuntimeUpdate: runtime },
       preloadUpdateImages: () => assert.fail('An unopened runtime cannot preload images.'),
@@ -8718,6 +8722,26 @@ test('Windows downloads stage the verified installer and fetch the runtime pack 
       bytes['nod-Setup-x64.exe'],
     );
   }
+
+  const publishers = [];
+  for (const nodBuild of [
+    {},
+    { updateRepository: 'synthetic-owner/nod', updatePublisher: 'unsigned' },
+  ]) {
+    const storage = await fixture(t);
+    await rm(directory, { recursive: true, force: true });
+    const prepare = await updatePreparation({
+      settings: storage.store,
+      windows: true,
+      directory,
+      resourcesPath,
+      request,
+      nodBuild,
+      unsigned: async (_files, options) => (publishers.push(options.publisher), []),
+    });
+    await prepare(candidate, undefined, () => {});
+  }
+  assert.deepEqual(publishers, [undefined, 'unsigned']);
 
   const source = createUpdateSource({ sourceUrl: base, os: 'win32', fetch: request });
   const runtime = {
@@ -10730,6 +10754,55 @@ test('Windows update staging checks cached hashes and removes an installer with 
     /update is invalid/,
   );
 });
+
+test(
+  'Windows updates take an unsigned installer only in builds set to unsigned updates, and never a broken or foreign signature',
+  { skip: process.platform !== 'win32', timeout: 180_000 },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'nod-update-signatures-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const foreign = await readFile(process.execPath);
+    const header = foreign.readUInt32LE(0x3c) + 24;
+    const table = header + (foreign.readUInt16LE(header) === 0x20b ? 112 : 96) + 32;
+    assert.ok(foreign.readUInt32LE(table) > 0, 'Node.js for Windows carries a signature.');
+    const unsigned = Buffer.from(foreign.subarray(0, foreign.readUInt32LE(table)));
+    unsigned.fill(0, table, table + 8);
+    const tampered = Buffer.from(foreign);
+    tampered[foreign.length >> 1] ^= 0xff;
+    const files = { unsigned: join(root, 'unsigned.exe'), tampered: join(root, 'tampered.exe') };
+    await writeFile(files.unsigned, unsigned);
+    await writeFile(files.tampered, tampered);
+    const checked = [files.unsigned, files.tampered, process.execPath];
+    const refused = async (publisher) =>
+      (await unsignedWindowsFiles(checked, { publisher })).map((line) =>
+        checked.findIndex((path) => line.startsWith(`${path} (`)),
+      );
+    assert.deepEqual(await refused(undefined), [0, 1, 2]);
+    assert.deepEqual(await refused('unsigned'), [1, 2]);
+    const stage = (served) =>
+      stageWindowsUpdate(
+        {
+          version: '0.10.0',
+          installer: {
+            file: 'nod-Setup-x64.exe',
+            url: 'https://updates.example.invalid/nod-Setup-x64.exe',
+            bytes: unsigned.length,
+            sha256: createHash('sha256').update(unsigned).digest('hex'),
+          },
+          runtime: { file: 'nod-Runtime-win32-x64.tar.gz', bytes: 1, sha256: 'a'.repeat(64) },
+        },
+        {
+          directory: join(root, 'updates'),
+          resourcesPath: root,
+          includeRuntime: false,
+          publisher: 'unsigned',
+          fetch: async () => new Response(served),
+        },
+      );
+    await assert.rejects(stage(Buffer.alloc(unsigned.length)), /integrity check/);
+    await stage(unsigned);
+  },
+);
 
 test(
   'a stalled Windows update stops and keeps bytes for the next background check',

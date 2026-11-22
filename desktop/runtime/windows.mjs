@@ -146,12 +146,13 @@ async function download(
   }
 }
 
-export async function unsignedWindowsFiles(files, { release = false, signal } = {}) {
+export async function unsignedWindowsFiles(files, { release = false, publisher, signal } = {}) {
   const env = {
     ...windowsEnvironment(),
     NOD_PUBLISHER: windowsPublisher.name,
     NOD_PUBLISHER_PROFILE: windowsPublisher.profile,
     NOD_RELEASE: release ? '1' : '0',
+    NOD_UNSIGNED: publisher === 'unsigned' ? '1' : '0',
   };
   const unsigned = [];
   for (let index = 0; index < files.length; index += 50) {
@@ -161,7 +162,7 @@ export async function unsignedWindowsFiles(files, { release = false, signal } = 
         '-NoProfile',
         '-NonInteractive',
         '-Command',
-        "$ErrorActionPreference = 'Stop'; foreach ($file in (ConvertFrom-Json $env:NOD_SIGNED_FILES)) { $signature = Get-AuthenticodeSignature -LiteralPath $file; $certificate = $signature.SignerCertificate; $valid = $signature.Status -eq 'Valid'; $ours = $valid -and $certificate.GetNameInfo('SimpleName', $false) -eq $env:NOD_PUBLISHER -and @($certificate.EnhancedKeyUsageList.ObjectId) -contains $env:NOD_PUBLISHER_PROFILE -and ($env:NOD_RELEASE -ne '1' -or $signature.TimeStamperCertificate); $windows = $valid -and $env:NOD_RELEASE -eq '1' -and $signature.SignatureType -eq 'Catalog' -and $certificate.Subject -like '*, O=Microsoft Corporation,*'; if (-not ($ours -or $windows)) { \"$file ($($signature.Status), $($signature.SignatureType), $($certificate.Subject))\" } }",
+        "$ErrorActionPreference = 'Stop'; foreach ($file in (ConvertFrom-Json $env:NOD_SIGNED_FILES)) { $signature = Get-AuthenticodeSignature -LiteralPath $file; $certificate = $signature.SignerCertificate; $valid = $signature.Status -eq 'Valid'; $ours = $valid -and $certificate.GetNameInfo('SimpleName', $false) -eq $env:NOD_PUBLISHER -and @($certificate.EnhancedKeyUsageList.ObjectId) -contains $env:NOD_PUBLISHER_PROFILE -and ($env:NOD_RELEASE -ne '1' -or $signature.TimeStamperCertificate); $windows = $valid -and $env:NOD_RELEASE -eq '1' -and $signature.SignatureType -eq 'Catalog' -and $certificate.Subject -like '*, O=Microsoft Corporation,*'; $none = $env:NOD_UNSIGNED -eq '1' -and $signature.Status -eq 'NotSigned'; if (-not ($ours -or $windows -or $none)) { \"$file ($($signature.Status), $($signature.SignatureType), $($certificate.Subject))\" } }",
       ],
       {
         env: { ...env, NOD_SIGNED_FILES: JSON.stringify(files.slice(index, index + 50)) },
@@ -182,6 +183,7 @@ export async function stageWindowsUpdate(
     signal,
     fetch,
     includeRuntime = true,
+    publisher,
     onProgress = () => {},
     unsigned = unsignedWindowsFiles,
     stallTimeout,
@@ -207,9 +209,14 @@ export async function stageWindowsUpdate(
       await rm(join(directory, name), { recursive: true, force: true });
   const refused = join(target, 'refused-installer');
   const untrusted = () =>
-    Object.assign(new Error(`The Nod update is not signed by ${windowsPublisher.name}.`), {
-      code: 'NOD_UPDATE_UNTRUSTED',
-    });
+    Object.assign(
+      new Error(
+        publisher === 'unsigned'
+          ? 'The Nod update has an invalid signature or one from another publisher.'
+          : `The Nod update is not signed by ${windowsPublisher.name}.`,
+      ),
+      { code: 'NOD_UPDATE_UNTRUSTED' },
+    );
   if ((await readFile(refused, 'utf8').catch(() => '')) === candidate.installer.sha256)
     throw untrusted();
   const files = [candidate.installer];
@@ -234,7 +241,7 @@ export async function stageWindowsUpdate(
     done += file.bytes;
     onProgress(done / total);
   }
-  if ((await unsigned([join(target, candidate.installer.file)], { signal })).length) {
+  if ((await unsigned([join(target, candidate.installer.file)], { publisher, signal })).length) {
     await rm(join(target, candidate.installer.file), { force: true });
     await writeFile(refused, candidate.installer.sha256);
     throw untrusted();
