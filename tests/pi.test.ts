@@ -10237,6 +10237,14 @@ test('model HTTP failures keep their response status within each request and ret
   assert.ok(reports.every(({ status }) => status === 'failed'));
 });
 
+async function eventually(check: () => boolean, milliseconds = 5000) {
+  const deadline = performance.now() + milliseconds;
+  while (!check()) {
+    assert.ok(performance.now() < deadline, 'The expected event did not arrive in time.');
+    await setTimeout(10);
+  }
+}
+
 async function fallbackServer(
   t: TestContext,
   answer: (
@@ -10654,7 +10662,7 @@ test('errors the fallback does not handle keep Pi backoff instead of a fast retr
     onEvent: () => {},
   });
   const pending = session.prompt('Synthetic question.', []);
-  while (!delays.length) await setTimeout(10);
+  await eventually(() => delays.length > 0);
   await setTimeout(200);
   assert.deepEqual(delays, [4000]);
   assert.deepEqual(
@@ -11018,7 +11026,7 @@ test('a busy work model hands the same request to a backup and records each atte
   const stopped = await turn();
   const started = performance.now();
   const pending = stopped.session.prompt('Synthetic question.', []);
-  while (!requests.length) await setTimeout(10);
+  await eventually(() => requests.length > 0);
   await setTimeout(50);
   await stopped.session.abort();
   await pending;
