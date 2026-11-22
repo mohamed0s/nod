@@ -10466,6 +10466,83 @@ test('a turn fallback moves on only when Pi gives up, names each new model, keep
   );
 });
 
+test('a turn fallback moves a text-only request off a native-audio model and prices each attempt with the model that served it', async () => {
+  const { createTurnFallback } = await import('../src/providers/pi/fallback.ts');
+  const busy = '503 Service Unavailable (HTTP 503)';
+  const connection = (provider: string, id: string, input: number, failing: boolean) => {
+    const model = {
+      provider,
+      id,
+      api: 'openai-completions',
+      input: ['text'],
+      contextWindow: 131_072,
+      cost: { input, output: input, cacheRead: 0, cacheWrite: 0 },
+    };
+    return {
+      model,
+      runtime: {
+        streamSimple: () => {
+          const message = {
+            ...fauxAssistantMessage(failing ? '' : 'Synthetic answer.'),
+            provider,
+            model: id,
+            api: 'openai-completions',
+            ...(failing ? { stopReason: 'error' as const, errorMessage: busy } : {}),
+          } as AssistantMessage;
+          const stream = createAssistantMessageEventStream();
+          stream.push(
+            failing
+              ? { type: 'error', reason: 'error', error: message }
+              : { type: 'done', reason: 'stop', message },
+          );
+          stream.end(message);
+          return stream;
+        },
+        getModel: () => undefined,
+      },
+    };
+  };
+  const choice = (provider: 'openai' | 'compatible', id: string): ModelAccess => ({
+    provider,
+    method: 'api_key',
+    effort: 'off',
+    read: async () => undefined,
+    definition: {
+      choice: { id, name: id, efforts: ['off'], images: false, contextWindow: 131_072 },
+      spec: {},
+    },
+  });
+  for (const [provider, id] of [
+    ['openai', 'gpt-audio-1.5'],
+    ['compatible', 'fixture-shared'],
+  ] as const) {
+    const work = connection(provider, id, 1, true);
+    const fallback = createTurnFallback({
+      primary: {
+        access: choice(provider, id),
+        connection: work as never,
+        stream: work.runtime.streamSimple as never,
+      },
+      backups: [choice('compatible', 'fixture-shared')],
+      start: 0,
+      automatic: false,
+      connect: async () => connection('compatible', 'fixture-shared', 5, false) as never,
+      retrying: () => false,
+      floor: () => 0,
+      switched: () => {},
+      served: () => {},
+      failed: () => {},
+    });
+    const result = await fallback
+      .stream(work.model as never, {
+        messages: [{ role: 'user', content: 'Synthetic question.', timestamp: 1 }],
+      })
+      .result();
+    assert.equal(result.stopReason, 'stop');
+    assert.equal(fallback.model(result)?.cost.input, 5);
+  }
+});
+
 test('an automatic turn starts on a backup only when its work model is paused', async (t) => {
   const { ModelPausedError } = await import('../src/ports/models.ts');
   const directory = await mkdtemp(join(tmpdir(), 'nod-fallback-paused-'));

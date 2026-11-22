@@ -13,7 +13,7 @@ import {
 import { estimateTokens } from '@earendil-works/pi-coding-agent';
 import { ModelPausedError, type ModelAccess } from '../../ports/models.ts';
 import type { createPiModelRuntime } from './models.ts';
-import { readsNativeAudio } from './audio.ts';
+import { hasNativeAudio, readsNativeAudio } from './audio.ts';
 
 type Connection = Awaited<ReturnType<typeof createPiModelRuntime>>;
 type Stream = Connection['runtime']['streamSimple'];
@@ -74,6 +74,7 @@ export function createTurnFallback(options: {
     ...options.backups.map((access) => ({ access })),
   ];
   const ready = new Map<number, Connection>([[0, options.primary.connection]]);
+  const served = new WeakMap<object, Model<Api>>();
   const tried: string[] = [];
   let at = Math.min(options.start, candidates.length - 1);
   let from = 0;
@@ -126,7 +127,7 @@ export function createTurnFallback(options: {
       if (
         (streamOptions?.maxTokens === 1 && streamOptions.maxRetries === 0) ||
         target.api === 'pi-virtual' ||
-        readsNativeAudio(target)
+        (readsNativeAudio(target) && hasNativeAudio(context))
       )
         return options.primary.stream(target, context, streamOptions);
       const out = createAssistantMessageEventStream();
@@ -163,17 +164,21 @@ export function createTurnFallback(options: {
                 announced = index;
                 options.served(index, from);
               }
+              if (event.type === 'done') served.set(event.message, model);
+              if (event.type === 'error') served.set(event.error, model);
               if (!sent) for (const item of held.splice(0)) out.push(item);
               sent = true;
               out.push(event);
             }
             if (!failure) {
               const result = await opened.upstream.result();
+              served.set(result, model);
               if (result.stopReason !== 'error' && result.stopReason !== 'aborted')
                 tried.length = 0;
               out.end(result);
               return;
             }
+            served.set(failure, model);
             options.failed(failure);
             from = index;
             reason = failure.errorMessage?.trim() || 'The provider gave no reason.';
@@ -218,12 +223,14 @@ export function createTurnFallback(options: {
       });
       return candidates[index ?? at]!.access.method;
     },
-    model(provider: string, id: string) {
-      for (const connection of ready.values()) {
+    model(usage: { provider: string; model: string }) {
+      const exact = served.get(usage);
+      if (exact) return exact;
+      for (const connection of [ready.get(at), ...ready.values()]) {
         const found =
-          connection.model.provider === provider && connection.model.id === id
+          connection?.model.provider === usage.provider && connection.model.id === usage.model
             ? connection.model
-            : connection.runtime.getModel(provider, id);
+            : connection?.runtime.getModel(usage.provider, usage.model);
         if (found) return found;
       }
       return undefined;
