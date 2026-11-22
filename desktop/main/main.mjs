@@ -53,6 +53,7 @@ import { createMacEncryption } from './mac-encryption.mjs';
 import {
   createDesktopUpdater,
   createUpdateSource,
+  forkReleasesPage,
   macInstallerRunning,
   startDesktopUpdateChecks,
 } from './updates.mjs';
@@ -218,6 +219,7 @@ let installingUpdate = false;
 let macInstallerBusy = false;
 let macInstallerWait;
 let updateSource;
+let updateDownloadPage = 'https://nod.n8n.io/docs/get-started/install-desktop/';
 let updates;
 let checkingUpdates;
 let updateRequestedManually = false;
@@ -2244,7 +2246,7 @@ function updateFailureDetails(error) {
 async function openUpdateDownload() {
   while (!installingUpdate) {
     try {
-      await shell.openExternal('https://nod.n8n.io/docs/get-started/install-desktop/');
+      await shell.openExternal(updateDownloadPage);
       return;
     } catch (error) {
       const detail = updateFailureDetails(error);
@@ -2252,7 +2254,7 @@ async function openUpdateDownload() {
       const { response } = await dialog.showMessageBox({
         type: 'info',
         message: 'Nod could not open the download page.',
-        detail: `${detail}\n\nhttps://nod.n8n.io/docs/get-started/install-desktop/`,
+        detail: `${detail}\n\n${updateDownloadPage}`,
         buttons: ['Try again', quitting ? 'Quit Nod' : 'Not now'],
         defaultId: 1,
         cancelId: 1,
@@ -3151,6 +3153,7 @@ else {
           sourceUrl: nodBuild?.updateSourceUrl,
           repository: nodBuild?.updateRepository,
         });
+        updateDownloadPage = forkReleasesPage(nodBuild) ?? updateDownloadPage;
         updates = createDesktopUpdater({
           source: updateSource,
           currentVersion: app.getVersion(),
@@ -3182,6 +3185,7 @@ else {
                 signal,
                 includeRuntime,
                 publisher: nodBuild?.updatePublisher,
+                recheck: updateRequestedManually,
                 onProgress: (progress) => report('downloading', progress),
               });
               void updateEvent('download-finished', {

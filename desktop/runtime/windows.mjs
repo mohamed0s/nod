@@ -184,6 +184,7 @@ export async function stageWindowsUpdate(
     fetch,
     includeRuntime = true,
     publisher,
+    recheck = false,
     onProgress = () => {},
     unsigned = unsignedWindowsFiles,
     stallTimeout,
@@ -208,17 +209,22 @@ export async function stageWindowsUpdate(
     if (/^\d+\.\d+\.\d+$/.test(name) && name !== candidate.version)
       await rm(join(directory, name), { recursive: true, force: true });
   const refused = join(target, 'refused-installer');
-  const untrusted = () =>
+  const untrusted = ([status, type] = []) =>
     Object.assign(
       new Error(
-        publisher === 'unsigned'
+        (publisher === 'unsigned'
           ? 'The Nod update has an invalid signature or one from another publisher.'
-          : `The Nod update is not signed by ${windowsPublisher.name}.`,
+          : `The Nod update is not signed by ${windowsPublisher.name}.`) +
+          (status ? ` Signature status: ${status}, type: ${type}.` : ''),
       ),
       { code: 'NOD_UPDATE_UNTRUSTED' },
     );
-  if ((await readFile(refused, 'utf8').catch(() => '')) === candidate.installer.sha256)
-    throw untrusted();
+  if (recheck) await rm(refused, { force: true });
+  const [, refusedHash, ...refusedSignature] =
+    (await readFile(refused, 'utf8').catch(() => '')).match(
+      /^([a-f0-9]{64}) ([A-Za-z]{1,32}) ([A-Za-z]{1,32})$/,
+    ) ?? [];
+  if (refusedHash === candidate.installer.sha256) throw untrusted(refusedSignature);
   const files = [candidate.installer];
   if (includeRuntime) {
     const installed = JSON.parse(
@@ -241,10 +247,18 @@ export async function stageWindowsUpdate(
     done += file.bytes;
     onProgress(done / total);
   }
-  if ((await unsigned([join(target, candidate.installer.file)], { publisher, signal })).length) {
-    await rm(join(target, candidate.installer.file), { force: true });
-    await writeFile(refused, candidate.installer.sha256);
-    throw untrusted();
+  const installer = join(target, candidate.installer.file);
+  const [refusal] = await unsigned([installer], { publisher, signal });
+  if (refusal) {
+    await rm(installer, { force: true });
+    const signature =
+      refusal
+        .slice(installer.length)
+        .match(/^ \(([A-Za-z]{1,32}), ([A-Za-z]{1,32}),/)
+        ?.slice(1) ?? [];
+    if (['NotSigned', 'HashMismatch', 'Valid'].includes(signature[0]))
+      await writeFile(refused, `${candidate.installer.sha256} ${signature.join(' ')}`);
+    throw untrusted(signature);
   }
   return target;
 }

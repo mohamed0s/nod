@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const defaultRepository = 'n8n-io/nod';
+const repositoryPattern = /^[A-Za-z0-9-]+\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const hash = /^[a-f0-9]{64}$/;
 const sourceHash = /^[a-f0-9]{40}$/;
 const versionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -115,6 +116,16 @@ async function githubReleaseTag(repository, name, request, signal) {
   return tag;
 }
 
+export function forkReleasesPage({ updateSourceUrl, updateRepository } = {}) {
+  if (
+    updateSourceUrl ||
+    !repositoryPattern.test(updateRepository ?? '') ||
+    updateRepository.toLowerCase() === defaultRepository
+  )
+    return undefined;
+  return `https://github.com/${updateRepository}/releases/latest`;
+}
+
 export function createUpdateSource({
   sourceUrl,
   repository = defaultRepository,
@@ -122,7 +133,7 @@ export function createUpdateSource({
   arch = process.platform === 'darwin' ? process.arch : 'arm64',
   fetch: request = fetch,
 } = {}) {
-  if (!/^[A-Za-z0-9-]+\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(repository))
+  if (!repositoryPattern.test(repository))
     throw new Error('The desktop update repository is invalid.');
   if (os === 'darwin' && !['arm64', 'x64'].includes(arch))
     throw new Error('Unsupported Mac update architecture.');
