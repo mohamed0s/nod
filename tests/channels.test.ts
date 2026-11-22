@@ -6819,9 +6819,14 @@ test(
     const ownerId = 'fixture-main-topic-owner';
     const threadId = await createFixtureTables(pool, ownerId);
     await pool.query(`ALTER TABLE turns ADD COLUMN task_id uuid;
+      ALTER TABLE turns DROP COLUMN session_id;
+      ALTER TABLE turns ADD COLUMN session_id uuid;
       CREATE TABLE tasks(id uuid PRIMARY KEY,owner_id text NOT NULL,turn_id uuid,session_id uuid,message_id uuid,title text NOT NULL,title_by text);
-      CREATE TABLE approvals(id uuid PRIMARY KEY,owner_id text NOT NULL,confirmation_message_id uuid,status text NOT NULL)`);
+      CREATE TABLE approvals(id uuid PRIMARY KEY,owner_id text NOT NULL,thread_id uuid NOT NULL,turn_id uuid NOT NULL,
+        confirmation_message_id uuid NOT NULL,status text NOT NULL,action text NOT NULL,title text,decline text)`);
+    let topicsOn = true;
     let ownerTopics = true;
+    let creating: 'ok' | 'refused' | 'busy' = 'ok';
     const gone = new Set<number>();
     const created: Record<string, unknown>[] = [];
     const sent: Record<string, unknown>[] = [];
@@ -6841,12 +6846,32 @@ test(
               is_bot: true,
               first_name: 'Fixture',
               username: 'fixture_bot',
-              has_topics_enabled: true,
-              ...(ownerTopics ? { allows_users_to_create_topics: true } : {}),
+              ...(topicsOn ? { has_topics_enabled: true } : {}),
+              ...(topicsOn && ownerTopics ? { allows_users_to_create_topics: true } : {}),
             },
           });
+        if (method === 'getWebhookInfo')
+          return Response.json({
+            ok: true,
+            result: { url: 'https://example.test/hook', allowed_updates: [] },
+          });
+        if (method === 'answerCallbackQuery') return Response.json({ ok: true, result: true });
         if (method === 'editForumTopic') return Response.json({ ok: true, result: true });
         if (method === 'createForumTopic') {
+          if (creating === 'refused')
+            return Response.json(
+              {
+                ok: false,
+                error_code: 400,
+                description: 'Bad Request: not enough rights to manage topics',
+              },
+              { status: 400 },
+            );
+          if (creating === 'busy')
+            return Response.json(
+              { ok: false, error_code: 429, description: 'Too Many Requests: retry after 5' },
+              { status: 429 },
+            );
           created.push(body);
           return Response.json({
             ok: true,
@@ -6860,11 +6885,12 @@ test(
               { ok: false, error_code: 400, description: 'Bad Request: message thread not found' },
               { status: 400 },
             );
-          sent.push({ ...body, message_thread_id: thread });
+          const messageId = 101 + sent.length;
+          sent.push({ ...body, message_thread_id: thread, message_id: messageId });
           return Response.json({
             ok: true,
             result: {
-              message_id: 100 + sent.length,
+              message_id: messageId,
               date: Math.floor(Date.now() / 1000),
               chat: { id: 123456, type: 'private' },
               text: body.text,
@@ -6877,8 +6903,9 @@ test(
     );
     const submitted: Array<{ replyToMessageId?: string; sessionId?: string }> = [];
     const answers: Array<{ replyToMessageId?: string; shownMessageId?: string }> = [];
-    const commands: string[] = [];
+    const commands: Array<{ command: string; replyToMessageId?: string; hasReply?: boolean }> = [];
     const codes: Array<string | undefined> = [];
+    const tapped: Array<{ messageId: string; approvalId: string }> = [];
     channels = await createChannels(pool, {
       ownerId,
       transport: createChatSdkTransport(pool, fixtureEnv),
@@ -6888,6 +6915,9 @@ test(
       answer: async (_text, _channel, replyToMessageId, shownMessageId) => {
         answers.push({ replyToMessageId, shownMessageId });
         return undefined;
+      },
+      acceptApproval: async (_client, input) => {
+        tapped.push({ messageId: input.messageId, approvalId: input.approvalId });
       },
       acceptVerification: async (_text, input) => {
         codes.push(input.sessionId);
@@ -6901,8 +6931,8 @@ test(
         }
         return undefined;
       },
-      taskCommand: async (_client, command) => {
-        commands.push(command);
+      taskCommand: async (_client, command, replyToMessageId, hasReply) => {
+        commands.push({ command, replyToMessageId, hasReply });
         return { threadId, replies: [{ text: `Synthetic ${command} reply` }] };
       },
       submit: async (text, sourceId, client, channel, ...rest) => {
@@ -6925,8 +6955,8 @@ test(
             [sessionId, ownerId, turnId, text],
           );
         await client.query(
-          "INSERT INTO turns(id,owner_id,thread_id,source_id,channel,status,task_id) VALUES($1,$2,$3,$4,$5,'succeeded',$6)",
-          [turnId, ownerId, threadId, sourceId, channel, task],
+          "INSERT INTO turns(id,owner_id,thread_id,source_id,channel,status,task_id,session_id) VALUES($1,$2,$3,$4,$5,'succeeded',$6,$7)",
+          [turnId, ownerId, threadId, sourceId, channel, task, task ?? threadId],
         );
         return turnId;
       },
@@ -6934,7 +6964,7 @@ test(
     channels.registerRoutes(app);
     const service = channels;
     let update = 0;
-    const receive = async (text: string, topic?: number) => {
+    const webhook = async (payload: Record<string, unknown>) => {
       update++;
       const response = await app.inject({
         method: 'POST',
@@ -6943,26 +6973,28 @@ test(
           'content-type': 'application/json',
           'x-telegram-bot-api-secret-token': fixtureEnv.TELEGRAM_WEBHOOK_SECRET_TOKEN,
         },
-        payload: JSON.stringify({
-          update_id: update,
-          message: {
-            message_id: update,
-            date: Math.floor(Date.now() / 1000),
-            text,
-            from: { id: 123456, is_bot: false, first_name: 'Fixture' },
-            chat: { id: 123456, type: 'private' },
-            ...(topic
-              ? {
-                  message_thread_id: topic,
-                  is_topic_message: true,
-                  reply_to_message: { message_id: topic },
-                }
-              : {}),
-          },
-        }),
+        payload: JSON.stringify({ update_id: update, ...payload }),
       });
       assert.equal(response.statusCode, 200);
       await service.drain();
+    };
+    const receive = async (text: string, topic?: number) => {
+      await webhook({
+        message: {
+          message_id: update + 1,
+          date: Math.floor(Date.now() / 1000),
+          text,
+          from: { id: 123456, is_bot: false, first_name: 'Fixture' },
+          chat: { id: 123456, type: 'private' },
+          ...(topic
+            ? {
+                message_thread_id: topic,
+                is_topic_message: true,
+                reply_to_message: { message_id: topic },
+              }
+            : {}),
+        },
+      });
       return (
         await pool.query<{ turn_id: string; channel: string; source_id: string }>(
           'SELECT turn_id,channel,source_id FROM channel_inbox WHERE source_id=$1',
@@ -6970,17 +7002,36 @@ test(
         )
       ).rows[0]!;
     };
-    const turn = async (channel: string, task: string | null = null, status = 'succeeded') => {
+    const tap = (text: string) =>
+      webhook({
+        callback_query: {
+          id: `synthetic-tap-${update}`,
+          data: 'nod:approval:yes',
+          from: { id: 123456, is_bot: false },
+          message: {
+            message_id: delivery(text).message_id,
+            date: Math.floor(Date.now() / 1000),
+            from: { id: 987, is_bot: true },
+            chat: { id: 123456, type: 'private' },
+          },
+        },
+      });
+    const turn = async (
+      channel: string,
+      task: string | null = null,
+      status = 'succeeded',
+      source = 'user',
+    ) => {
       const id = randomUUID();
       await pool.query(
-        'INSERT INTO turns(id,owner_id,thread_id,channel,status,task_id) VALUES($1,$2,$3,$4,$5,$6)',
-        [id, ownerId, threadId, channel, status, task],
+        'INSERT INTO turns(id,owner_id,thread_id,channel,status,task_id,session_id,source) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',
+        [id, ownerId, threadId, channel, status, task, task ?? threadId, source],
       );
       return id;
     };
-    const chat = async (title: string, status: string) => {
+    const chat = async (title: string, status: string, source = 'user') => {
       const id = randomUUID();
-      const first = await turn('web', id, status);
+      const first = await turn('web', id, status, source);
       await pool.query(
         'INSERT INTO tasks(id,owner_id,turn_id,session_id,title) VALUES($1,$2,$3,$1,$4)',
         [id, ownerId, first, title],
@@ -6995,19 +7046,28 @@ test(
       );
       return id;
     };
+    const approve = async (turnId: string, messageId: string) => {
+      const id = randomUUID();
+      await pool.query(
+        "INSERT INTO approvals(id,owner_id,thread_id,turn_id,confirmation_message_id,status,action) VALUES($1,$2,$3,$4,$5,'pending','NOD_synthetic')",
+        [id, ownerId, threadId, turnId, messageId],
+      );
+      return id;
+    };
     const delivery = (text: string) => {
       const found = sent.findLast((body) => body.text === text);
       assert.ok(found, text);
-      return found;
+      return found as Record<string, unknown> & { message_id: number };
     };
+    const never = (text: string) =>
+      assert.ok(
+        sent.every((body) => body.text !== text),
+        text,
+      );
     const outbox = async (messageId: string) =>
       (await pool.query('SELECT state FROM channel_outbox WHERE message_id=$1', [messageId]))
         .rows[0]?.state;
-    const approve = (messageId: string) =>
-      pool.query(
-        "INSERT INTO approvals(id,owner_id,confirmation_message_id,status) VALUES($1,$2,$3,'pending')",
-        [randomUUID(), ownerId, messageId],
-      );
+    const newest = () => 700 + created.length;
 
     const general = await receive('Start in General');
     assert.deepEqual(created, [{ chat_id: '123456', name: 'Main' }]);
@@ -7022,14 +7082,34 @@ test(
     await say(inMain.turn_id, 'Synthetic answer in Main');
     await service.drain();
     assert.equal(delivery('Synthetic answer in Main').message_thread_id, 701);
-    await receive('/clear', 701);
-    assert.deepEqual(commands, ['clear']);
-    assert.equal(delivery('Synthetic clear reply').message_thread_id, 701);
+    for (const command of ['/clear', '/stop', '/tasks']) await receive(command, 701);
+    assert.deepEqual(commands, [
+      { command: 'clear', replyToMessageId: undefined, hasReply: false },
+      { command: 'stop', replyToMessageId: undefined, hasReply: false },
+      { command: 'tasks', replyToMessageId: undefined, hasReply: false },
+    ]);
+    for (const command of ['clear', 'stop', 'tasks'])
+      assert.equal(delivery(`Synthetic ${command} reply`).message_thread_id, 701);
     await receive('483920', 701);
     assert.equal(codes.at(-1), threadId);
     await receive('Plan a synthetic trip', 900);
     assert.ok(submitted.at(-1)?.sessionId);
     assert.equal(created.length, 1);
+
+    const invoiceTurn = await turn(general.channel, null, 'waiting');
+    await say(invoiceTurn, 'Send the synthetic invoice?');
+    const invoice = await approve(
+      invoiceTurn,
+      await say(invoiceTurn, 'Approve the synthetic invoice'),
+    );
+    await service.drain();
+    assert.equal(delivery('Approve the synthetic invoice').message_thread_id, 701);
+    assert.ok(delivery('Approve the synthetic invoice').reply_markup);
+    await tap('Approve the synthetic invoice');
+    assert.deepEqual(
+      tapped.map(({ approvalId }) => approvalId),
+      [invoice],
+    );
 
     const web = await chat('Synthetic price check', 'running');
     const progress = await say(web.turn, 'Checking synthetic prices');
@@ -7046,26 +7126,38 @@ test(
     await service.drain();
     assert.equal(delivery('Found three synthetic options').message_thread_id, 702);
     assert.equal(delivery('Found three synthetic options').disable_notification, undefined);
+    const slow = await turn('web', web.id, 'running');
+    await say(slow, 'Still comparing synthetic fares', '20 seconds');
+    await service.drain();
+    assert.equal(delivery('Still comparing synthetic fares').disable_notification, true);
+    await pool.query("UPDATE turns SET status='succeeded' WHERE id=$1", [slow]);
 
-    const asking = await turn('web', web.id, 'running');
+    const asking = await turn('web', web.id, 'waiting');
     const flight = await say(asking, 'Book the synthetic flight?');
-    await approve(flight);
-    const note = await say(asking, 'Waiting for the synthetic airline');
-    const other = await chat('Synthetic hotel check', 'waiting');
-    const hotel = await say(other.turn, 'Book the synthetic hotel?');
-    await approve(hotel);
+    const flightApproval = await approve(asking, flight);
     await service.drain();
     assert.equal(delivery('Book the synthetic flight?').message_thread_id, 702);
     assert.equal(delivery('Book the synthetic flight?').disable_notification, undefined);
-    assert.equal(await outbox(note), 'pending');
+    await tap('Book the synthetic flight?');
+    assert.deepEqual(tapped.at(-1), { messageId: flight, approvalId: flightApproval });
+    const later = await turn('web', web.id, 'running');
+    const deposit = await say(later, 'Pay the synthetic deposit?');
+    await approve(later, deposit);
+    await service.drain();
+    assert.equal(await outbox(deposit), 'pending');
+    await receive('yes', 702);
+    assert.deepEqual(submitted.at(-1), { replyToMessageId: flight, sessionId: undefined });
+    assert.deepEqual(answers.at(-1), { replyToMessageId: flight, shownMessageId: undefined });
+    await pool.query("UPDATE turns SET status='waiting' WHERE id=$1", [later]);
+    await service.drain();
+    assert.equal(delivery('Pay the synthetic deposit?').message_thread_id, 702);
+
+    const other = await chat('Synthetic hotel check', 'waiting');
+    const hotel = await say(other.turn, 'Book the synthetic hotel?');
+    await approve(other.turn, hotel);
+    await service.drain();
     assert.equal(delivery('Book the synthetic hotel?').message_thread_id, 703);
     assert.equal(delivery('Book the synthetic hotel?').disable_notification, undefined);
-    assert.equal(created.length, 3);
-    await pool.query("UPDATE turns SET status='waiting' WHERE id=$1", [asking]);
-    await service.drain();
-    assert.equal(delivery('Waiting for the synthetic airline').message_thread_id, 702);
-    assert.equal(delivery('Waiting for the synthetic airline').disable_notification, undefined);
-
     const answered = await receive('yes', 703);
     assert.deepEqual(submitted.at(-1), { replyToMessageId: hotel, sessionId: undefined });
     assert.deepEqual(answers.at(-1), { replyToMessageId: hotel, shownMessageId: undefined });
@@ -7084,40 +7176,81 @@ test(
     await receive('yes', 701);
     assert.deepEqual(answers.at(-1), { replyToMessageId: undefined, shownMessageId: nextMain });
 
-    const webMain = await say(await turn('web'), 'Synthetic web main reply');
-    const old = await say(web.turn, 'Old synthetic note', '1 hour');
+    const background = await chat('Synthetic inbox digest', 'succeeded', 'event');
+    const skipped = [
+      await say(await turn('web'), 'Synthetic web main reply'),
+      await say(web.turn, 'Old synthetic note', '1 hour'),
+      await say(background.turn, 'Synthetic digest ready'),
+    ];
     await service.drain();
-    assert.equal(await outbox(webMain), undefined);
-    assert.equal(await outbox(old), undefined);
+    for (const id of skipped) assert.equal(await outbox(id), undefined);
     assert.equal(created.length, 3);
 
+    creating = 'refused';
+    const refused = await chat('Synthetic refused chat', 'waiting');
+    const refusedNote = await say(refused.turn, 'Synthetic note for a refused topic');
+    await service.drain();
+    assert.equal(await outbox(refusedNote), 'blocked');
+    never('Synthetic note for a refused topic');
+    creating = 'busy';
+    const busy = await chat('Synthetic busy chat', 'waiting');
+    const busyNote = await say(busy.turn, 'Synthetic note for a busy topic');
+    await service.drain();
+    await service.drain();
+    assert.equal(await outbox(busyNote), 'pending');
+    never('Synthetic note for a busy topic');
+    creating = 'ok';
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    t.mock.timers.tick(16_000);
+    await service.drain();
+    t.mock.timers.reset();
+    assert.deepEqual(created.at(-1), { chat_id: '123456', name: 'Synthetic busy chat' });
+    assert.equal(delivery('Synthetic note for a busy topic').message_thread_id, newest());
+
+    const quiet = await chat('Synthetic chat before topics go off', 'running');
+    const quietNote = await say(quiet.turn, 'Synthetic note before topics go off');
+    await service.drain();
+    assert.equal(await outbox(quietNote), 'pending');
+    topicsOn = false;
+    await service.replaceTransport(createChatSdkTransport(pool, fixtureEnv));
+    await pool.query("UPDATE turns SET status='succeeded' WHERE id=$1", [quiet.turn]);
+    await service.drain();
+    assert.equal(await outbox(quietNote), 'blocked');
+    never('Synthetic note before topics go off');
+    topicsOn = true;
+    await service.replaceTransport(createChatSdkTransport(pool, fixtureEnv));
+    await service.drain();
+
+    const createdBefore = created.length;
     gone.add(701);
     const lost = await say(await turn(general.channel), 'Synthetic main after delete');
     await service.drain();
     assert.equal(await outbox(lost), 'pending');
     await service.drain();
+    assert.equal(created.length, createdBefore + 1);
     assert.deepEqual(created.at(-1), { chat_id: '123456', name: 'Main' });
-    assert.equal(delivery('Synthetic main after delete').message_thread_id, 704);
+    const main = newest();
+    assert.equal(delivery('Synthetic main after delete').message_thread_id, main);
 
     ownerTopics = false;
     await service.replaceTransport(createChatSdkTransport(pool, fixtureEnv));
     const back = await receive('Back in General');
     await say(back.turn_id, 'Synthetic reply in General');
     await service.drain();
-    const kept = await receive('Still the main chat', 704);
+    const kept = await receive('Still the main chat', main);
     assert.deepEqual(submitted.at(-1), { replyToMessageId: undefined, sessionId: undefined });
     await say(kept.turn_id, 'Synthetic reply in the Main topic');
     await service.drain();
     const scheduled = randomUUID();
     await pool.query(
-      "INSERT INTO turns(id,owner_id,thread_id,channel,status,channel_source_id) VALUES($1,$2,$3,$4,'succeeded',$5)",
+      "INSERT INTO turns(id,owner_id,thread_id,channel,status,channel_source_id,session_id) VALUES($1,$2,$3,$4,'succeeded',$5,$1)",
       [scheduled, ownerId, threadId, general.channel, back.source_id],
     );
     await say(scheduled, 'Synthetic scheduled result');
     await service.drain();
     assert.equal(delivery('Synthetic reply in General').message_thread_id, undefined);
-    assert.equal(delivery('Synthetic reply in the Main topic').message_thread_id, 704);
+    assert.equal(delivery('Synthetic reply in the Main topic').message_thread_id, main);
     assert.equal(delivery('Synthetic scheduled result').message_thread_id, undefined);
-    assert.equal(created.length, 4);
+    assert.equal(created.length, createdBefore + 1);
   },
 );
