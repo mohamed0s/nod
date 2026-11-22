@@ -14,10 +14,12 @@ import { openVaultValue, sealVaultValue } from '../../../src/server/vault-crypto
 import {
   browserNamespace,
   desktopProfile,
+  inside,
   keyCheckBinding,
   type Plan,
   planVersion,
   profileOwner,
+  protectFolder,
   readVaultKey,
   run,
   sha256,
@@ -132,28 +134,45 @@ export async function tableCounts(client: pg.ClientBase) {
   return counts;
 }
 
-function replaceJson(value: unknown, from: string, to: string): [unknown, boolean] {
-  if (value === from) return [to, true];
-  if (Array.isArray(value)) {
-    let changed = false;
-    const next = value.map((item) => {
-      const [result, itemChanged] = replaceJson(item, from, to);
-      changed ||= itemChanged;
-      return result;
-    });
-    return [next, changed];
-  }
-  if (value && typeof value === 'object') {
-    let changed = false;
-    const next: Record<string, unknown> = {};
-    for (const [key, item] of Object.entries(value)) {
-      const [result, itemChanged] = replaceJson(item, from, to);
-      changed ||= itemChanged || key === from;
-      next[key === from ? to : key] = result;
+const identifierColumn = /(?:^|_)(?:id|ids|key|keys|owner)$/;
+const ownerKey = /^owner(?:_?id)?$/i;
+
+export function rewriteJsonText(text: string, from: string, to: string): [string, boolean] {
+  const replacement = JSON.stringify(to);
+  const stack: { object: boolean; expectKey: boolean; key?: string }[] = [];
+  let output = '';
+  let changed = false;
+  let index = 0;
+  while (index < text.length) {
+    const character = text[index]!;
+    if (character !== '"') {
+      const top = stack.at(-1);
+      if (character === '{') stack.push({ object: true, expectKey: true });
+      else if (character === '[') stack.push({ object: false, expectKey: false });
+      else if (character === '}' || character === ']') stack.pop();
+      else if (character === ':' && top) top.expectKey = false;
+      else if (character === ',' && top?.object) {
+        top.expectKey = true;
+        top.key = undefined;
+      }
+      output += character;
+      index++;
+      continue;
     }
-    return [next, changed];
+    let end = index + 1;
+    while (text[end] !== '"') end += text[end] === '\\' ? 2 : 1;
+    const token = text.slice(index, end + 1);
+    const value = JSON.parse(token) as string;
+    const top = stack.at(-1);
+    const key = top?.object && top.expectKey;
+    if (key) top.key = value;
+    if (value === from && (key || (top?.object && ownerKey.test(top.key ?? '')))) {
+      output += replacement;
+      changed = true;
+    } else output += token;
+    index = end + 1;
   }
-  return [value, false];
+  return [output, changed];
 }
 
 function opens(key: Buffer, binding: readonly string[], ciphertext: string) {
@@ -170,7 +189,7 @@ export type DatabaseReport = {
   rewritten: Record<string, number>;
   content: Record<string, number>;
   otherOwners: Record<string, number>;
-  artifacts: { moved: number; elsewhere: number };
+  artifacts: { moved: number; left: number };
 };
 
 export async function transformDatabase(
@@ -182,6 +201,7 @@ export async function transformDatabase(
     sourceRoot: string;
     profileRoot: string;
     identityKey?: string;
+    artifactFiles?: Set<string>;
     allowContent?: Iterable<string>;
   },
 ): Promise<DatabaseReport> {
@@ -194,7 +214,7 @@ export async function transformDatabase(
     rewritten: {},
     content: {},
     otherOwners: {},
-    artifacts: { moved: 0, elsewhere: 0 },
+    artifacts: { moved: 0, left: 0 },
   };
   await client.query('BEGIN');
   try {
@@ -296,8 +316,13 @@ export async function transformDatabase(
           win32.join(sourceRoot, 'artifacts', oldHash, row.id),
           win32.join(sourceRoot, 'artifacts', row.id),
         ].map((path) => path.toLowerCase());
-        if (!known.includes(win32.resolve(String(row.storage_path)).toLowerCase()))
-          report.artifacts.elsewhere++;
+        if (
+          !known.includes(win32.resolve(String(row.storage_path)).toLowerCase()) ||
+          (options.artifactFiles && !options.artifactFiles.has(row.id))
+        ) {
+          report.artifacts.left++;
+          continue;
+        }
         await client.query('UPDATE public.artifacts SET storage_path = $1 WHERE ctid = $2::tid', [
           win32.join(options.profileRoot, 'artifacts', newHash, row.id),
           row.nod_row,
@@ -315,7 +340,7 @@ export async function transformDatabase(
       const name = quote(column.column);
       const label = `${column.schema}.${column.root}.${column.column}`;
       let count = 0;
-      if (column.kind === 'text')
+      if (column.kind === 'text' && identifierColumn.test(column.column))
         count =
           (
             await client.query(`UPDATE ${target} SET ${name} = $2 WHERE ${name} = $1`, [
@@ -323,7 +348,7 @@ export async function transformDatabase(
               newOwner,
             ])
           ).rowCount ?? 0;
-      else if (column.kind === 'array')
+      else if (column.kind === 'array' && identifierColumn.test(column.column))
         count =
           (
             await client.query(
@@ -339,11 +364,11 @@ export async function transformDatabase(
             [ownerJson],
           )
         ).rows) {
-          const [next, changed] = replaceJson(JSON.parse(row.value), oldOwner, newOwner);
+          const [next, changed] = rewriteJsonText(row.value, oldOwner, newOwner);
           if (!changed) continue;
           await client.query(
             `UPDATE ${target} SET ${name} = $1::${column.kind} WHERE ctid = $2::tid`,
-            [JSON.stringify(next), row.nod_row],
+            [next, row.nod_row],
           );
           count++;
         }
@@ -367,7 +392,7 @@ export async function transformDatabase(
       const matches = needles
         .map((_, index) =>
           column.kind === 'bytea'
-            ? `position($${index + 1}::bytea IN ${name}) > 0`
+            ? `strpos(lower(convert_from(${name}, 'LATIN1')), lower(convert_from($${index + 1}::bytea, 'LATIN1'))) > 0`
             : `strpos(lower(${name}::text), $${index + 1}) > 0`,
         )
         .join(' OR ');
@@ -378,6 +403,7 @@ export async function transformDatabase(
         )
       ).rows[0]!.count;
       if (!found) continue;
+      if (label === 'public.artifacts.storage_path' && found <= report.artifacts.left) continue;
       if (allowed.has(label)) report.content[label] = (report.content[label] ?? 0) + found;
       else blocked.push(`${label} (${found} rows)`);
     }
@@ -550,34 +576,35 @@ export async function stageSessions(sourceRoot: string, stageRoot: string, profi
   return { files, headers };
 }
 
+export async function sourceArtifacts(sourceRoot: string, oldOwner = sourceOwner) {
+  const source = join(sourceRoot, 'artifacts');
+  const files = new Map<string, string>();
+  let skipped = 0;
+  const listing = await entries(source);
+  for (const entry of listing)
+    if (entry.isDirectory() && entry.name === sha256(oldOwner))
+      for (const file of await entries(join(source, entry.name)))
+        if (file.isFile() && uuidName.test(file.name))
+          files.set(file.name, join(source, entry.name, file.name));
+        else skipped++;
+  for (const entry of listing)
+    if (entry.isFile() && uuidName.test(entry.name)) {
+      if (!files.has(entry.name)) files.set(entry.name, join(source, entry.name));
+    } else if (!(entry.isDirectory() && entry.name === sha256(oldOwner))) skipped++;
+  return { files, skipped };
+}
+
 export async function stageArtifacts(
   sourceRoot: string,
   stageRoot: string,
   newOwner: string,
   oldOwner = sourceOwner,
 ) {
-  const source = join(sourceRoot, 'artifacts');
+  const { files, skipped } = await sourceArtifacts(sourceRoot, oldOwner);
   const target = join(stageRoot, 'artifacts', sha256(newOwner));
-  const staged = new Set<string>();
-  let skipped = 0;
-  const place = async (path: string, name: string) => {
-    if (staged.has(name)) return;
-    await mkdir(target, { recursive: true });
-    await copyKeepingTimes(path, join(target, name));
-    staged.add(name);
-  };
-  const listing = await entries(source);
-  for (const entry of listing)
-    if (entry.isDirectory() && entry.name === sha256(oldOwner))
-      for (const file of await entries(join(source, entry.name)))
-        if (file.isFile() && uuidName.test(file.name))
-          await place(join(source, entry.name, file.name), file.name);
-        else skipped++;
-  for (const entry of listing)
-    if (entry.isFile() && uuidName.test(entry.name))
-      await place(join(source, entry.name), entry.name);
-    else if (!(entry.isDirectory() && entry.name === sha256(oldOwner))) skipped++;
-  return { files: staged.size, skipped };
+  if (files.size) await mkdir(target, { recursive: true });
+  for (const [name, path] of files) await copyKeepingTimes(path, join(target, name));
+  return { files: files.size, skipped };
 }
 
 const movedEntries = new Set(['sessions', 'pi', 'objects', 'artifacts', 'integration-identity']);
@@ -660,6 +687,9 @@ async function checkSourceStopped(docker: string, project: string, port: number)
     );
 }
 
+export const mountSource = (type: 'bind' | 'volume', source: string) =>
+  `type=${type},"source=${source.replaceAll('"', '""')}"`;
+
 export async function exportVolumes(options: {
   docker: string;
   project: string;
@@ -673,7 +703,10 @@ export async function exportVolumes(options: {
   const volume = async (name: string) =>
     run(docker, ['volume', 'inspect', '--format', '{{.Name}}', name]).then(
       () => true,
-      () => false,
+      (error: Error) => {
+        if (/no such volume/i.test(error.message)) return false;
+        throw error;
+      },
     );
   const tar = (mount: string, args: string[], output: string) =>
     run(
@@ -702,7 +735,7 @@ export async function exportVolumes(options: {
   const archives = { workspace: false, browser: false, tools: false };
   const workspaces = join(options.sourceRoot, 'workspaces');
   if ((await entries(workspaces)).length) {
-    await tar(`type=bind,source=${win32.resolve(workspaces)}`, ['.'], join(out, 'workspace.tar'));
+    await tar(mountSource('bind', win32.resolve(workspaces)), ['.'], join(out, 'workspace.tar'));
     archives.workspace = true;
   }
   const browserVolume = `${project}_browser-data`;
@@ -717,7 +750,7 @@ export async function exportVolumes(options: {
         '--user',
         '0:0',
         '--mount',
-        `type=volume,source=${browserVolume},target=/source,readonly`,
+        `${mountSource('volume', browserVolume)},target=/source,readonly`,
         '--entrypoint',
         'ls',
         image,
@@ -739,7 +772,7 @@ export async function exportVolumes(options: {
       throw new Error(`The source browser volume has no ${sourceNamespace} folder.`);
     if (sourceNamespace) {
       await tar(
-        `type=volume,source=${browserVolume}`,
+        mountSource('volume', browserVolume),
         [`--transform=s,^${sourceNamespace},${options.newNamespace},`, sourceNamespace],
         join(out, 'browser.tar'),
       );
@@ -748,7 +781,7 @@ export async function exportVolumes(options: {
   }
   const toolsVolume = `${project}_workspace-tools`;
   if (await volume(toolsVolume)) {
-    await tar(`type=volume,source=${toolsVolume}`, ['.'], join(out, 'tools.tar'));
+    await tar(mountSource('volume', toolsVolume), ['.'], join(out, 'tools.tar'));
     archives.tools = true;
   }
   return { archives, sourceNamespace };
@@ -843,7 +876,16 @@ export async function convert(options: {
   const log = options.log ?? console.log;
   const docker = options.docker ?? 'docker';
   const sourceRoot = win32.resolve(options.sourceRoot);
+  const out = win32.resolve(options.out);
   const profile = desktopProfile(options.userData);
+  for (const [name, path] of [
+    ['--out', out],
+    ['--user-data', profile.userData],
+  ] as const)
+    if (await inside(sourceRoot, path))
+      throw new Error(`${name} must be outside the source data folder ${sourceRoot}.`);
+  if (await inside(profile.userData, out))
+    throw new Error(`--out must be outside the desktop folder ${profile.userData}.`);
   const ownerId = await profileOwner(profile.root);
   const { key } = await readVaultKey(options.env);
   const project = options.project ?? 'nod-local';
@@ -852,129 +894,140 @@ export async function convert(options: {
     project,
     Number(parseEnv(await readFile(options.env, 'utf8')).PORT?.trim() || '4310'),
   );
-  if ((await entries(options.out)).length)
-    throw new Error(`The output folder ${options.out} is not empty. Choose a new one.`);
+  if ((await entries(out)).length)
+    throw new Error(`The output folder ${out} is not empty. Choose a new one.`);
   await stat(options.dump).catch(() => {
     throw new Error(`The database dump ${options.dump} does not exist.`);
   });
   const identity = await readSourceIdentity(sourceRoot, key);
-  log('Starting a scratch database…');
-  const scratch = await scratchDatabase(docker, options.database);
-  const database = `nod_move_${randomBytes(4).toString('hex')}`;
-  const admin = new pg.Client({ connectionString: scratch.url.href });
-  await admin.connect();
-  const user = decodeURIComponent(scratch.url.username) || 'postgres';
   try {
-    await admin.query(`CREATE DATABASE ${quote(database)}`);
-    log('Restoring the source dump…');
-    await run(
-      docker,
-      [
-        'exec',
-        '-i',
-        scratch.container,
-        'pg_restore',
-        '--no-owner',
-        '--no-acl',
-        '--exit-on-error',
-        '-U',
-        user,
-        '-d',
-        database,
-      ],
-      { input: { file: options.dump } },
-    );
-    const target = new URL(scratch.url.href);
-    target.pathname = `/${database}`;
-    const client = new pg.Client({ connectionString: target.href });
-    await client.connect();
-    let report: DatabaseReport;
-    let tables: Record<string, number>;
+    const artifactFiles = new Set((await sourceArtifacts(sourceRoot)).files.keys());
+    log('Starting a scratch database…');
+    const scratch = await scratchDatabase(docker, options.database);
+    const interrupt = () => {
+      void scratch.stop().finally(() => process.exit(130));
+    };
+    process.once('SIGINT', interrupt);
+    const database = `nod_move_${randomBytes(4).toString('hex')}`;
+    const admin = new pg.Client({ connectionString: scratch.url.href });
+    const user = decodeURIComponent(scratch.url.username) || 'postgres';
     try {
-      log('Moving the database to the desktop owner…');
-      report = await transformDatabase(client, {
-        key,
-        newOwner: ownerId,
-        sourceRoot,
-        profileRoot: profile.root,
-        identityKey: identity?.publicKey,
-        allowContent: options.allowContent,
-      });
-      tables = await tableCounts(client);
-    } finally {
-      await client.end();
-    }
-    await mkdir(options.out, { recursive: true });
-    try {
-      log('Saving the converted database…');
+      await admin.connect();
+      await admin.query(`CREATE DATABASE ${quote(database)}`);
+      log('Restoring the source dump…');
       await run(
         docker,
         [
           'exec',
+          '-i',
           scratch.container,
-          'pg_dump',
-          '--format=custom',
+          'pg_restore',
           '--no-owner',
           '--no-acl',
+          '--exit-on-error',
           '-U',
           user,
           '-d',
           database,
         ],
-        { output: join(options.out, 'database.dump') },
+        { input: { file: options.dump }, label: 'Restoring the source dump' },
       );
-      log('Staging files…');
-      const files = await stageFiles({
-        sourceRoot,
-        stageRoot: join(options.out, 'profile'),
-        profileRoot: profile.root,
-        key,
-        newOwner: ownerId,
-        identity,
-      });
-      identity?.plaintext.fill(0);
-      const leftovers = await scanStaged(join(options.out, 'profile', 'pi'), [
-        sourceOwner,
-        sha256(sourceOwner),
-        sourceRoot.toLowerCase(),
-        JSON.stringify(sourceRoot).slice(1, -1).toLowerCase(),
-      ]);
-      log('Exporting workspace, browser and tools data from the source Docker…');
-      const volumes = await exportVolumes({
-        docker,
-        project,
-        sourceRoot,
-        out: options.out,
-        newNamespace: profile.browserNamespace,
-        sourceNamespace: options.browserNamespace,
-      });
-      const plan: Plan = {
-        version: planVersion,
-        createdAt: new Date().toISOString(),
-        sourceOwner,
-        ownerId,
-        userData: profile.userData,
-        profileRoot: profile.root,
-        distribution: profile.distribution,
-        identity: profile.identity,
-        browserNamespace: profile.browserNamespace,
-        keyCheck: sealVaultValue(key, [...keyCheckBinding, ownerId], 'ok'),
-        tables,
-        archives: volumes.archives,
-      };
-      await writeFile(join(options.out, 'plan.json'), `${JSON.stringify(plan, null, 2)}\n`, {
-        flag: 'wx',
-      });
-      return { report, files, volumes, leftovers, plan };
-    } catch (error) {
-      throw new Error(
-        `${(error as Error).message} ${options.out} now holds a partial result without plan.json, which import refuses. Delete it or choose another --out.`,
-      );
+      const target = new URL(scratch.url.href);
+      target.pathname = `/${database}`;
+      const client = new pg.Client({ connectionString: target.href });
+      await client.connect();
+      let report: DatabaseReport;
+      let tables: Record<string, number>;
+      try {
+        log('Moving the database to the desktop owner…');
+        report = await transformDatabase(client, {
+          key,
+          newOwner: ownerId,
+          sourceRoot,
+          profileRoot: profile.root,
+          identityKey: identity?.publicKey,
+          artifactFiles,
+          allowContent: options.allowContent,
+        });
+        tables = await tableCounts(client);
+      } finally {
+        await client.end();
+      }
+      await mkdir(out, { recursive: true });
+      try {
+        await protectFolder(out);
+        log('Saving the converted database…');
+        await run(
+          docker,
+          [
+            'exec',
+            scratch.container,
+            'pg_dump',
+            '--format=custom',
+            '--no-owner',
+            '--no-acl',
+            '-U',
+            user,
+            '-d',
+            database,
+          ],
+          { output: join(out, 'database.dump'), label: 'Saving the converted database' },
+        );
+        log('Staging files…');
+        const files = await stageFiles({
+          sourceRoot,
+          stageRoot: join(out, 'profile'),
+          profileRoot: profile.root,
+          key,
+          newOwner: ownerId,
+          identity,
+        });
+        const leftovers = await scanStaged(join(out, 'profile', 'pi'), [
+          sourceOwner,
+          sha256(sourceOwner),
+          sourceRoot.toLowerCase(),
+          JSON.stringify(sourceRoot).slice(1, -1).toLowerCase(),
+        ]);
+        log('Exporting workspace, browser and tools data from the source Docker…');
+        const volumes = await exportVolumes({
+          docker,
+          project,
+          sourceRoot,
+          out,
+          newNamespace: profile.browserNamespace,
+          sourceNamespace: options.browserNamespace,
+        });
+        const plan: Plan = {
+          version: planVersion,
+          createdAt: new Date().toISOString(),
+          sourceOwner,
+          ownerId,
+          userData: profile.userData,
+          profileRoot: profile.root,
+          distribution: profile.distribution,
+          identity: profile.identity,
+          browserNamespace: profile.browserNamespace,
+          keyCheck: sealVaultValue(key, [...keyCheckBinding, ownerId], 'ok'),
+          tables,
+          archives: volumes.archives,
+        };
+        await writeFile(join(out, 'plan.json'), `${JSON.stringify(plan, null, 2)}\n`, {
+          flag: 'wx',
+        });
+        return { report, files, volumes, leftovers, plan };
+      } catch (error) {
+        throw new Error(
+          `${(error as Error).message} ${out} now holds a partial result without plan.json, which import refuses. Delete it or choose another --out.`,
+        );
+      }
+    } finally {
+      process.removeListener('SIGINT', interrupt);
+      await admin.query(`DROP DATABASE IF EXISTS ${quote(database)} WITH (FORCE)`).catch(() => {});
+      await admin.end().catch(() => {});
+      await scratch.stop().catch(() => {});
     }
   } finally {
-    await admin.query(`DROP DATABASE IF EXISTS ${quote(database)} WITH (FORCE)`).catch(() => {});
-    await admin.end().catch(() => {});
-    await scratch.stop().catch(() => {});
+    identity?.plaintext.fill(0);
   }
 }
 
@@ -991,7 +1044,7 @@ function summary(result: Awaited<ReturnType<typeof convert>>) {
         .map(([column, count]) => `${column} ${count}`)
         .join(', ') || 'nothing'
     }`,
-    `Artifacts: ${result.report.artifacts.moved} rows, ${result.files.artifacts.files} files staged${result.report.artifacts.elsewhere ? `, ${result.report.artifacts.elsewhere} rows pointed outside the source folder` : ''}`,
+    `Attachments: ${result.report.artifacts.moved} moved, ${result.files.artifacts.files} files staged`,
     `Sessions: ${result.files.sessions.files} files, ${result.files.sessions.headers} headers moved`,
     `App identity: ${result.files.identity ? 'kept' : 'none in the source'}`,
     `Archives: ${
@@ -1012,6 +1065,10 @@ function summary(result: Awaited<ReturnType<typeof convert>>) {
       `Rows of other owners left as they were: ${Object.entries(result.report.otherOwners)
         .map(([table, count]) => `${table} ${count}`)
         .join(', ')}`,
+    );
+  if (result.report.artifacts.left)
+    lines.push(
+      `Attachments left unchanged: ${result.report.artifacts.left}. Their file is missing or outside the source folder, so they did not open in the source either.`,
     );
   if (result.files.left.length) lines.push(`Not moved: ${result.files.left.join(', ')}`);
   if (result.leftovers.length)
@@ -1058,7 +1115,7 @@ if (import.meta.main) {
         : undefined,
     });
     console.log(summary(result));
-    console.log(`Staged in ${values.out}. Next: quit Nod, then run vault-key.ts and import.ts.`);
+    console.log(`Staged in ${values.out}. Next: quit Nod, then run import.ts with --dry-run.`);
   } catch (error) {
     console.error(`Conversion failed: ${(error as Error).message}`);
     process.exit(1);
