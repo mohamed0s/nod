@@ -19,6 +19,7 @@ import {
   rm,
   stat,
   symlink,
+  utimes,
   writeFile,
 } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
@@ -4018,6 +4019,12 @@ test('source saves that do not parse, docs and editor files leave the engine run
   assert.equal(restarts, 0);
   await writeFile(join(root, 'src', 'server', 'broken.ts'), 'export const value = {};\n');
   await apply(['src/server/broken.ts']);
+  assert.equal(restarts, 1);
+  await apply(['src/server/broken.ts']);
+  await writeFile(join(root, 'src', 'server', 'read.ts'), 'export const read = 1;\n');
+  const yesterday = new Date(Date.now() - 86_400_000);
+  await utimes(join(root, 'src', 'server', 'read.ts'), yesterday, yesterday);
+  await apply(['src/server/read.ts']);
   assert.equal(restarts, 1);
 });
 

@@ -67,11 +67,22 @@ export function sourceChanges({
   closed = () => false,
   pollMs = 5000,
 }) {
+  const seen = new Map();
   async function files(paths) {
     const checked = await Promise.all(
-      paths.map(async (path) =>
-        (await stat(join(root, path)).catch(() => undefined))?.isDirectory() ? undefined : path,
-      ),
+      paths.map(async (path) => {
+        const found = await stat(join(root, path)).catch(() => undefined);
+        if (!found) {
+          seen.delete(path);
+          return path;
+        }
+        if (found.isDirectory()) return undefined;
+        const signature = `${found.mtimeMs}:${found.size}`;
+        const before = seen.get(path);
+        seen.set(path, signature);
+        if (before === undefined) return Date.now() - found.mtimeMs < 10_000 ? path : undefined;
+        return before === signature ? undefined : path;
+      }),
     );
     return checked.filter(Boolean);
   }
