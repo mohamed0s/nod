@@ -1,14 +1,5 @@
 import { pool } from './db.ts';
-import {
-  authToken,
-  dataRoot,
-  desktopMode,
-  host,
-  port,
-  publicOrigin,
-  webRoot,
-  webSource,
-} from './config.ts';
+import { authToken, dataRoot, desktopMode, host, port, publicOrigin, webRoot } from './config.ts';
 import { accessKey } from './access.ts';
 import { createApplication, createDefaultAdapters } from './composition.ts';
 
@@ -38,7 +29,7 @@ const { app } = await createApplication(createDefaultAdapters(process.env), {
   runtimeReady,
 });
 closeApplication = () => app.close();
-if (webSource) {
+if (!desktopMode && process.env.NODE_ENV !== 'production') {
   const { createServer } = await import('vite');
   const vite = await createServer({
     server: {
