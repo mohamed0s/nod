@@ -579,14 +579,21 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     return (
       (
         await pool.query<{ id: string | null }>(
-          `SELECT (SELECT m.id FROM messages m LEFT JOIN turns w ON w.id=m.turn_id AND w.owner_id=m.owner_id
-             WHERE m.owner_id=t.owner_id AND m.thread_id=th.id AND m.hidden_at IS NULL AND (w.task_id=t.id OR m.id=t.message_id)
-             ORDER BY m.role='assistant' DESC,m.created_at DESC,m.id DESC LIMIT 1) AS id
+          `SELECT COALESCE((SELECT m.id FROM channel_outbox o JOIN channel_inbox i ON i.source_id=o.source_id
+               JOIN messages m ON m.id=o.message_id AND m.owner_id=i.owner_id
+               LEFT JOIN turns w ON w.id=m.turn_id AND w.owner_id=m.owner_id
+             WHERE i.owner_id=c.owner_id AND i.provider=c.provider AND i.account_id=c.account_id AND i.sender_id=c.sender_id
+               AND o.state='sent' AND o.topic_id=c.topic_id AND o.updated_at<=$6
+               AND m.thread_id=th.id AND m.role='assistant' AND m.hidden_at IS NULL AND (w.task_id=t.id OR m.id=t.message_id)
+             ORDER BY o.updated_at DESC,m.created_at DESC,m.id DESC LIMIT 1),
+             (SELECT m.id FROM messages m JOIN turns w ON w.id=m.turn_id AND w.owner_id=m.owner_id
+             WHERE m.owner_id=t.owner_id AND m.thread_id=th.id AND m.role<>'assistant' AND m.hidden_at IS NULL AND w.task_id=t.id
+             ORDER BY m.created_at DESC,m.id DESC LIMIT 1),t.message_id) AS id
            FROM channel_topics c JOIN tasks t ON t.id=c.task_id AND t.owner_id=c.owner_id
            JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
            JOIN threads th ON th.id=u.thread_id AND th.owner_id=t.owner_id AND th.archived_at IS NULL
            WHERE c.owner_id=$1 AND c.provider=$2 AND c.account_id=$3 AND c.sender_id=$4 AND c.topic_id=$5`,
-          [ownerId, row.provider, row.account_id, row.sender_id, row.topic_id],
+          [ownerId, row.provider, row.account_id, row.sender_id, row.topic_id, row.created_at],
         )
       ).rows[0]?.id ?? undefined
     );
