@@ -253,7 +253,12 @@ export function ModelSentences() {
                       appearance="statement"
                       manageConnections={false}
                       target={backupTarget(data, index)}
-                      label={modelOf(data, choice)?.name ?? unavailableLabel}
+                      label={`${modelOf(data, choice)?.name ?? unavailableLabel}${
+                        choice.connectionId === data.selection?.connectionId &&
+                        choice.modelId === data.selection?.modelId
+                          ? ' (skipped for chat, which already uses it)'
+                          : ''
+                      }`}
                     />
                   </Fragment>
                 ))
