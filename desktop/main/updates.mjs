@@ -531,8 +531,8 @@ export function startDesktopUpdateChecks({
     try {
       await check();
       failures = 0;
-    } catch {
-      failures++;
+    } catch (error) {
+      failures = error?.code === 'NOD_UPDATE_UNTRUSTED' ? 0 : failures + 1;
     } finally {
       pending = false;
       const delay = resumePending

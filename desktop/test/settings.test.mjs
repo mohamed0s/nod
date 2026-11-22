@@ -8070,6 +8070,33 @@ test('automatic update checks retry failures sooner and return to the normal int
   }
 });
 
+test('automatic update checks wait the normal interval after an installer fails its publisher check', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const powerMonitor = new EventEmitter();
+  let calls = 0;
+  const stop = startDesktopUpdateChecks({
+    powerMonitor,
+    interval: 60_000,
+    retry: 5,
+    check: async () => {
+      calls++;
+      throw Object.assign(new Error('The Nod update is not signed by n8n GmbH.'), {
+        code: 'NOD_UPDATE_UNTRUSTED',
+      });
+    },
+  });
+  t.after(stop);
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  await settle();
+  powerMonitor.emit('resume');
+  t.mock.timers.tick(59_999);
+  await settle();
+  assert.equal(calls, 1);
+  t.mock.timers.tick(1);
+  await settle();
+  assert.equal(calls, 2);
+});
+
 test('a start during a Mac update install waits fifteen minutes even with a shorter failure retry', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
   const powerMonitor = new EventEmitter();
@@ -8719,6 +8746,7 @@ test('Windows downloads stage the verified installer and fetch the runtime pack 
   await assert.rejects(stat(join(directory, candidate.version, candidate.installer.file)), {
     code: 'ENOENT',
   });
+  await rm(join(directory, candidate.version), { recursive: true, force: true });
 
   served['nod-Setup-x64.exe'] = Buffer.alloc(bytes['nod-Setup-x64.exe'].length, 'x');
   for (const includeRuntime of [true, false]) {
@@ -8730,6 +8758,7 @@ test('Windows downloads stage the verified installer and fetch the runtime pack 
         includeRuntime,
         unsigned: signed,
       }),
+      /integrity check/,
     );
     await assert.rejects(stat(join(directory, candidate.version, candidate.installer.file)), {
       code: 'ENOENT',
@@ -10665,6 +10694,34 @@ test('Windows update staging checks cached hashes and removes an installer with 
     await readFile(join(f.target, f.candidate.runtime.file)),
     f.bytes[f.candidate.runtime.file],
   );
+  await assert.rejects(
+    stageWindowsUpdate(f.candidate, {
+      ...f.options,
+      fetch: () => assert.fail('A refused installer is not downloaded again.'),
+      unsigned: () => assert.fail('A refused installer is not checked again.'),
+    }),
+    { code: 'NOD_UPDATE_UNTRUSTED', message: 'The Nod update is not signed by n8n GmbH.' },
+  );
+  const republished = Buffer.from('Synthetic republished Windows installer');
+  const requested = [];
+  await stageWindowsUpdate(
+    {
+      ...f.candidate,
+      installer: {
+        ...f.candidate.installer,
+        bytes: republished.length,
+        sha256: createHash('sha256').update(republished).digest('hex'),
+      },
+    },
+    {
+      ...f.options,
+      fetch: (url) => {
+        requested.push(url);
+        return new Response(republished);
+      },
+    },
+  );
+  assert.deepEqual(requested, [f.candidate.installer.url]);
   await assert.rejects(
     stageWindowsUpdate(
       { ...f.candidate, installer: { ...f.candidate.installer, bytes: -1 } },

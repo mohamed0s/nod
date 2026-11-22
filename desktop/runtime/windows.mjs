@@ -205,6 +205,13 @@ export async function stageWindowsUpdate(
   for (const name of await readdir(directory))
     if (/^\d+\.\d+\.\d+$/.test(name) && name !== candidate.version)
       await rm(join(directory, name), { recursive: true, force: true });
+  const refused = join(target, 'refused-installer');
+  const untrusted = () =>
+    Object.assign(new Error(`The Nod update is not signed by ${windowsPublisher.name}.`), {
+      code: 'NOD_UPDATE_UNTRUSTED',
+    });
+  if ((await readFile(refused, 'utf8').catch(() => '')) === candidate.installer.sha256)
+    throw untrusted();
   const files = [candidate.installer];
   if (includeRuntime) {
     const installed = JSON.parse(
@@ -229,7 +236,8 @@ export async function stageWindowsUpdate(
   }
   if ((await unsigned([join(target, candidate.installer.file)], { signal })).length) {
     await rm(join(target, candidate.installer.file), { force: true });
-    throw new Error(`The Nod update is not signed by ${windowsPublisher.name}.`);
+    await writeFile(refused, candidate.installer.sha256);
+    throw untrusted();
   }
   return target;
 }
