@@ -1,6 +1,8 @@
 param([int]$Minutes = 90)
 
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+. (Join-Path $PSScriptRoot 'desktop-common.ps1')
+$desktop = Get-NodDesktopFolder
 $port = 4310
 $envFile = Join-Path $repo '.env'
 if (Test-Path $envFile) {
@@ -11,7 +13,7 @@ if (Test-Path $envFile) {
 Add-Type -Namespace NodWake -Name Power -MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint esFlags);'
 [NodWake.Power]::SetThreadExecutionState([uint32]2147483649) | Out-Null
 try {
-    if (-not (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) {
+    if ($desktop -or -not (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) {
         Start-ScheduledTask -TaskPath '\Nod\' -TaskName 'start'
     }
     Start-Sleep -Seconds ($Minutes * 60)

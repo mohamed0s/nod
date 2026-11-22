@@ -1,5 +1,20 @@
+param([string]$Desktop)
+
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+. (Join-Path $PSScriptRoot 'desktop-common.ps1')
+if (-not $Desktop) { $Desktop = Get-NodDesktopFolder }
+if ($Desktop) {
+    $Desktop = Resolve-NodDesktopFolder $Desktop
+    Set-Location $repo
+    $env:COREPACK_ENABLE_DOWNLOAD_PROMPT = '0'
+    $env:Path = "$env:APPDATA\npm;$env:Path"
+    Write-Host 'Asking Nod to quit, the same as Quit Nod in its tray menu. This never force-closes it.'
+    $answer = @(Invoke-NodDesktopApp $repo @('quit', '--user-data', $Desktop))
+    $code = $LASTEXITCODE
+    $answer | ForEach-Object { Write-Host $_ }
+    exit $code
+}
 
 $port = 4310
 $envFile = Join-Path $repo '.env'
