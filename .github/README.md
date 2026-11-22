@@ -19,7 +19,7 @@ This fork follows n8n's `main` closely and adds a few changes on top. Everything
 | **Backup models**             | **Settings → Models** keeps up to three backup models. When the model in use is busy or unavailable (a rate limit, an overload, a timeout, a network or quota error), Nod retries it once, then moves the same request to each backup in turn. Action checks start again on the backup, so one check never mixes models, and the reply says which model answered. [Backup models](https://github.com/mohamed0s/nod/blob/mine/docs/src/content/docs/connect/models.mdx#backup-models)                                                                     |
 | **Job search**                | A **Jobs** page keeps your CVs (one marked main), the job profile Nod drafts from it, and your referral message templates, with right-to-left text and morning and evening greetings. Nod scores jobs with [career-ops](https://github.com/career-ops-hq/career-ops), installed in the workspace image. [Job search](https://github.com/mohamed0s/nod/blob/mine/docs/src/content/docs/use/job-search.md)                                                                                                                                                 |
 | **Windows, from source**      | One install script. Nod starts at every Windows sign-in, backs itself up every night, can wake the PC for morning schedules, and takes n8n's updates with one command.                                                                                                                                                                                                                                                                                                                                                                                   |
-| **Windows installer**         | A GitHub Actions workflow that builds and publishes a Windows installer from this fork. Apps installed from it update from this fork's releases, never from n8n's.                                                                                                                                                                                                                                                                                                                                                                                       |
+| **Windows installer**         | A GitHub Actions workflow builds and publishes a Windows installer each time the fork takes in an n8n release. Apps installed from it update themselves from this fork's releases, never from n8n's.                                                                                                                                                                                                                                                                                                                                                     |
 | **Private by default**        | The Windows install script turns off usage data (`NOD_ANALYTICS_ENABLED=false`) and conversation traces (`NOD_TRACES_URL=`).                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
 ## Install
@@ -28,7 +28,9 @@ This fork follows n8n's `main` closely and adds a few changes on top. Everything
 
 Download [nod-Setup-x64.exe](https://github.com/mohamed0s/nod/releases/latest/download/nod-Setup-x64.exe) from this fork's [latest release](https://github.com/mohamed0s/nod/releases/latest). It needs Windows 11 x64, WSL 2 and 20 GB of free disk space. The installer isn't code-signed, so Windows SmartScreen asks you to confirm it once.
 
-Releases are built by hand, so they can trail the `mine` branch. Each person's data stays on their own computer.
+After that, the app updates itself from this fork's releases, the way n8n's app updates from n8n's. It checks when it starts and every six hours, downloads the new installer in the background, checks it against the release's SHA-256, and offers **Restart to update**. A new release follows each n8n release the fork takes in, so releases can trail the `mine` branch. Each person's data stays on their own computer.
+
+The first release, 0.9.1, can't update itself: it downloads each new installer and refuses it, again and again. If you installed it, install the latest release by hand once.
 
 ### From source on Windows 11
 
@@ -93,11 +95,16 @@ flowchart LR
 
 ## Build a Windows installer
 
-n8n's own release workflow runs only in n8n's repository: it needs their paid build machines and signing keys. This fork has its own.
+n8n's own release workflow runs only in n8n's repository: it needs their paid build machines and signing keys. This fork has its own, **Fork Windows release**, and it runs by itself.
 
-1. On GitHub, open **Actions → Fork Windows release → Run workflow**, choose the `mine` branch, and enter a version higher than the last release, such as `0.9.2`.
-2. It builds the runtime and the installer on GitHub's machines (about half an hour), installs and checks the app, then publishes the release `nod-v<version>` on the fork.
-3. Send the release link. The app downloads its runtime and later updates from the fork's releases, so it keeps the fork's changes.
+1. **Each n8n release starts it.** n8n marks a release by changing `desktop/release.json`. When `scripts\windows\update.ps1` pushes a merge that changes it to `mine`, the workflow builds a release from `mine`. If the fork already has a release for that n8n version, it builds nothing and says which release covers it.
+2. **Versions follow n8n's, a step above them.** n8n's 0.9.1 becomes 0.9.200, and another build of it 0.9.201. n8n's 0.9.2 becomes 0.9.300, and n8n's 0.10.0 becomes 0.10.100. A version is never one of n8n's own, and the run stops with an error if it can't pick one.
+3. **It builds and checks the installer** on GitHub's machines, then publishes `nod-v<version>` as the fork's latest release. The runtime, about 1.5 GB, is rebuilt when its inputs change and by the first build of each week (from Monday, UTC). Otherwise it's copied from an earlier release, so installed apps download only the new installer. If the copied runtime fails its checks, the run builds a fresh one.
+4. **To build one by hand**, open **Actions → Fork Windows release → Run workflow**. It runs only on `mine`. Leave the version empty to number it as above, or enter one in the same range for the current n8n version (0.9.200 to 0.9.299 for n8n's 0.9.1) that's higher than every `nod-v` tag on the fork.
+
+Runs never overlap. A new run waits for the running one, and a newer waiting run replaces an older one. To share a build, send the release link.
+
+The installers aren't code-signed, so installed apps trust this fork's GitHub releases. Each installer's SHA-256 is checked against the release, which protects the download on its way to the PC, and an installer with a broken signature or another publisher's is still refused. But anyone who can publish a release on this fork can ship code to every install. Signing with a key kept in a protected GitHub environment that needs a reviewer's approval would separate uploading a file from shipping code; this fork accepts not having that. See [How installed apps update](https://github.com/mohamed0s/nod/blob/mine/docs/src/content/docs/contribute/desktop-releases.mdx#how-installed-apps-update).
 
 ## Troubleshooting
 

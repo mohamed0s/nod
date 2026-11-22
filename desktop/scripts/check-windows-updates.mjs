@@ -349,7 +349,11 @@ app.whenReady().then(async () => {
       },
     );
     if (accepted) await staged;
-    else await assert.rejects(staged, { message: 'The Nod update is not signed by n8n GmbH.' });
+    else
+      await assert.rejects(staged, {
+        code: 'NOD_UPDATE_UNTRUSTED',
+        message: /^The Nod update is not signed by n8n GmbH. Signature status: w+, type: w+.$/,
+      });
   }
   const system = join(process.env.SYSTEMROOT, 'System32/kernel32.dll');
   assert.deepEqual(await unsignedWindowsFiles([system], { release: true }), []);

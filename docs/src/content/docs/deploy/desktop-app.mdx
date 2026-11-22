@@ -226,7 +226,7 @@ Newer builds show an in-app notice when the update is ready, with its version an
 
 When a newer release appears, Nod prepares it before offering restart. It reuses an already downloaded version when a check finds nothing newer. A failed release lookup keeps the downloaded update available. Once replacement staging begins, restart is available only after the new installer or app is verified. Checks and restarts cannot run together.
 
-On Windows, update downloads keep partial files across retries and app launches. Each complete file must match its size and SHA-256 hash before reuse. The installer must also pass the n8n publisher check each time Nod stages it. A stalled transfer stops after five minutes without data and keeps its saved bytes. A corrupt file is removed. Nod removes cached versions after they are installed or replaced by another update download.
+On Windows, update downloads keep partial files across retries and app launches. Each complete file must match its size and SHA-256 hash before reuse. The installer must also pass the n8n publisher check each time Nod stages it. An unsigned build that updates from a fork also accepts an installer with no signature at all; see [How installed apps update](/contribute/desktop-releases/#how-installed-apps-update). An installer that fails the check is deleted, its error names the signature status Windows reported, and the next automatic check waits six hours. When that status is definite (no signature where one is required, a broken signature, or another publisher's), Nod also remembers the installer's SHA-256 and doesn't download it again. **Check for Updates…** clears that and tries again, and a different file published for the same version is downloaded and checked as usual. A stalled transfer stops after five minutes without data and keeps its saved bytes. A corrupt file is removed. Nod removes cached versions after they are installed or replaced by another update download.
 
 Choosing **Quit Nod** installs a ready update after normal shutdown. The app stays closed. On Windows, the update launcher runs the installer without opening Nod again. A quit request from an installer or uninstaller skips this automatic install, so two installers cannot run together. On a Mac, [Squirrel stages the update without a relaunch](https://github.com/Squirrel/Squirrel.Mac/blob/fffea30e4a339a7f7d69a3391314b72548d209bd/Squirrel/SQRLUpdater.m#L965-L982) and applies it after exit. **Restart to update** still installs and opens the app again. Closing a window keeps the app running.
 
@@ -321,6 +321,8 @@ For OAuth callbacks, use your development service's public HTTPS origin instead.
 <summary>Build for Windows</summary>
 
 Run `pnpm run desktop:windows:prepare` on a Linux x64 Docker builder. Then, on Windows x64 with Go 1.26.8 and NSIS, install the root and desktop dependencies from their lockfiles and run `pnpm run build` and `pnpm run desktop:windows:build`.
+
+To make the app download its runtime and updates from your own GitHub releases, set `NOD_DESKTOP_UPDATE_REPOSITORY` to `owner/name` for the build. An unsigned build with another repository than `n8n-io/nod` accepts unsigned installers from that repository's releases; see [How installed apps update](/contribute/desktop-releases/#how-installed-apps-update).
 
 </details>
 

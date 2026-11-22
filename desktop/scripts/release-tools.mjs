@@ -65,6 +65,16 @@ export function desktopBuildOptions(env = process.env) {
   };
 }
 
+export function windowsUpdatePublisher(env = process.env) {
+  const repository = env.NOD_DESKTOP_UPDATE_REPOSITORY;
+  return env.NOD_RELEASE_BUILD !== 'true' &&
+    !env.NOD_DESKTOP_UPDATE_SOURCE_URL &&
+    repository &&
+    repository.toLowerCase() !== 'n8n-io/nod'
+    ? 'unsigned'
+    : undefined;
+}
+
 export const minimumSystemVersion = JSON.parse(
   await readFile(join(directory, 'runtime-build-lock.json'), 'utf8'),
 ).minimumSystemVersion;

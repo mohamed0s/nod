@@ -110,12 +110,14 @@ test('external app links can only open named screens without action data', () =>
 import {
   createDesktopUpdater,
   createUpdateSource,
+  forkReleasesPage,
   startDesktopUpdateChecks,
 } from '../main/updates.mjs';
 import { clearInstalledWindowsUpdates } from '../main/windows-update.mjs';
 import {
   protectWindowsProfile,
   stageWindowsUpdate,
+  unsignedWindowsFiles,
   windowsEnvironment,
 } from '../runtime/windows.mjs';
 import { buildDesktopUI } from '../scripts/build-ui.mjs';
@@ -8070,6 +8072,33 @@ test('automatic update checks retry failures sooner and return to the normal int
   }
 });
 
+test('automatic update checks wait the normal interval after an installer fails its publisher check', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const powerMonitor = new EventEmitter();
+  let calls = 0;
+  const stop = startDesktopUpdateChecks({
+    powerMonitor,
+    interval: 60_000,
+    retry: 5,
+    check: async () => {
+      calls++;
+      throw Object.assign(new Error('The Nod update is not signed by n8n GmbH.'), {
+        code: 'NOD_UPDATE_UNTRUSTED',
+      });
+    },
+  });
+  t.after(stop);
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  await settle();
+  powerMonitor.emit('resume');
+  t.mock.timers.tick(59_999);
+  await settle();
+  assert.equal(calls, 1);
+  t.mock.timers.tick(1);
+  await settle();
+  assert.equal(calls, 2);
+});
+
 test('a start during a Mac update install waits fifteen minutes even with a shorter failure retry', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
   const powerMonitor = new EventEmitter();
@@ -8446,6 +8475,9 @@ async function updatePreparation({
   resourcesPath,
   request,
   runtime,
+  nodBuild = {},
+  manual = false,
+  staged = [],
 }) {
   const source = await readFile(new URL('../main/main.mjs', import.meta.url), 'utf8');
   const start = source.indexOf('          prepareRuntime: async (candidate, signal, report) => {');
@@ -8458,6 +8490,8 @@ async function updatePreparation({
     {
       settings,
       windows,
+      nodBuild,
+      updateRequestedManually: manual,
       windowsUpdates: directory,
       engineRoot: resourcesPath,
       pathToFileURL,
@@ -8469,8 +8503,10 @@ async function updatePreparation({
       loadRuntime: async (url) =>
         url.endsWith('/windows.mjs')
           ? {
-              stageWindowsUpdate: (candidate, options) =>
-                stageWindowsUpdate(candidate, { ...options, fetch: request, unsigned: signed }),
+              stageWindowsUpdate: (candidate, options) => (
+                staged.push(options),
+                stageWindowsUpdate(candidate, { ...options, fetch: request, unsigned: signed })
+              ),
             }
           : { prepareRuntimeUpdate: runtime },
       preloadUpdateImages: () => assert.fail('An unopened runtime cannot preload images.'),
@@ -8692,6 +8728,33 @@ test('Windows downloads stage the verified installer and fetch the runtime pack 
     );
   }
 
+  const staged = [];
+  for (const [nodBuild, manual] of [
+    [{}, false],
+    [{ updateRepository: 'synthetic-owner/nod', updatePublisher: 'unsigned' }, true],
+  ]) {
+    const storage = await fixture(t);
+    await rm(directory, { recursive: true, force: true });
+    const prepare = await updatePreparation({
+      settings: storage.store,
+      windows: true,
+      directory,
+      resourcesPath,
+      request,
+      nodBuild,
+      manual,
+      staged,
+    });
+    await prepare(candidate, undefined, () => {});
+  }
+  assert.deepEqual(
+    staged.map(({ publisher, recheck }) => [publisher, recheck]),
+    [
+      [undefined, false],
+      ['unsigned', true],
+    ],
+  );
+
   const source = createUpdateSource({ sourceUrl: base, os: 'win32', fetch: request });
   const runtime = {
     releaseTag: 'nod-v0.2.0',
@@ -8719,6 +8782,7 @@ test('Windows downloads stage the verified installer and fetch the runtime pack 
   await assert.rejects(stat(join(directory, candidate.version, candidate.installer.file)), {
     code: 'ENOENT',
   });
+  await rm(join(directory, candidate.version), { recursive: true, force: true });
 
   served['nod-Setup-x64.exe'] = Buffer.alloc(bytes['nod-Setup-x64.exe'].length, 'x');
   for (const includeRuntime of [true, false]) {
@@ -8730,6 +8794,7 @@ test('Windows downloads stage the verified installer and fetch the runtime pack 
         includeRuntime,
         unsigned: signed,
       }),
+      /integrity check/,
     );
     await assert.rejects(stat(join(directory, candidate.version, candidate.installer.file)), {
       code: 'ENOENT',
@@ -9094,6 +9159,17 @@ test('manual update failures offer only the official download page without anoth
   });
   assert.equal(checks, 1);
   assert.deepEqual(f.externalURLs, ['https://nod.n8n.io/docs/get-started/install-desktop/']);
+  assert.equal(
+    forkReleasesPage({ updateRepository: 'synthetic-owner/nod' }),
+    'https://github.com/synthetic-owner/nod/releases/latest',
+  );
+  for (const nodBuild of [
+    {},
+    { updateRepository: 'N8N-IO/Nod' },
+    { updateRepository: 'synthetic-owner/nod', updateSourceUrl: 'https://updates.example.invalid' },
+    { updateRepository: 'https://example.invalid/nod' },
+  ])
+    assert.equal(forkReleasesPage(nodBuild), undefined);
 });
 
 test('update release lookup and metadata failures keep their HTTP status', async () => {
@@ -10652,19 +10728,81 @@ test('Windows update staging checks cached hashes and removes an installer with 
     },
   });
   assert.deepEqual(requests, [f.candidate.installer.url]);
+  const report = (status) => async (files) => files.map((file) => `${file} (${status}, None, )`);
+  const refusal = {
+    code: 'NOD_UPDATE_UNTRUSTED',
+    message: 'The Nod update is not signed by n8n GmbH. Signature status: NotSigned, type: None.',
+  };
   await assert.rejects(
     stageWindowsUpdate(f.candidate, {
       ...f.options,
       fetch: () => assert.fail('Verified files do not need another download.'),
-      unsigned: async (files) => files,
+      unsigned: report('NotSigned'),
     }),
-    /not signed by n8n GmbH/,
+    refusal,
   );
   await assert.rejects(stat(join(f.target, f.candidate.installer.file)), { code: 'ENOENT' });
   assert.deepEqual(
     await readFile(join(f.target, f.candidate.runtime.file)),
     f.bytes[f.candidate.runtime.file],
   );
+  await assert.rejects(
+    stageWindowsUpdate(f.candidate, {
+      ...f.options,
+      fetch: () => assert.fail('A refused installer is not downloaded again.'),
+      unsigned: () => assert.fail('A refused installer is not checked again.'),
+    }),
+    refusal,
+  );
+  const republished = Buffer.from('Synthetic republished Windows installer');
+  const requested = [];
+  await stageWindowsUpdate(
+    {
+      ...f.candidate,
+      installer: {
+        ...f.candidate.installer,
+        bytes: republished.length,
+        sha256: createHash('sha256').update(republished).digest('hex'),
+      },
+    },
+    {
+      ...f.options,
+      fetch: (url) => {
+        requested.push(url);
+        return new Response(republished);
+      },
+    },
+  );
+  assert.deepEqual(requested, [f.candidate.installer.url]);
+  requested.length = 0;
+  const recorded = (url) => (requested.push(url), f.options.fetch(url));
+  await assert.rejects(
+    stageWindowsUpdate(f.candidate, {
+      ...f.options,
+      recheck: true,
+      fetch: recorded,
+      unsigned: report('NotSigned'),
+    }),
+    refusal,
+  );
+  assert.deepEqual(requested, [f.candidate.installer.url]);
+  const g = await updateDownloadFixture(t);
+  const transient = {
+    ...g.options,
+    includeRuntime: false,
+    fetch: recorded,
+    unsigned: report('UnknownError'),
+  };
+  for (const attempt of [1, 2])
+    await assert.rejects(
+      stageWindowsUpdate(g.candidate, transient),
+      {
+        code: 'NOD_UPDATE_UNTRUSTED',
+        message: /Signature status: UnknownError, type: None.$/,
+      },
+      `attempt ${attempt}`,
+    );
+  assert.equal(requested.length, 3);
   await assert.rejects(
     stageWindowsUpdate(
       { ...f.candidate, installer: { ...f.candidate.installer, bytes: -1 } },
@@ -10673,6 +10811,61 @@ test('Windows update staging checks cached hashes and removes an installer with 
     /update is invalid/,
   );
 });
+
+test(
+  'Windows updates take an unsigned installer only in builds set to unsigned updates, and never a broken or foreign signature',
+  { skip: process.platform !== 'win32', timeout: 180_000 },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'nod-update-signatures-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const foreign = await readFile(process.execPath);
+    const header = foreign.readUInt32LE(0x3c) + 24;
+    const table = header + (foreign.readUInt16LE(header) === 0x20b ? 112 : 96) + 32;
+    if (!foreign.readUInt32LE(table)) return t.skip('This Node.js build carries no signature.');
+    const unsigned = Buffer.from(foreign.subarray(0, foreign.readUInt32LE(table)));
+    unsigned.fill(0, table, table + 8);
+    const tampered = Buffer.from(foreign);
+    tampered[foreign.length >> 1] ^= 0xff;
+    const files = { unsigned: join(root, 'unsigned.exe'), tampered: join(root, 'tampered.exe') };
+    await writeFile(files.unsigned, unsigned);
+    await writeFile(files.tampered, tampered);
+    const checked = [files.unsigned, files.tampered, process.execPath];
+    const refused = async (publisher) =>
+      (await unsignedWindowsFiles(checked, { publisher })).map((line) =>
+        checked.findIndex((path) => line.startsWith(`${path} (`)),
+      );
+    assert.deepEqual(await refused(undefined), [0, 1, 2]);
+    assert.deepEqual(await refused('unsigned'), [1, 2]);
+    let staged = 0;
+    const stage = (installer, served = installer) =>
+      stageWindowsUpdate(
+        {
+          version: '0.10.0',
+          installer: {
+            file: 'nod-Setup-x64.exe',
+            url: 'https://updates.example.invalid/nod-Setup-x64.exe',
+            bytes: installer.length,
+            sha256: createHash('sha256').update(installer).digest('hex'),
+          },
+          runtime: { file: 'nod-Runtime-win32-x64.tar.gz', bytes: 1, sha256: 'a'.repeat(64) },
+        },
+        {
+          directory: join(root, `updates-${staged++}`),
+          resourcesPath: root,
+          includeRuntime: false,
+          publisher: 'unsigned',
+          fetch: async () => new Response(served),
+        },
+      );
+    await assert.rejects(stage(unsigned, Buffer.alloc(unsigned.length)), /integrity check/);
+    await stage(unsigned);
+    await assert.rejects(stage(tampered), {
+      code: 'NOD_UPDATE_UNTRUSTED',
+      message:
+        'The Nod update has an invalid signature or one from another publisher. Signature status: HashMismatch, type: Authenticode.',
+    });
+  },
+);
 
 test(
   'a stalled Windows update stops and keeps bytes for the next background check',
