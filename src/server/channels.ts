@@ -399,6 +399,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
   const modes = new Map<string, { enabled: boolean; ownerTopics: boolean; at: number }>();
   const createdTopics = new Map<string, string>();
   const mainTopicRetry = new Map<string, number>();
+  const modeRetry = new Map<string, number>();
   const sendRetry = new Map<string, { at: number; tries: number }>();
   async function saveReply(
     client: PoolClient,
@@ -609,7 +610,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
 
   async function topicsShown(row: ChannelIdentity) {
     return (
-      modes.get(`${row.provider}:${row.account_id}`)?.enabled ??
+      modes.get(`${row.provider}:${row.account_id}`)?.enabled ||
       Boolean(
         (
           await pool.query(
@@ -1423,6 +1424,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       signal,
     })) ?? { enabled: false, ownerTopics: false };
     modes.set(`${row.provider}:${row.account_id}`, { ...mode, at: Date.now() });
+    modeRetry.delete(`${row.provider}:${row.account_id}`);
     return mode;
   }
 
@@ -1430,13 +1432,14 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     const key = `${row.provider}:${row.account_id}`;
     const known = modes.get(key);
     if (known && Date.now() - known.at < 60_000) return known;
+    if ((modeRetry.get(key) ?? 0) > Date.now())
+      return known ?? { enabled: false, ownerTopics: false };
     try {
       return await topicMode(row, AbortSignal.any([receiving.signal, AbortSignal.timeout(30_000)]));
     } catch (cause) {
       logRepeatedFailure('channel_topic_failed', row.provider, cause, { provider: row.provider });
-      const kept = known ?? { enabled: false, ownerTopics: false };
-      modes.set(key, { ...kept, at: Date.now() });
-      return kept;
+      modeRetry.set(key, Date.now() + 60_000);
+      return known ?? { enabled: false, ownerTopics: false };
     }
   }
 
@@ -2391,6 +2394,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       confirmedProgress.clear();
       modes.clear();
       mainTopicRetry.clear();
+      modeRetry.clear();
       sendRetry.clear();
       channels = next.channels.map((channel) => ({
         ...channel,
