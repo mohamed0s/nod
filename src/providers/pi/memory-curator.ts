@@ -320,7 +320,7 @@ export function createPiMemoryCurator(options: {
               reasoning: effort === 'off' ? undefined : effort,
             });
           } finally {
-            expired = Boolean(deadline?.aborted) && !signal?.aborted;
+            expired = chained && Boolean(deadline?.aborted) && !signal?.aborted;
             const metrics = piUsageMetrics(reply?.usage);
             const target = reply && (runtime.getModel(reply.provider, reply.model) ?? model);
             const status: ProviderUsageEvent['status'] =
@@ -415,7 +415,7 @@ export function createPiMemoryCurator(options: {
           tried.push(`${model.provider}/${model.id} (${reply.errorMessage?.trim().slice(0, 150)})`);
           continue;
         }
-        throw failure(task, reply, model, tried, Boolean(kind), expired);
+        throw failure(task, reply, model, tried, chained && Boolean(kind), expired);
       }
       throw new Error('The selected model is unavailable.');
     },
