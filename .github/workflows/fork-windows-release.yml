@@ -1,12 +1,16 @@
 name: Fork Windows release
 
 on:
+  push:
+    branches: [mine]
+    paths: [desktop/release.json]
   workflow_dispatch:
     inputs:
       version:
-        description: Version of this build, such as 0.9.1. It becomes the release tag nod-v<version> on this fork.
+        description: Leave empty to number the build from n8n's version (n8n's 0.9.1 gives 0.9.100, then 0.9.101). A version you enter must be higher than every nod-v tag on this fork.
         type: string
-        required: true
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -16,23 +20,46 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  runtime:
-    name: Build the Windows runtime
+  plan:
+    name: Choose the version and the runtime
     if: github.repository != 'n8n-io/nod'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      release_needed: ${{ steps.plan.outputs.release_needed }}
+      base: ${{ steps.plan.outputs.base }}
+      version: ${{ steps.plan.outputs.version }}
+      runtime_fingerprint: ${{ steps.plan.outputs.runtime_fingerprint }}
+      runtime_tag: ${{ steps.plan.outputs.runtime_tag }}
+      runtime_refresh: ${{ steps.plan.outputs.runtime_refresh }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24.21.0'
+      - name: Rebuild the runtime at least weekly
+        run: echo "NOD_RUNTIME_REFRESH=$(date -u -d "-$(( $(date -u +%u) - 1 )) days" +%F)" >> "$GITHUB_ENV"
+      - name: Choose the version and a runtime to reuse
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOD_FORK_VERSION: ${{ inputs.version }}
+        run: node .github/scripts/fork-windows-release.mjs
+
+  runtime:
+    name: Build or reuse the Windows runtime
+    needs: plan
+    if: needs.plan.outputs.release_needed == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
       NOD_RUNTIME_ASSETS: .local/windows-runtime-assets
+      NOD_RUNTIME_REFRESH: ${{ needs.plan.outputs.runtime_refresh }}
+      NOD_WINDOWS_RUNTIME_FINGERPRINT: ${{ needs.plan.outputs.runtime_fingerprint }}
+      NOD_WINDOWS_RUNTIME_TAG: ${{ needs.plan.outputs.runtime_tag }}
     steps:
-      - name: Check the version
-        env:
-          VERSION: ${{ inputs.version }}
-        run: |
-          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo "Use a version like 0.9.1, not $VERSION." >&2; exit 1; }
-      - name: Make room for the runtime images
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-          df -h /
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
@@ -41,19 +68,36 @@ jobs:
         with:
           node-version: '24.21.0'
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - name: Reuse the runtime of an earlier release
+        if: env.NOD_WINDOWS_RUNTIME_TAG != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/desktop-release.mjs reuse-windows-runtime
+      - name: Make room for the runtime images
+        if: env.NOD_WINDOWS_RUNTIME_TAG == ''
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+      - if: env.NOD_WINDOWS_RUNTIME_TAG == ''
+        run: pnpm install --frozen-lockfile
       - name: Build the workspace image
-        run: docker build --platform linux/amd64 --file Dockerfile.workspace --build-arg NOD_RUNTIME_REFRESH=${{ github.run_id }} --tag nod-desktop-workspace:experiment .
+        if: env.NOD_WINDOWS_RUNTIME_TAG == ''
+        run: docker build --platform linux/amd64 --file Dockerfile.workspace --build-arg "NOD_RUNTIME_REFRESH=$NOD_RUNTIME_REFRESH" --tag nod-desktop-workspace:experiment .
       - name: Build the browser image
-        run: docker build --platform linux/amd64 --file Dockerfile.browser --build-arg NOD_RUNTIME_REFRESH=${{ github.run_id }} --tag nod-desktop-browser:experiment .
+        if: env.NOD_WINDOWS_RUNTIME_TAG == ''
+        run: docker build --platform linux/amd64 --file Dockerfile.browser --build-arg "NOD_RUNTIME_REFRESH=$NOD_RUNTIME_REFRESH" --tag nod-desktop-browser:experiment .
       - name: Verify and export the native images
+        if: env.NOD_WINDOWS_RUNTIME_TAG == ''
         env:
           NOD_DESKTOP_TARGET: win32-x64
         run: node desktop/scripts/prepare-runtime.mjs --images-only --prebuilt-images
       - name: Build the Windows root filesystem
+        if: env.NOD_WINDOWS_RUNTIME_TAG == ''
         env:
           NOD_DESKTOP_TARGET: win32-x64
         run: node desktop/scripts/prepare-windows-runtime.mjs --prebuilt-images
+      - name: Check that the runtime matches the planned fingerprint
+        run: test -f "$NOD_RUNTIME_ASSETS/runtime-win32-x64-$NOD_WINDOWS_RUNTIME_FINGERPRINT.json"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: desktop-windows-runtime
@@ -68,11 +112,11 @@ jobs:
 
   windows:
     name: Package and check the Windows installer
-    needs: runtime
+    needs: [plan, runtime]
     runs-on: windows-2025
     timeout-minutes: 90
     env:
-      NOD_DESKTOP_VERSION: ${{ inputs.version }}
+      NOD_DESKTOP_VERSION: ${{ needs.plan.outputs.version }}
       NOD_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -121,7 +165,7 @@ jobs:
 
   publish:
     name: Publish the release on this fork
-    needs: windows
+    needs: [plan, windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -134,15 +178,20 @@ jobs:
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          BASE: ${{ needs.plan.outputs.base }}
         run: |
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/nod-v$VERSION" --silent 2>/dev/null; then
+            echo "The tag nod-v$VERSION already exists on this fork." >&2
+            exit 1
+          fi
           cat > notes.md <<'EOF'
-          Windows build of this fork of [Nod](https://github.com/n8n-io/nod), version VERSION_HERE, from commit SHA_HERE.
+          Windows build of this fork of [Nod](https://github.com/n8n-io/nod), version VERSION_HERE, from commit SHA_HERE. It includes n8n's Nod BASE_HERE.
 
           This is not an official n8n release. The installer is not code-signed, so Windows SmartScreen may warn before it runs: choose **More info**, then **Run anyway**.
 
-          You need Windows 11 x64, WSL 2 with hardware virtualization, and at least 20 GB of free disk space. Download `nod-Setup-x64.exe` and run it; if Nod needs WSL, follow its setup and approve the administrator request. The app downloads `nod-Runtime-win32-x64.tar.gz` from this release on first start, and later updates come from this fork's releases.
+          You need Windows 11 x64, WSL 2 with hardware virtualization, and at least 20 GB of free disk space. Download `nod-Setup-x64.exe` and run it; if Nod needs WSL, follow its setup and approve the administrator request. The app downloads `nod-Runtime-win32-x64.tar.gz` from this release on first start, then updates itself from this fork's newest release.
           EOF
-          sed -i "s/VERSION_HERE/$VERSION/; s/SHA_HERE/$GITHUB_SHA/" notes.md
+          sed -i "s/VERSION_HERE/$VERSION/; s/BASE_HERE/$BASE/; s/SHA_HERE/$GITHUB_SHA/" notes.md
           gh release create "nod-v$VERSION" dist/nod-Setup-x64.exe dist/nod-Runtime-win32-x64.tar.gz dist/release-win32-x64.json dist/SHA256SUMS dist/runtime-win32-x64-*.json \
-            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Nod $VERSION (fork, Windows)" --notes-file notes.md
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Nod $VERSION (fork, Windows)" --notes-file notes.md --latest
