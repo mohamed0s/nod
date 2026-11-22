@@ -109,6 +109,7 @@ function modelPricing(model: ModelDefinition): ModelChoice['pricing'] {
 }
 
 export const modelRouteInput = z.union([modelSelectionInput, z.literal('light'), z.null()]);
+export const modelBackupsInput = z.array(modelSelectionInput).max(3);
 
 export interface WorkOrigin {
   kind: WorkKind;
@@ -375,6 +376,7 @@ export function createModelService(options: {
   let initialized = false;
   let selection: ModelSelection | null = null;
   let routes: ModelRoutes = {};
+  let backups: ModelSelection[] = [];
   let starting: Promise<unknown> = Promise.resolve();
   const pendingControllers = new Set<AbortController>();
   let closed = false;
@@ -466,6 +468,7 @@ export function createModelService(options: {
     });
     selection = state.selection;
     routes = state.routes;
+    backups = state.backups;
     checkSelection(state);
     options.changed?.();
   }
@@ -1303,6 +1306,62 @@ export function createModelService(options: {
         selection: { ...work.selection, effort: defaultEffort(row.provider, definition.choice) },
       };
     },
+    async candidates(choice: ModelSelection | null = selection): Promise<ModelAccess[]> {
+      const primary = await service.resolve(false, choice);
+      const seen = new Set([`${primary.connectionId}:${primary.definition.choice.id}`]);
+      const list = [primary];
+      for (const item of backups) {
+        const row = rows.find((candidate) => candidate.id === item.connectionId);
+        const definition =
+          row?.status === 'connected'
+            ? row.models.find(
+                (model) =>
+                  model.choice.id === item.modelId &&
+                  !model.choice.audio &&
+                  model.choice.efforts.length > 0,
+              )
+            : undefined;
+        if (!row || !definition || seen.has(`${row.id}:${item.modelId}`)) continue;
+        seen.add(`${row.id}:${item.modelId}`);
+        list.push({
+          connectionId: row.id,
+          provider: row.provider,
+          method: row.method,
+          definition,
+          effort: definition.choice.efforts.includes(item.effort)
+            ? item.effort
+            : defaultEffort(row.provider, definition.choice),
+          ...requestAccess(row),
+          needsReconnect: (credential) =>
+            needsReconnect(row.id, { models: row.models, credential }),
+        });
+      }
+      return list;
+    },
+    async setBackups(value: ModelSelection[], client?: PoolClient) {
+      const list = modelBackupsInput.parse(value);
+      const saved = await store.change(
+        (state) => {
+          const key = (choice: ModelSelection) =>
+            `${choice.connectionId}:${choice.modelId}:${choice.effort}`;
+          const saved = new Set(state.backups.map(key));
+          const seen = new Set<string>();
+          state.backups = list.filter((choice) => {
+            if (!saved.has(key(choice))) textChoice(state.connections, choice);
+            const model = `${choice.connectionId}:${choice.modelId}`;
+            if (seen.has(model)) return false;
+            seen.add(model);
+            return true;
+          });
+          return state.backups;
+        },
+        undefined,
+        client,
+      );
+      await settle(client, () => {
+        backups = saved;
+      });
+    },
     async setRoute(
       lane: ModelLane,
       value: ModelRoute | null,
@@ -1365,6 +1424,7 @@ export function createModelService(options: {
         selection,
         ...(selectionIssue ? { selectionIssue } : {}),
         routes,
+        backups,
         light: lightModel(),
         ...(unpriced ? { unpricedPreparationModel: unpriced } : {}),
       };
@@ -1378,6 +1438,9 @@ export function createModelService(options: {
         );
         if (!state.connections.some((row) => row.id === state.selection?.connectionId))
           state.selection = null;
+        state.backups = state.backups.filter((choice) =>
+          state.connections.some((row) => row.id === choice.connectionId),
+        );
         for (const row of state.connections) {
           try {
             if (!credential(row)) row.status = 'reconnect';
@@ -1519,6 +1582,7 @@ export function createModelService(options: {
             ([, route]) => route === 'light' || route?.connectionId !== id,
           ),
         );
+        state.backups = state.backups.filter((choice) => choice.connectionId !== id);
         return { row, selectionCleared };
       });
       if (removed.selectionCleared)
@@ -1613,6 +1677,7 @@ export function createModelService(options: {
     ): Promise<ModelAccess> {
       const { selected, row, definition, companion } = chosen(auxiliary, choice);
       return {
+        connectionId: row.id,
         provider: row.provider,
         method: row.method,
         definition,
@@ -1677,6 +1742,11 @@ export function createModelService(options: {
         });
         routes.put('/api/models/selection', async (request) => {
           await service.select(modelSelectionInput.parse(request.body));
+          return service.view();
+        });
+        routes.put('/api/models/backups', async (request) => {
+          const input = z.object({ backups: modelBackupsInput }).strict().parse(request.body);
+          await service.setBackups(input.backups);
           return service.view();
         });
         routes.put('/api/models/routes', async (request) => {
