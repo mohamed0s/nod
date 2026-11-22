@@ -118,7 +118,11 @@ export interface MessagingTransport {
     replyToText?: string;
     attachmentFailure?: (files: { name: string; reason?: string }[]) => Promise<string | undefined>;
   }): Promise<{ id: string; ids?: string[]; approvalButtons?: true }>;
-  topics?(input: { channelId: string; accountId: string; signal?: AbortSignal }): Promise<boolean>;
+  topics?(input: {
+    channelId: string;
+    accountId: string;
+    signal?: AbortSignal;
+  }): Promise<{ enabled: boolean; ownerTopics: boolean }>;
   createTopic?(input: {
     channelId: string;
     accountId: string;

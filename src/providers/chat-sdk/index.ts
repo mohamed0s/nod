@@ -139,16 +139,21 @@ class Telegram extends TelegramAdapter {
     return chunks(text).flatMap(fit);
   }
 
-  private topicState?: { enabled: boolean; at: number };
+  private topicState?: { enabled: boolean; ownerTopics: boolean; at: number };
 
-  async topicsEnabled(signal?: AbortSignal) {
+  async topicMode(signal?: AbortSignal) {
     if (!this.topicState || Date.now() - this.topicState.at >= 300_000) {
-      const me = await this.telegramFetch<{ has_topics_enabled?: boolean }>('getMe', undefined, {
-        signal,
-      });
-      this.topicState = { enabled: me.has_topics_enabled === true, at: Date.now() };
+      const me = await this.telegramFetch<{
+        has_topics_enabled?: boolean;
+        allows_users_to_create_topics?: boolean;
+      }>('getMe', undefined, { signal });
+      this.topicState = {
+        enabled: me.has_topics_enabled === true,
+        ownerTopics: me.has_topics_enabled === true && me.allows_users_to_create_topics === true,
+        at: Date.now(),
+      };
     }
-    return this.topicState.enabled;
+    return { enabled: this.topicState.enabled, ownerTopics: this.topicState.ownerTopics };
   }
 
   private topicName(title: string) {
@@ -958,8 +963,8 @@ export function createChatSdkTransport(
         input.channelId !== 'telegram' ||
         input.accountId !== env.TELEGRAM_BOT_TOKEN!.split(':')[0]
       )
-        return false;
-      return telegram.topicsEnabled(input.signal);
+        return { enabled: false, ownerTopics: false };
+      return telegram.topicMode(input.signal);
     },
     async createTopic(input) {
       if (
