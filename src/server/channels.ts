@@ -33,6 +33,11 @@ import { pendingAnswerChoicesSql } from './answer-choices.ts';
 
 const laterReply = `EXISTS (SELECT 1 FROM messages n WHERE n.turn_id=u.id AND n.owner_id=u.owner_id AND n.role='assistant'
   AND n.hidden_at IS NULL AND (n.text<>'' OR n.presentation IS NOT NULL) AND n.created_at>m.created_at)`;
+const sentBefore = (time: string, number: string) =>
+  `(CASE WHEN ${number}::bigint IS NULL OR cardinality(o.provider_message_ids)=0
+      OR EXISTS (SELECT 1 FROM unnest(o.provider_message_ids) p WHERE p !~ '^-?[0-9]+:[0-9]+$')
+    THEN o.updated_at<=${time}
+    ELSE (SELECT max(split_part(p,':',2)::bigint) FROM unnest(o.provider_message_ids) p)<${number}::bigint END)`;
 const replyCommand = /^\/(memory|context|usage)(?:@[A-Za-z0-9_]+)?$/i;
 const taskCommand = /^\/(tasks|status|stop|clear)(?:@[A-Za-z0-9_]+)?$/i;
 
@@ -223,6 +228,11 @@ const reactionSchema = z.object({
   reaction: z.string().max(64).refine(isMessageReaction).nullable(),
 });
 
+function providerNumber(row: ChannelIdentity & { source_id: string }) {
+  const id = row.source_id.slice(`channel:${row.provider}:${row.account_id}:`.length);
+  return /^-?[0-9]+:([0-9]+)$/.exec(id)?.[1] ?? null;
+}
+
 function conversationChannel(row: ChannelIdentity) {
   const identity = createHash('sha256')
     .update(JSON.stringify([row.account_id, row.sender_id]))
@@ -379,6 +389,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
   CREATE INDEX IF NOT EXISTS channel_outbox_pending ON channel_outbox(state,created_at);
   CREATE INDEX IF NOT EXISTS channel_inbox_turn ON channel_inbox(turn_id);
   CREATE INDEX IF NOT EXISTS channel_inbox_channel ON channel_inbox(owner_id,channel,state,received_at DESC);
+  CREATE INDEX IF NOT EXISTS channel_outbox_sent_topic ON channel_outbox(topic_id,updated_at DESC) WHERE state='sent';
   CREATE INDEX IF NOT EXISTS channel_inbox_route ON channel_inbox(owner_id,provider,account_id,sender_id,received_at DESC)`);
   await pool.query(
     `UPDATE channel_outbox o SET
@@ -586,26 +597,43 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
 
   async function taskInTopic(row: InboxRow) {
     return (
-      (
-        await pool.query<{ id: string | null }>(
-          `SELECT COALESCE((SELECT m.id FROM channel_outbox o JOIN channel_inbox i ON i.source_id=o.source_id
-               JOIN messages m ON m.id=o.message_id AND m.owner_id=i.owner_id
-               LEFT JOIN turns w ON w.id=m.turn_id AND w.owner_id=m.owner_id
-             WHERE i.owner_id=c.owner_id AND i.provider=c.provider AND i.account_id=c.account_id AND i.sender_id=c.sender_id
-               AND o.state='sent' AND o.topic_id=c.topic_id AND o.updated_at<=$6
-               AND m.thread_id=th.id AND m.role='assistant' AND m.hidden_at IS NULL AND (w.task_id=t.id OR m.id=t.message_id)
-             ORDER BY o.updated_at DESC,m.created_at DESC,m.id DESC LIMIT 1),
-             (SELECT m.id FROM messages m JOIN turns w ON w.id=m.turn_id AND w.owner_id=m.owner_id
-             WHERE m.owner_id=t.owner_id AND m.thread_id=th.id AND m.role<>'assistant' AND m.hidden_at IS NULL AND w.task_id=t.id
-             ORDER BY m.created_at DESC,m.id DESC LIMIT 1),t.message_id) AS id
+      await pool.query<{ id: string | null; notice: boolean | null }>(
+        `WITH topic AS (
+           SELECT c.owner_id,c.provider,c.account_id,c.sender_id,c.topic_id,t.id AS task_id,t.message_id AS start_id,th.id AS thread_id
            FROM channel_topics c JOIN tasks t ON t.id=c.task_id AND t.owner_id=c.owner_id
            JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
            JOIN threads th ON th.id=u.thread_id AND th.owner_id=t.owner_id AND th.archived_at IS NULL
-           WHERE c.owner_id=$1 AND c.provider=$2 AND c.account_id=$3 AND c.sender_id=$4 AND c.topic_id=$5`,
-          [ownerId, row.provider, row.account_id, row.sender_id, row.topic_id, row.created_at],
-        )
-      ).rows[0]?.id ?? undefined
-    );
+           WHERE c.owner_id=$1 AND c.provider=$2 AND c.account_id=$3 AND c.sender_id=$4 AND c.topic_id=$5),
+         seen AS (
+           SELECT m.id,m.turn_id,m.created_at,o.updated_at,
+             (m.thread_id=topic.thread_id AND (w.task_id=topic.task_id OR m.id=topic.start_id)) AS own
+           FROM topic JOIN channel_inbox i ON i.owner_id=topic.owner_id AND i.provider=topic.provider
+             AND i.account_id=topic.account_id AND i.sender_id=topic.sender_id
+           JOIN channel_outbox o ON o.source_id=i.source_id
+           JOIN messages m ON m.id=o.message_id AND m.owner_id=i.owner_id
+           LEFT JOIN turns w ON w.id=m.turn_id AND w.owner_id=m.owner_id
+           WHERE o.state='sent' AND o.topic_id=topic.topic_id AND ${sentBefore('$6', '$7')}
+             AND m.role='assistant' AND m.hidden_at IS NULL)
+         SELECT COALESCE(
+           (SELECT id FROM seen WHERE own ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT 1),
+           (SELECT m.id FROM messages m JOIN turns w ON w.id=m.turn_id AND w.owner_id=m.owner_id
+            WHERE m.owner_id=topic.owner_id AND m.thread_id=topic.thread_id AND m.role<>'assistant'
+              AND m.hidden_at IS NULL AND w.task_id=topic.task_id
+            ORDER BY m.created_at DESC,m.id DESC LIMIT 1),
+           topic.start_id) AS id,
+           (SELECT turn_id IS NULL FROM seen ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT 1) AS notice
+         FROM topic`,
+        [
+          ownerId,
+          row.provider,
+          row.account_id,
+          row.sender_id,
+          row.topic_id,
+          row.created_at,
+          providerNumber(row),
+        ],
+      )
+    ).rows[0];
   }
 
   async function topicsShown(row: ChannelIdentity) {
@@ -665,10 +693,18 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
          JOIN messages m ON m.id=o.message_id AND m.owner_id=i.owner_id
          LEFT JOIN threads th ON th.id=m.thread_id AND th.owner_id=m.owner_id
          WHERE i.owner_id=$1 AND i.provider=$2 AND i.account_id=$3 AND i.sender_id=$4
-           AND o.state='sent' AND o.topic_id IS NOT DISTINCT FROM $6 AND o.updated_at<=$5
+           AND o.state='sent' AND ${row.topic_id ? 'o.topic_id=$7' : 'o.topic_id IS NULL'} AND ${sentBefore('$5', '$6')}
            AND m.role='assistant' AND m.hidden_at IS NULL AND (m.thread_id IS NULL OR th.archived_at IS NULL)
          ORDER BY o.updated_at DESC,m.created_at DESC,m.id DESC LIMIT 1`,
-        [ownerId, row.provider, row.account_id, row.sender_id, row.created_at, row.topic_id],
+        [
+          ownerId,
+          row.provider,
+          row.account_id,
+          row.sender_id,
+          row.created_at,
+          providerNumber(row),
+          ...(row.topic_id ? [row.topic_id] : []),
+        ],
       )
     ).rows[0];
     return shown?.turn_id ? shown.id : null;
@@ -1191,11 +1227,12 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     const inMain = await inMainTopic(pending, pending.topic_id);
     const topic = inMain ? null : pending.topic_id;
     const topicTarget = topic ? await taskInTopic(pending) : undefined;
-    const newChat = Boolean(topic) && !topicTarget;
-    const replyToMessageId =
-      (pending.provider_reply_id && !newChat
+    const newChat = Boolean(topic) && !topicTarget?.id;
+    const native =
+      pending.provider_reply_id && !newChat
         ? await nativeReply(pending, pending.thread_id, pending.provider_reply_id)
-        : undefined) ?? topicTarget;
+        : undefined;
+    const replyToMessageId = native ?? topicTarget?.id ?? undefined;
     const hasReply = Boolean(replyToMessageId || (pending.provider_reply_id && !newChat));
     const hiddenBeforeAnswer = replyToMessageId
       ? await hiddenReplyTarget(pool, replyToMessageId)
@@ -1225,6 +1262,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       command ||
       newChat ||
       shown === null ||
+      (!native && topicTarget?.notice) ||
       pending.attachments?.length ||
       (pending.provider_reply_id && !replyToMessageId)
         ? undefined
@@ -2074,7 +2112,8 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
          AND (th.archived_at IS NULL OR o.live_status IS NOT NULL)
          AND cardinality(o.provider_message_ids)=1 AND m.attachments='[]'::jsonb
          AND m.presentation IS NULL AND o.presentation IS NULL AND o.approval_delivery IS NULL
-         AND (o.live_status IS NOT NULL OR o.message_id=ANY($2::uuid[]))`,
+         AND (o.live_status IS NOT NULL OR o.message_id=ANY($2::uuid[]))
+       ORDER BY m.created_at,m.id`,
       [ownerId, [...targets.keys()]],
     );
     for (const row of rows) {

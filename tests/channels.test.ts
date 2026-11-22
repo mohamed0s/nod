@@ -6389,6 +6389,7 @@ test(
     const created: Record<string, unknown>[] = [];
     const renamed: Record<string, unknown>[] = [];
     const sent: Record<string, unknown>[] = [];
+    let telegramId = 100;
     t.mock.method(
       globalThis,
       'fetch',
@@ -6449,11 +6450,12 @@ test(
               { ok: false, error_code: 400, description: 'Bad Request: message thread not found' },
               { status: 400 },
             );
-          sent.push({ ...wire, method, message_thread_id: thread });
+          const messageId = ++telegramId;
+          sent.push({ ...wire, method, message_thread_id: thread, message_id: messageId });
           return Response.json({
             ok: true,
             result: {
-              message_id: 100 + sent.length,
+              message_id: messageId,
               date: Math.floor(Date.now() / 1000),
               chat: { id: 123456, type: 'private' },
               text: wire.text,
@@ -6529,6 +6531,7 @@ test(
     let update = 0;
     const receive = async (text: string, topic?: number) => {
       update++;
+      const messageId = ++telegramId;
       const response = await app.inject({
         method: 'POST',
         url: '/api/webhooks/telegram',
@@ -6539,7 +6542,7 @@ test(
         payload: JSON.stringify({
           update_id: update,
           message: {
-            message_id: update,
+            message_id: messageId,
             date: Math.floor(Date.now() / 1000),
             text,
             from: { id: 123456, is_bot: false, first_name: 'Fixture' },
@@ -6559,7 +6562,7 @@ test(
       return (
         await pool.query(
           'SELECT turn_id,channel,topic_id,provider_reply_id FROM channel_inbox WHERE source_id=$1',
-          [`channel:telegram:987:123456:${update}`],
+          [`channel:telegram:987:123456:${messageId}`],
         )
       ).rows[0];
     };
@@ -6619,7 +6622,7 @@ test(
     assert.equal(delivery('Started the synthetic report').message_thread_id, undefined);
     assert.equal(delivery('Fallback task update').message_thread_id, undefined);
     assert.deepEqual(delivery('Fallback task update').reply_parameters, {
-      message_id: 101 + delivered('Started the synthetic report'),
+      message_id: delivery('Started the synthetic report').message_id,
       allow_sending_without_reply: true,
     });
 
@@ -6827,6 +6830,8 @@ test(
     let topicsOn = true;
     let ownerTopics = true;
     let creating: 'ok' | 'refused' | 'busy' = 'ok';
+    let getMeFails = false;
+    let telegramId = 100;
     const gone = new Set<number>();
     const created: Record<string, unknown>[] = [];
     const sent: Record<string, unknown>[] = [];
@@ -6838,6 +6843,11 @@ test(
         const body =
           typeof init?.body === 'string' ? (JSON.parse(init.body) as Record<string, unknown>) : {};
         const method = url.replace('https://api.telegram.org/bot987:fixture-not-live/', '');
+        if (method === 'getMe' && getMeFails)
+          return Response.json(
+            { ok: false, error_code: 502, description: 'Bad Gateway' },
+            { status: 502 },
+          );
         if (method === 'getMe')
           return Response.json({
             ok: true,
@@ -6885,7 +6895,7 @@ test(
               { ok: false, error_code: 400, description: 'Bad Request: message thread not found' },
               { status: 400 },
             );
-          const messageId = 101 + sent.length;
+          const messageId = ++telegramId;
           sent.push({ ...body, message_thread_id: thread, message_id: messageId });
           return Response.json({
             ok: true,
@@ -6958,6 +6968,10 @@ test(
           "INSERT INTO turns(id,owner_id,thread_id,source_id,channel,status,task_id,session_id) VALUES($1,$2,$3,$4,$5,'succeeded',$6,$7)",
           [turnId, ownerId, threadId, sourceId, channel, task, task ?? threadId],
         );
+        await client.query(
+          "INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id) VALUES($1,$2,'user',$3,$4,$5)",
+          [rest[0], ownerId, text, threadId, turnId],
+        );
         return turnId;
       },
     });
@@ -6978,10 +6992,11 @@ test(
       assert.equal(response.statusCode, 200);
       await service.drain();
     };
-    const receive = async (text: string, topic?: number) => {
+    const receive = async (text: string, topic?: number, earlier?: number) => {
+      const messageId = earlier ?? ++telegramId;
       await webhook({
         message: {
-          message_id: update + 1,
+          message_id: messageId,
           date: Math.floor(Date.now() / 1000),
           text,
           from: { id: 123456, is_bot: false, first_name: 'Fixture' },
@@ -6996,10 +7011,14 @@ test(
         },
       });
       return (
-        await pool.query<{ turn_id: string; channel: string; source_id: string }>(
-          'SELECT turn_id,channel,source_id FROM channel_inbox WHERE source_id=$1',
-          [`channel:telegram:987:123456:${update}`],
-        )
+        await pool.query<{
+          turn_id: string;
+          channel: string;
+          source_id: string;
+          message_id: string;
+        }>('SELECT turn_id,channel,source_id,message_id FROM channel_inbox WHERE source_id=$1', [
+          `channel:telegram:987:123456:${messageId}`,
+        ])
       ).rows[0]!;
     };
     const tap = (text: string) =>
@@ -7092,9 +7111,27 @@ test(
       assert.equal(delivery(`Synthetic ${command} reply`).message_thread_id, 701);
     await receive('483920', 701);
     assert.equal(codes.at(-1), threadId);
-    await receive('Plan a synthetic trip', 900);
+    const trip = await receive('Plan a synthetic trip', 900);
     assert.ok(submitted.at(-1)?.sessionId);
+    await receive('Make it four days', 900);
+    assert.deepEqual(submitted.at(-1), { replyToMessageId: trip.message_id, sessionId: undefined });
     assert.equal(created.length, 1);
+    const auditStart = await say(await turn(general.channel), 'Starting the synthetic audit');
+    await service.drain();
+    const audit = randomUUID();
+    await pool.query(
+      'INSERT INTO tasks(id,owner_id,turn_id,session_id,message_id,title) VALUES($1,$2,$3,$1,$4,$5)',
+      [audit, ownerId, await turn(general.channel, audit), auditStart, 'Synthetic audit'],
+    );
+    await pool.query(
+      "INSERT INTO channel_topics(owner_id,provider,account_id,sender_id,topic_id,task_id,name) VALUES($1,'telegram','987','123456','950',$2,'Synthetic audit')",
+      [ownerId, audit],
+    );
+    await receive('Any synthetic news?', 950);
+    assert.deepEqual(submitted.at(-1), { replyToMessageId: auditStart, sessionId: undefined });
+    const seenInMain = await say(await turn(general.channel), 'Synthetic main note');
+    await service.drain();
+    const beforeInvoice = ++telegramId;
 
     const invoiceTurn = await turn(general.channel, null, 'waiting');
     await say(invoiceTurn, 'Send the synthetic invoice?');
@@ -7110,6 +7147,8 @@ test(
       tapped.map(({ approvalId }) => approvalId),
       [invoice],
     );
+    await receive('yes', 701, beforeInvoice);
+    assert.deepEqual(answers.at(-1), { replyToMessageId: undefined, shownMessageId: seenInMain });
 
     const web = await chat('Synthetic price check', 'running');
     const progress = await say(web.turn, 'Checking synthetic prices');
@@ -7127,7 +7166,7 @@ test(
     assert.equal(delivery('Found three synthetic options').message_thread_id, 702);
     assert.equal(delivery('Found three synthetic options').disable_notification, undefined);
     const slow = await turn('web', web.id, 'running');
-    await say(slow, 'Still comparing synthetic fares', '20 seconds');
+    const comparing = await say(slow, 'Still comparing synthetic fares', '20 seconds');
     await service.drain();
     assert.equal(delivery('Still comparing synthetic fares').disable_notification, true);
     await pool.query("UPDATE turns SET status='succeeded' WHERE id=$1", [slow]);
@@ -7135,11 +7174,14 @@ test(
     const asking = await turn('web', web.id, 'waiting');
     const flight = await say(asking, 'Book the synthetic flight?');
     const flightApproval = await approve(asking, flight);
+    const beforeFlight = ++telegramId;
     await service.drain();
     assert.equal(delivery('Book the synthetic flight?').message_thread_id, 702);
     assert.equal(delivery('Book the synthetic flight?').disable_notification, undefined);
     await tap('Book the synthetic flight?');
     assert.deepEqual(tapped.at(-1), { messageId: flight, approvalId: flightApproval });
+    await receive('yes', 702, beforeFlight);
+    assert.deepEqual(answers.at(-1), { replyToMessageId: comparing, shownMessageId: undefined });
     const later = await turn('web', web.id, 'running');
     const deposit = await say(later, 'Pay the synthetic deposit?');
     await approve(later, deposit);
@@ -7166,10 +7208,16 @@ test(
         .task_id,
       other.id,
     );
-    await say(answered.turn_id, 'Booked the synthetic hotel');
+    const booked = await say(answered.turn_id, 'Booked the synthetic hotel');
     await service.drain();
     assert.equal(delivery('Booked the synthetic hotel').message_thread_id, 703);
     assert.equal(delivery('Booked the synthetic hotel').disable_notification, undefined);
+    const answeredBeforeStatus = answers.length;
+    await receive('/status', 703);
+    assert.equal(delivery('Synthetic status reply').message_thread_id, 703);
+    await receive('yes', 703);
+    assert.equal(answers.length, answeredBeforeStatus);
+    assert.deepEqual(submitted.at(-1), { replyToMessageId: booked, sessionId: undefined });
     const nextMain = await say(await turn(general.channel), 'Synthetic main update');
     await service.drain();
     assert.equal(delivery('Synthetic main update').message_thread_id, 701);
@@ -7246,11 +7294,22 @@ test(
       "INSERT INTO turns(id,owner_id,thread_id,channel,status,channel_source_id,session_id) VALUES($1,$2,$3,$4,'succeeded',$5,$1)",
       [scheduled, ownerId, threadId, general.channel, back.source_id],
     );
-    await say(scheduled, 'Synthetic scheduled result');
+    const scheduledResult = await say(scheduled, 'Synthetic scheduled result');
     await service.drain();
     assert.equal(delivery('Synthetic reply in General').message_thread_id, undefined);
     assert.equal(delivery('Synthetic reply in the Main topic').message_thread_id, main);
     assert.equal(delivery('Synthetic scheduled result').message_thread_id, undefined);
     assert.equal(created.length, createdBefore + 1);
+
+    getMeFails = true;
+    await service.replaceTransport(createChatSdkTransport(pool, fixtureEnv));
+    await service.drain();
+    await receive('yes');
+    assert.deepEqual(answers.at(-1), {
+      replyToMessageId: undefined,
+      shownMessageId: scheduledResult,
+    });
+    await receive('483924');
+    assert.equal(codes.at(-1), threadId);
   },
 );
