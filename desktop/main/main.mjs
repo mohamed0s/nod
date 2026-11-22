@@ -117,6 +117,7 @@ const developmentDataRoot =
   !app.isPackaged || testInstall ? process.env.NOD_DESKTOP_USER_DATA : undefined;
 if (developmentDataRoot && !isAbsolute(developmentDataRoot))
   throw new Error('The development profile path must be absolute.');
+const watchingSources = !app.isPackaged && !['0', 'false'].includes(process.env.NOD_DESKTOP_WATCH);
 app.setPath(
   'userData',
   developmentDataRoot || join(app.getPath('appData'), testInstall ? 'nod Setup Test' : 'nod'),
@@ -234,6 +235,8 @@ let pendingPreload;
 let stopUpdateChecks;
 let disposeArtifactFiles;
 let closingEngine = false;
+let keepEngineWindows = false;
+let stopSourceWatch;
 let tray;
 let engineOrigin = '';
 let engineBound = false;
@@ -2528,6 +2531,29 @@ async function restartForUpdate() {
   await quit(installUpdate, undefined, true);
 }
 
+async function restartForSource() {
+  await preparing;
+  if (quitting || remoteConnection || status.phase === 'updating') return;
+  if (engineFailure) return prepare({ retry: true });
+  if (!engine || !enginePreferencesReady || closingEngine || status.phase !== 'ready') return;
+  resumePort = Number(URL.parse(engineOrigin)?.port) || resumePort;
+  keepEngineWindows = true;
+  try {
+    await stopEngine();
+  } finally {
+    keepEngineWindows = false;
+  }
+  if (quitting) return;
+  const restarted = await prepare();
+  for (const window of engineWindows) {
+    if (window.isDestroyed()) continue;
+    const url = URL.parse(window.webContents.getURL());
+    if (engineOrigin && url?.protocol === 'http:' && url.origin !== engineOrigin)
+      void window.loadURL(`${engineOrigin}${url.pathname}${url.search}`).catch(() => {});
+  }
+  return restarted;
+}
+
 async function rememberState(window) {
   session.fromPartition(clientPartition).flushStorageData();
   const state = JSON.stringify({
@@ -2682,6 +2708,7 @@ async function quit(complete, failure = 'Nod could not finish shutting down.', u
   );
   await zoomPersistence;
   stopUpdateChecks?.();
+  void stopSourceWatch?.();
   const stoppingUpdates = updates?.dispose();
   updateReadinessNotice();
   stopNotifications?.();
@@ -2827,6 +2854,7 @@ async function startEngine({ runtime, signal, pending = false }) {
     NOD_PUBLIC_URL: engineOrigin,
     NOD_DATA_ROOT: profileRoot,
     NOD_WEB_ROOT: join(engineRoot, 'dist', 'web'),
+    ...(watchingSources ? { NOD_DESKTOP_WATCH: 'true' } : {}),
     ...(process.env.NOD_FEEDBACK_URL === '' ? { NOD_FEEDBACK_ENABLED: 'false' } : {}),
     ...(tracesToken ? { NOD_TRACES_TOKEN: tracesToken } : {}),
     PI_CODING_AGENT_DIR: join(profileRoot, 'pi'),
@@ -2905,7 +2933,7 @@ async function startEngine({ runtime, signal, pending = false }) {
     authToken = '';
     engineRuntimeReady = false;
     update({ engineReady: false });
-    if (status.phase !== 'updating') {
+    if (status.phase !== 'updating' && !keepEngineWindows) {
       void persistCurrentZoomFactor().catch(
         (error) => void writeDiagnostic(error.message).catch(() => {}),
       );
@@ -3238,6 +3266,13 @@ else {
         });
       }
       nativeTheme.on('updated', publishPreferences);
+      if (watchingSources)
+        void import('./source-watch.mjs')
+          .then(({ watchSources }) => watchSources({ root: engineRoot, restart: restartForSource }))
+          .then((stop) => {
+            stopSourceWatch = stop;
+          })
+          .catch((error) => console.error(`Nod could not watch its source: ${error.message}`));
       configureAppSession();
       const image = nativeImage.createFromPath(join(desktopRoot, 'main', 'trayTemplate.png'));
       image.setTemplateImage(true);

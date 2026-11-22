@@ -302,6 +302,7 @@ The packaged engine includes only the packages in `dependencies` and what they d
 | Build a DMG with the runtime inside | `pnpm --dir desktop run build --full`                                                    |
 | Inspect the packaged engine only    | `pnpm --dir desktop run build --stage-only`, then look in `dist/desktop-staging/engine`  |
 | Run the app without packaging       | `pnpm run desktop:dev`                                                                   |
+| Run it without following your edits | `NOD_DESKTOP_WATCH=0 pnpm run desktop:dev`                                               |
 | Replay onboarding                   | `pnpm --dir desktop start --onboarding`                                                  |
 | Use a fresh, throwaway profile      | `NOD_DESKTOP_USER_DATA=/tmp/nod-onboarding-review pnpm --dir desktop start --onboarding` |
 
@@ -323,6 +324,23 @@ For OAuth callbacks, use your development service's public HTTPS origin instead.
 Run `pnpm run desktop:windows:prepare` on a Linux x64 Docker builder. Then, on Windows x64 with Go 1.26.8 and NSIS, install the root and desktop dependencies from their lockfiles and run `pnpm run build` and `pnpm run desktop:windows:build`.
 
 </details>
+
+### Edit while it runs
+
+An unpackaged run follows your checkout. Save a file and Nod picks up the change:
+
+| You change                                                                                                                                        | What happens                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The web app: `src/web`, `index.html` or `public`                                                                                                  | The window updates. A style change swaps in place, and other changes reload the page.                                                                                                                                                                                                                                                          |
+| Anything else in `src`, such as server code, skills and bundled apps, or the docs in `docs/src/content/docs`                                      | Nod restarts its engine on the same address. The window stays open and shows **Reconnecting…**, then reloads when the engine is back. A reply or task in progress stops with an [interruption notice](/use/chat/#stop-nod), as after any restart. If the engine can't start, the setup window shows the error, and your next save tries again. |
+| The desktop app: `desktop/main`, `desktop/preload`, `desktop/ui` or `desktop/runtime`                                                             | The terminal tells you to quit Nod and start it again.                                                                                                                                                                                                                                                                                         |
+| A file built into the runtime images, such as `Dockerfile.workspace`, `jobs/workspace` or the browser worker in `src/providers/container-browser` | The terminal tells you the runtime is out of date. Prepare a new runtime, then reopen Nod.                                                                                                                                                                                                                                                     |
+
+The web app comes from your source through Vite, so you don't need `pnpm run build` first. The engine still runs with `NODE_ENV=production` and the desktop's access checks, so it behaves like the release app. That's also why a component change reloads the page instead of keeping its state.
+
+Vite serves files from the checkout, except `.env` files, `.git`, `.local` and server code. Keep your development profile outside the checkout, or inside `.local`.
+
+`NOD_DESKTOP_WATCH=0` turns this off, and the run serves the web app from your last `pnpm run build`. Packaged apps never watch files.
 
 ## Related resources
 

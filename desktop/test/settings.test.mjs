@@ -49,6 +49,7 @@ import { saveArtifactDownload } from '../main/downloads.mjs';
 import { createArtifactFiles } from '../main/artifact-files.mjs';
 import { createDesktopLifecycle, startupErrorDetails } from '../main/lifecycle.mjs';
 import { createMacEncryption } from '../main/mac-encryption.mjs';
+import { createChangeQueue } from '../main/source-watch.mjs';
 import { waitFor } from '../runtime/index.mjs';
 import { appOpenPath } from '../main/app-links.mjs';
 import { trustSystemCertificates } from '../main/system-certificates.mjs';
@@ -1061,6 +1062,7 @@ async function runningDesktop(
       quitApp: (install = true) => { installUpdateOnQuit = install; return quitApp(); },
       requestQuit: () => app.quit(),
       restartForUpdate,
+      restartForSource,
       crash: () => { engine = undefined; enginePreferencesReady = false; },
     };
     })()`,
@@ -3819,6 +3821,71 @@ test('desktop proxy overrides reach only isolated source engines and retain orig
     }),
     /profile path must be absolute/,
   );
+});
+
+test('source changes restart the engine once per burst and never during a restart', async () => {
+  const flushes = [];
+  let release;
+  let active = 0;
+  const queue = createChangeQueue({
+    delay: 20,
+    flush: async (paths) => {
+      assert.equal(++active, 1);
+      flushes.push([...paths].sort());
+      if (flushes.length === 1) await new Promise((resolve) => (release = resolve));
+      active--;
+    },
+  });
+  for (const path of ['src/server/b.ts', 'src/server/a.ts', 'src/server/b.ts']) queue.add(path);
+  for (let attempt = 0; !release && attempt < 100; attempt++)
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  queue.add('src/server/c.ts');
+  queue.add('src/server/d.ts');
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(flushes.length, 1);
+  release();
+  for (let attempt = 0; flushes.length < 2 && attempt < 100; attempt++)
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  await queue.close();
+  assert.deepEqual(flushes, [
+    ['src/server/a.ts', 'src/server/b.ts'],
+    ['src/server/c.ts', 'src/server/d.ts'],
+  ]);
+});
+
+test('an unpackaged source restart keeps the window and port, and only source runs watch', async (t) => {
+  for (const scenario of [
+    { name: 'source run', watched: true },
+    { name: 'watch turned off', environment: { NOD_DESKTOP_WATCH: '0' } },
+    { name: 'packaged app', packaged: true },
+  ]) {
+    await t.test(scenario.name, async (t) => {
+      const f = await runningDesktop(t, async () => Response.json({ ok: true }), {
+        allowStart: true,
+        packaged: scenario.packaged,
+        environment: scenario.environment,
+      });
+      t.after(() => f.close());
+      f.crash();
+      assert.equal((await f.prepare()).phase, 'ready');
+      const [first] = f.children;
+      assert.equal(first.environment.NOD_DESKTOP_WATCH, scenario.watched ? 'true' : undefined);
+      if (!scenario.watched) return;
+      f.showEngine();
+      const window = f.windows.find((item) => item.url && !item.isDestroyed());
+      assert.ok(window);
+      assert.equal((await f.restartForSource()).phase, 'ready');
+      assert.equal(first.killed, true);
+      assert.equal(f.children.length, 2);
+      assert.equal(f.children[1].port, first.port);
+      assert.equal(f.children[1].environment.NOD_DESKTOP_WATCH, 'true');
+      assert.deepEqual(
+        f.windows.filter((item) => item.url && !item.isDestroyed()),
+        [window],
+      );
+      assert.equal(window.url, `http://127.0.0.1:${first.port}`);
+    });
+  }
 });
 
 test('packaged pages add their content policy without replacing server policy or changing artifact responses', async (t) => {
