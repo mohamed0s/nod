@@ -109,6 +109,14 @@ export function runtimePlatform(env = process.env) {
   return target;
 }
 
+export async function runtimeSources(platform = runtimePlatform()) {
+  const browser = await browserInputs();
+  return {
+    sources: [...inputs, ...(platform === 'win32-x64' ? windowsInputs : []), ...browser.sources],
+    packages: browser.packages,
+  };
+}
+
 export async function runtimeInputs(platform = runtimePlatform()) {
   const entries = [];
   async function collect(path) {
@@ -130,10 +138,9 @@ export async function runtimeInputs(platform = runtimePlatform()) {
       await collect(`${path}/${child.name}`);
   }
   const windows = platform === 'win32-x64';
-  const browser = await browserInputs();
-  for (const input of [...inputs, ...(windows ? windowsInputs : []), ...browser.sources])
-    await collect(input);
-  entries.push(...(await lockedPackages(browser.packages)));
+  const { sources, packages } = await runtimeSources(platform);
+  for (const input of sources) await collect(input);
+  entries.push(...(await lockedPackages(packages)));
   const manifest = JSON.parse(await readFile(join(repository, 'package.json'), 'utf8'));
   entries.push(['pnpm:packageManager', manifest.packageManager]);
   if (!windows) {
