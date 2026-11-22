@@ -24,11 +24,33 @@ function Invoke-NodDesktopApp([string]$Repo, [string[]]$Arguments) {
     & pnpm --dir $Repo exec tsx (Join-Path $Repo 'scripts\windows\desktop-app.ts') @Arguments 2>&1 | ForEach-Object { ConvertTo-NodLine $_ }
 }
 
-function Test-NodDesktopRunning([string]$Repo, [string]$UserData) {
-    if (-not (Test-Path (Join-Path $Repo 'node_modules\tsx'))) { return $false }
-    $answer = @(Invoke-NodDesktopApp $Repo @('running', '--user-data', $UserData))
-    if ($LASTEXITCODE -ne 0) { throw "Could not check whether Nod is running: $($answer -join ' ')" }
-    return ($answer | Select-Object -Last 1) -eq 'running'
+function Test-NodDesktopRunning([string]$UserData) {
+    try {
+        $stream = [IO.File]::Open((Join-Path $UserData 'lockfile'), [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]'ReadWrite, Delete')
+        $stream.Dispose()
+        return $false
+    } catch [IO.FileNotFoundException] {
+        return $false
+    } catch [IO.DirectoryNotFoundException] {
+        return $false
+    } catch [UnauthorizedAccessException] {
+        return $true
+    } catch [IO.IOException] {
+        if (($_.Exception.HResult -band 0xFFFF) -in @(32, 33)) { return $true }
+        throw
+    }
+}
+
+function Get-NodDesktopStartName([string]$UserData) {
+    $hash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($UserData.ToLowerInvariant()))).Replace('-', '').Substring(0, 16)
+    return "Local\nod-desktop-start-$hash"
+}
+
+function Test-NodDesktopStarting([string]$UserData) {
+    $mutex = $null
+    if (-not [Threading.Mutex]::TryOpenExisting((Get-NodDesktopStartName $UserData), [ref]$mutex)) { return $false }
+    $mutex.Dispose()
+    return $true
 }
 
 function Invoke-NodLogged([scriptblock]$Write, [scriptblock]$Run) {

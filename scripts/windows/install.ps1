@@ -43,7 +43,7 @@ if ($Desktop) {
 
     Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
     $env:COREPACK_ENABLE_DOWNLOAD_PROMPT = '0'
-    $running = Test-NodDesktopRunning $repo $Desktop
+    $running = Test-NodDesktopRunning $Desktop
     if ($running) {
         Step 'Nod is running from this folder, so its packages stay as they are'
     } else {
@@ -99,7 +99,7 @@ if ($Desktop) {
 Step 'Starting Nod at every Windows sign-in'
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $startArguments -WorkingDirectory $repo
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-$settingsSet = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable
+$settingsSet = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable -Priority 5
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive
 Register-ScheduledTask -TaskName 'start' -TaskPath '\Nod\' -Action $action -Trigger $trigger -Settings $settingsSet -Principal $principal -Force | Out-Null
 
@@ -135,12 +135,13 @@ if ($Desktop) {
     if ($running) { Write-Host 'Done. Nod keeps running, and from now on it starts at every Windows sign-in.' -ForegroundColor Green; exit 0 }
     if ($NoStart) { Write-Host 'Done. Nod starts the next time you sign in to Windows.'; exit 0 }
     Step 'Starting Nod now'
-    Start-ScheduledTask -TaskPath '\Nod\' -TaskName 'start'
     $log = Join-Path $Desktop 'desktop-start.log'
+    if (-not (Test-NodDesktopStarting $Desktop)) { Move-Item -LiteralPath $log (Join-Path $Desktop 'desktop-start.prev.log') -Force -ErrorAction SilentlyContinue }
+    Start-ScheduledTask -TaskPath '\Nod\' -TaskName 'start'
     $deadline = (Get-Date).AddMinutes(30)
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds 5
-        if (Test-NodDesktopRunning $repo $Desktop) {
+        if (Test-NodDesktopRunning $Desktop) {
             Write-Host "Nod is running. Next time, use the 'Nod' shortcut." -ForegroundColor Green
             exit 0
         }

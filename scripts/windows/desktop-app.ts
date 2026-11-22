@@ -157,7 +157,7 @@ async function backup(userData: string, out: string, log: (line: string) => void
       throw new Error(
         "Nod's database is not running. Back up again once Nod has finished starting.",
       );
-    else await withDatabase(computer.docker, containers.postgres, save);
+    else await withDatabase(computer.docker, containers.postgres, save, () => appRunning(userData));
     log('Saved the database.');
 
     for (const [name, volume] of [

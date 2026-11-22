@@ -11,14 +11,13 @@ $env:COREPACK_ENABLE_DOWNLOAD_PROMPT = '0'
 $env:Path = "$env:APPDATA\npm;$env:Path"
 try { [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false } catch {}
 
-if (Test-NodDesktopRunning $repo $UserData) {
+if (Test-NodDesktopRunning $UserData) {
     if ($Show) { Invoke-NodDesktopApp $repo @('show', '--user-data', $UserData) | Out-Null }
     Write-Host 'Nod is already running.'
     exit 0
 }
 
-$name = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($UserData.ToLowerInvariant()))).Replace('-', '').Substring(0, 16)
-$mutex = New-Object Threading.Mutex($false, "Local\nod-desktop-start-$name")
+$mutex = New-Object Threading.Mutex($false, (Get-NodDesktopStartName $UserData))
 $owned = $false
 try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned = $true }
 if (-not $owned) {

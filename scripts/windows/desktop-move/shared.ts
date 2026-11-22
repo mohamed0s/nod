@@ -334,7 +334,12 @@ export function privateComputer(distribution: string, identity: string) {
   };
 }
 
-export async function withDatabase<T>(docker: Docker, container: string, work: () => Promise<T>) {
+export async function withDatabase<T>(
+  docker: Docker,
+  container: string,
+  work: () => Promise<T>,
+  keepRunning: () => Promise<boolean> = async () => false,
+) {
   await docker(['start', container], { label: 'Starting the desktop database' });
   let failed = false;
   try {
@@ -355,7 +360,8 @@ export async function withDatabase<T>(docker: Docker, container: string, work: (
     throw error;
   } finally {
     try {
-      await docker(['stop', container], { label: 'Stopping the desktop database' });
+      if (!(await keepRunning()))
+        await docker(['stop', container], { label: 'Stopping the desktop database' });
     } catch (error) {
       if (!failed) throw error;
     }

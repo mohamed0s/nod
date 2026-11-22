@@ -81,7 +81,7 @@ if ($desktopMode) {
     } elseif ($runtimeChanged) {
         $what = if ($images.Count) { Format-Names $images } else { 'the browser packages in pnpm-lock.yaml' }
         Write-Host "    The runtime images include $what, so Nod keeps its current runtime." -ForegroundColor Yellow
-        Write-Host '    Prepare a new runtime (pnpm run desktop:windows:prepare), then quit Nod and start it again.' -ForegroundColor Yellow
+        Write-Host '    To use the new runtime, replace the windows-runtime folder with a newer one, such as resources\engine\windows-runtime from the next fork release, then quit Nod and start it again.' -ForegroundColor Yellow
     }
     exit 0
 }

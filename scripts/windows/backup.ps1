@@ -15,14 +15,23 @@ New-Item -ItemType Directory -Force $target | Out-Null
 $log = Join-Path $target 'backup.log'
 function Say($text) { Add-Content $log ("[{0:HH:mm:ss}] {1}" -f (Get-Date), $text) -Encoding UTF8 }
 
+$failed = "$target-failed"
+$saved = $false
 Push-Location $repo
 try {
     if ($Desktop) {
         $env:COREPACK_ENABLE_DOWNLOAD_PROMPT = '0'
         $env:Path = "$env:APPDATA\npm;$env:Path"
         try { [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false } catch {}
+        $deadline = (Get-Date).AddMinutes(30)
+        $waited = $false
+        while ((Test-NodDesktopStarting $Desktop) -and -not (Test-NodDesktopRunning $Desktop) -and (Get-Date) -lt $deadline) {
+            if (-not $waited) { Say 'Nod is starting, so the backup waits until it is open.' }
+            $waited = $true
+            Start-Sleep -Seconds 10
+        }
         Invoke-NodDesktopApp $repo @('backup', '--user-data', $Desktop, '--out', $target) | ForEach-Object { Say $_ }
-        if ($LASTEXITCODE -ne 0) { throw "The desktop backup failed. See $log" }
+        if ($LASTEXITCODE -ne 0) { throw "The desktop backup failed. See backup.log in $failed" }
     } else {
         $postgres = (Native { docker compose ps -q postgres }) | Select-Object -First 1
         if (-not $postgres) { throw 'The Nod database container is not running, so there is nothing to back up.' }
@@ -44,8 +53,14 @@ try {
             if ($LASTEXITCODE -eq 0) { Say "Saved volume $volume." } else { Say "Could not save volume $volume." }
         }
     }
+    $saved = $true
 } finally {
     Pop-Location
+    if (-not $saved) {
+        Rename-Item -LiteralPath $target -NewName (Split-Path -Leaf $failed) -ErrorAction SilentlyContinue
+        $oldFailed = Get-ChildItem $Destination -Directory | Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}_\d{4}-failed$' } | Sort-Object Name -Descending | Select-Object -Skip 3
+        foreach ($dir in $oldFailed) { Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 $old = Get-ChildItem $Destination -Directory | Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}_\d{4}$' } | Sort-Object Name -Descending | Select-Object -Skip $Keep

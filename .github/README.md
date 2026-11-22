@@ -49,7 +49,7 @@ The script:
 2. **Starts Docker Desktop,** if it isn't running.
 3. **Creates `.env`,** with a new Vault key and usage data and traces turned off.
 4. **Starts Nod at every Windows sign-in,** through the scheduled task `\Nod\start`.
-5. **Backs Nod up every night at 03:30,** through the scheduled task `\Nod\backup`. It saves the database, the `.local` folder, and the browser and tools volumes into the `nod-backups` folder next to this one, and keeps the newest 14. The Vault key isn't saved.
+5. **Backs Nod up every night at 03:30,** through the scheduled task `\Nod\backup`. It saves the database, the `.local` folder, and the browser and tools volumes into the `nod-backups` folder next to this one, and keeps the newest 14 (a failed one gets `-failed` added to its folder name and never pushes good ones out). The Vault key isn't saved.
 6. **Adds a `nod` desktop shortcut.**
 7. **Starts Nod and opens it in your browser.** The first start builds four containers and can take 10 minutes or more.
 
@@ -75,7 +75,7 @@ The script:
 2. **Gives your Windows user full control of the profile folder.** The app needs it on drives where users only have Modify.
 3. **Installs the packages and Electron, and builds the web app once.** Electron's download cache goes in `electron-cache` next to the checkout, so it stays on the same drive.
 4. **Starts the app at every Windows sign-in,** through `\Nod\start`, which runs `scripts\windows\desktop-start.ps1`. Each start installs packages again only when a lockfile changed, and logs to `desktop-start.log` in the profile folder.
-5. **Backs it up every night at 03:30,** through `\Nod\backup`. It saves the database, the workspace, tools and browser volumes, and the profile files (sessions, Pi settings, attachments, the app identity, `settings.json`, `profile.json` and preferences) into `nod-backups` next to the checkout, and keeps the newest 14. It works while Nod is open. Only your Windows user, SYSTEM and Administrators can open a backup, and each one has a `README.txt` that says what's inside.
+5. **Backs it up every night at 03:30,** through `\Nod\backup`. It saves the database, the workspace, tools and browser volumes, and the profile files (sessions, Pi settings, attachments, the app identity, `settings.json`, `profile.json` and preferences) into `nod-backups` next to the checkout, and keeps the newest 14. It works while Nod is open. A backup that fails keeps its folder with `-failed` added to the name, so you can read its `backup.log`; failed ones never push good ones out. Only your Windows user, SYSTEM and Administrators can open a backup, and each one has a `README.txt` that says what's inside.
 6. **Adds a `Nod` desktop shortcut** in place of the `nod` one. It starts Nod, or shows it if it's running.
 7. **Starts Nod.** If it's already running from that folder, it keeps running.
 
