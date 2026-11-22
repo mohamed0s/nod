@@ -97,14 +97,14 @@ flowchart LR
 
 n8n's own release workflow runs only in n8n's repository: it needs their paid build machines and signing keys. This fork has its own, **Fork Windows release**, and it runs by itself.
 
-1. **Each n8n release starts it.** n8n marks a release by changing `desktop/release.json`. When `scripts\windows\update.ps1` pushes a merge that changes it to `mine`, the workflow builds a release. If the fork already has a release for that n8n version, it builds nothing.
-2. **Versions follow n8n's.** n8n's 0.9.1 becomes 0.9.100, and another build of it 0.9.101. n8n's 0.9.2 becomes 0.9.200.
-3. **It builds and checks the installer** on GitHub's machines, then publishes `nod-v<version>` as the fork's latest release. The runtime, about 1.5 GB, is rebuilt only when its inputs change or once a week; otherwise it's copied from an earlier release, so installed apps download only the new installer.
-4. **To build one by hand**, open **Actions → Fork Windows release → Run workflow** on `mine`. Leave the version empty to number it as above, or enter one higher than every `nod-v` tag on the fork.
+1. **Each n8n release starts it.** n8n marks a release by changing `desktop/release.json`. When `scripts\windows\update.ps1` pushes a merge that changes it to `mine`, the workflow builds a release from `mine`. If the fork already has a release for that n8n version, it builds nothing and says which release covers it.
+2. **Versions follow n8n's, a step above them.** n8n's 0.9.1 becomes 0.9.200, and another build of it 0.9.201. n8n's 0.9.2 becomes 0.9.300, and n8n's 0.10.0 becomes 0.10.100. A version is never one of n8n's own, and the run stops with an error if it can't pick one.
+3. **It builds and checks the installer** on GitHub's machines, then publishes `nod-v<version>` as the fork's latest release. The runtime, about 1.5 GB, is rebuilt when its inputs change and by the first build of each week (from Monday, UTC). Otherwise it's copied from an earlier release, so installed apps download only the new installer. If the copied runtime fails its checks, the run builds a fresh one.
+4. **To build one by hand**, open **Actions → Fork Windows release → Run workflow**. It runs only on `mine`. Leave the version empty to number it as above, or enter one in the same range for the current n8n version (0.9.200 to 0.9.299 for n8n's 0.9.1) that's higher than every `nod-v` tag on the fork.
 
 Runs never overlap. A new run waits for the running one, and a newer waiting run replaces an older one. To share a build, send the release link.
 
-The installers aren't code-signed. A fork that signed them in GitHub Actions would keep the key in the same GitHub account as the releases, so a certificate wouldn't add protection, only setup on every PC. Installed apps trust this fork's releases instead: they check each installer's SHA-256 against the release, and still refuse one with a broken signature or another publisher's. See [How installed apps update](https://github.com/mohamed0s/nod/blob/mine/docs/src/content/docs/contribute/desktop-releases.mdx#how-installed-apps-update).
+The installers aren't code-signed, so installed apps trust this fork's GitHub releases. Each installer's SHA-256 is checked against the release, which protects the download on its way to the PC, and an installer with a broken signature or another publisher's is still refused. But anyone who can publish a release on this fork can ship code to every install. Signing with a key kept in a protected GitHub environment that needs a reviewer's approval would separate uploading a file from shipping code; this fork accepts not having that. See [How installed apps update](https://github.com/mohamed0s/nod/blob/mine/docs/src/content/docs/contribute/desktop-releases.mdx#how-installed-apps-update).
 
 ## Troubleshooting
 

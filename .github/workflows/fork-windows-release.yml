@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Leave empty to number the build from n8n's version (n8n's 0.9.1 gives 0.9.100, then 0.9.101). A version you enter must be higher than every nod-v tag on this fork.
+        description: Leave empty to number the build from n8n's version (n8n's 0.9.1 gives 0.9.200, then 0.9.201). A version you enter must be in that range and higher than every nod-v tag on this fork.
         type: string
         required: false
         default: ''
@@ -22,7 +22,7 @@ concurrency:
 jobs:
   plan:
     name: Choose the version and the runtime
-    if: github.repository != 'n8n-io/nod'
+    if: github.repository != 'n8n-io/nod' && github.ref == 'refs/heads/mine'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -69,30 +69,41 @@ jobs:
           node-version: '24.21.0'
           cache: pnpm
       - name: Reuse the runtime of an earlier release
+        id: reuse
         if: env.NOD_WINDOWS_RUNTIME_TAG != ''
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: node .github/scripts/desktop-release.mjs reuse-windows-runtime
-      - name: Make room for the runtime images
-        if: env.NOD_WINDOWS_RUNTIME_TAG == ''
+      - name: Build a fresh runtime when none can be reused
+        id: build
+        if: env.NOD_WINDOWS_RUNTIME_TAG == '' || steps.reuse.outcome == 'failure'
+        env:
+          REUSE: ${{ steps.reuse.outcome }}
         run: |
+          if [ "$REUSE" = failure ]; then echo "::warning title=Runtime rebuilt::The runtime of $NOD_WINDOWS_RUNTIME_TAG failed its checks, so this run builds a fresh one."; fi
+          echo needed=true >> "$GITHUB_OUTPUT"
+      - name: Make room for the runtime images
+        if: steps.build.outputs.needed == 'true'
+        run: |
+          rm -rf "$NOD_RUNTIME_ASSETS"
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           df -h /
-      - if: env.NOD_WINDOWS_RUNTIME_TAG == ''
+      - if: steps.build.outputs.needed == 'true'
         run: pnpm install --frozen-lockfile
       - name: Build the workspace image
-        if: env.NOD_WINDOWS_RUNTIME_TAG == ''
+        if: steps.build.outputs.needed == 'true'
         run: docker build --platform linux/amd64 --file Dockerfile.workspace --build-arg "NOD_RUNTIME_REFRESH=$NOD_RUNTIME_REFRESH" --tag nod-desktop-workspace:experiment .
       - name: Build the browser image
-        if: env.NOD_WINDOWS_RUNTIME_TAG == ''
+        if: steps.build.outputs.needed == 'true'
         run: docker build --platform linux/amd64 --file Dockerfile.browser --build-arg "NOD_RUNTIME_REFRESH=$NOD_RUNTIME_REFRESH" --tag nod-desktop-browser:experiment .
       - name: Verify and export the native images
-        if: env.NOD_WINDOWS_RUNTIME_TAG == ''
+        if: steps.build.outputs.needed == 'true'
         env:
           NOD_DESKTOP_TARGET: win32-x64
         run: node desktop/scripts/prepare-runtime.mjs --images-only --prebuilt-images
       - name: Build the Windows root filesystem
-        if: env.NOD_WINDOWS_RUNTIME_TAG == ''
+        if: steps.build.outputs.needed == 'true'
         env:
           NOD_DESKTOP_TARGET: win32-x64
         run: node desktop/scripts/prepare-windows-runtime.mjs --prebuilt-images
@@ -186,7 +197,7 @@ jobs:
             exit 1
           fi
           cat > notes.md <<'EOF'
-          Windows build of this fork of [Nod](https://github.com/n8n-io/nod), version VERSION_HERE, from commit SHA_HERE. It includes n8n's Nod BASE_HERE.
+          Windows build of this fork of [Nod](https://github.com/n8n-io/nod), version VERSION_HERE. It comes from the fork's `mine` branch at commit SHA_HERE: n8n's `main` as of its last merge into the fork, plus the fork's own changes. n8n's desktop version at that point was BASE_HERE.
 
           This is not an official n8n release. The installer is not code-signed, so Windows SmartScreen may warn before it runs: choose **More info**, then **Run anyway**.
 
