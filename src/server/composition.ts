@@ -14,7 +14,6 @@ import {
 } from '../ports/agent.ts';
 import {
   apiKeyConnectionProviders,
-  lightestEffort,
   modelProviderInfo,
   modelProviderNames,
   modelProviders,
@@ -403,7 +402,7 @@ export function createDefaultAdapters(
     get provider() {
       return models.current.provider;
     },
-    resolve: () => models.resolve(true),
+    resolve: () => models.candidates('memory'),
     configured: () => models.configured,
     traces,
   });
@@ -411,21 +410,7 @@ export function createDefaultAdapters(
     get provider() {
       return models.current.provider;
     },
-    resolve: async () => {
-      const access = await models.resolve();
-      return {
-        ...access,
-        effort: lightestEffort(access.definition.choice.efforts),
-        ...(access.textModel
-          ? {
-              textModel: {
-                ...access.textModel,
-                effort: lightestEffort(access.textModel.definition.choice.efforts),
-              },
-            }
-          : {}),
-      };
-    },
+    resolve: () => models.candidates('lightest'),
     configured: () => models.configured,
     traces,
   });
@@ -620,14 +605,14 @@ export function createDefaultAdapters(
       get provider() {
         return models.current.provider;
       },
-      resolve: () => models.resolveClassification(true),
+      resolve: () => models.candidates('small'),
       configured: () => models.hasClassificationModel(true),
     }),
     classificationCurator: createPiMemoryCurator({
       get provider() {
         return models.current.provider;
       },
-      resolve: () => models.resolveClassification(),
+      resolve: () => models.candidates('light'),
       configured: () => models.hasClassificationModel(),
     }),
     imageCurator: createPiMemoryCurator({
@@ -635,7 +620,7 @@ export function createDefaultAdapters(
         return models.current.provider;
       },
       configured: () => models.hasImageModel(),
-      resolve: () => models.resolveImage(),
+      resolve: () => models.candidates('image'),
       traces,
     }),
     onboardingCurator: selectedCurator,
@@ -915,7 +900,13 @@ async function initializeApplication(
     : curator;
   void adapters.models?.setSelectionCheck(() =>
     onboardingCurator.curate(
-      { task: 'check', instructions: 'Return only {"ok":true}.', input: {}, automatic: false },
+      {
+        task: 'check',
+        instructions: 'Return only {"ok":true}.',
+        input: {},
+        automatic: false,
+        fallback: false,
+      },
       AbortSignal.timeout(30_000),
     ),
   );

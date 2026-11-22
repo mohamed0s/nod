@@ -26,10 +26,12 @@ export interface MemoryCurator {
       responseSchema?: Record<string, unknown>;
       images?: AgentImage[];
       automatic?: boolean;
+      fallback?: boolean;
     },
     signal?: AbortSignal,
     report?: (
       usage: Partial<ProviderUsageEvent> & { id: string; model: string; costUsd: number | null },
     ) => void,
   ): Promise<unknown>;
+  pinned?(): Promise<MemoryCurator[]>;
 }

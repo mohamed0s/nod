@@ -44,6 +44,7 @@ import {
   type ModelMethod,
 } from '../../shared/models.ts';
 import { signInPage } from '../../shared/sign-in-page.ts';
+import { retryDelayMs } from '../../shared/model-fallback.ts';
 import type { PiModelCall, ModelRequestFacts } from './traces.ts';
 import type { AgentSessionOptions } from '../../ports/agent.ts';
 import type { ProviderUsageEvent } from '../../ports/provider-usage.ts';
@@ -1217,7 +1218,9 @@ export async function createPiModelRuntime(
     throw new Error('The text companion is unavailable. Refresh the model list.');
   const stream = runtime.streamSimple.bind(runtime);
   const requestFacts = new WeakMap<AssistantMessage, ModelRequestFacts>();
+  let retryAfter: number | undefined;
   runtime.streamSimple = (model, context, options) => {
+    retryAfter = undefined;
     context = {
       ...context,
       messages: context.messages.map((message) =>
@@ -1258,6 +1261,11 @@ export async function createPiModelRuntime(
       onResponse: async (response, model) => {
         phase = 'response';
         status = response.status;
+        if (status >= 400)
+          retryAfter ??= retryDelayMs(
+            (name) =>
+              Object.entries(response.headers).find(([key]) => key.toLowerCase() === name)?.[1],
+          );
         await options?.onResponse?.(response, model);
       },
       onProviderStreamEvent: async (event, model) => {
@@ -1316,6 +1324,7 @@ export async function createPiModelRuntime(
               });
               phase = 'response';
               status = response.status;
+              if (!response.ok) retryAfter = retryDelayMs((name) => response.headers.get(name));
               return usage ? usage.response(response) : response;
             },
           }
@@ -1524,5 +1533,7 @@ export async function createPiModelRuntime(
     model,
     textModel,
     requestFacts: (message: AssistantMessage) => requestFacts.get(message),
+    retryAfter: (message: AssistantMessage) =>
+      retryAfter ?? retryDelayMs(() => undefined, message.errorMessage),
   };
 }

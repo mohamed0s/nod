@@ -11,6 +11,7 @@ import type {
 import {
   ModelAuthError,
   ModelCatalogError,
+  ModelUnavailableError,
   ModelWorkspaceSelectionError,
 } from '../ports/models.ts';
 import { ModelRequestError } from '../ports/agent.ts';
@@ -58,6 +59,7 @@ import { analyticsModel, snapshotAnalytics, type CaptureAnalytics } from './anal
 import type { SettingActor } from './analytics-settings.ts';
 import { logFailure } from './failure-log.ts';
 import { modelFailureReason } from '../shared/model-quota.ts';
+import { modelUnavailable } from '../shared/model-fallback.ts';
 import { createTextRedactor, redactSecretText } from './redaction.ts';
 import { afterCommit } from './transaction.ts';
 
@@ -558,10 +560,12 @@ export function createModelService(options: {
             tag,
           ),
         ).get(modelId);
-        if (automatic && failure && Date.now() < failure.retryAt)
-          throw new ConnectionError(
-            `${modelProviderNames[row.provider]} failed the last request to ${modelId} (${failure.reason}). Automatic requests to this model are paused until a request succeeds. Check this connection in ${appPages['/settings/models']} or ask again to make a new request.`,
-          );
+        if (automatic && failure && Date.now() < failure.retryAt) {
+          const message = `${modelProviderNames[row.provider]} failed the last request to ${modelId} (${failure.reason}). Automatic requests to this model are paused until a request succeeds. Check this connection in ${appPages['/settings/models']} or ask again to make a new request.`;
+          throw failure.unavailable
+            ? new ModelUnavailableError(message, [`${row.provider}/${modelId} (${failure.reason})`])
+            : new ConnectionError(message);
+        }
         return async (error, status) => {
           if (!tag || closed) return;
           if (
@@ -601,6 +605,7 @@ export function createModelService(options: {
                 credentialTag: tag,
                 failures: count,
                 retryAt: Date.now() + failureWindow(count),
+                ...(modelUnavailable(error) ? { unavailable: modelUnavailable(error) } : {}),
                 reason: redactSecretText(modelFailureReason(error))
                   .replace(/\s*\[request phase: [^\]]*\]\s*$/, '')
                   .replace(/\s+/g, ' ')
