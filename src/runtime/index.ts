@@ -35,8 +35,8 @@ import { BrowserActionError } from '../ports/computer.ts';
 import { threadIdentity } from '../ports/thread-identity.ts';
 import {
   compactHistory,
+  compactMemory,
   compactOwnerContext,
-  compactSystemPrompt,
   firstInstruction,
   observerInstruction,
   scheduledInstruction,
@@ -96,14 +96,14 @@ const parentTools = new Set([
   'task',
 ]);
 const parallelTools = new Set([
-  'nod_docs',
+  'nod',
   'flights',
   'delegate',
   'share_file',
   'create_audio',
   'skills',
   'apps',
-  'manage_personal_context',
+  'memory',
   'react_to_message',
 ]);
 const orderedTools = new Set([
@@ -111,7 +111,8 @@ const orderedTools = new Set([
   'files',
   'jobs',
   'computer',
-  'manage_personal_context',
+  'memory',
+  'nod',
   'skills',
   'read_source',
   'proactive_issue',
@@ -127,7 +128,6 @@ const reportingTaskActions = new Set(['finish', 'list', 'stop', 'update']);
 const limitActions = new Set(['usage_get', 'limits_update']);
 const dollars = (value: number) => `$${Number.isInteger(value) ? value : value.toFixed(2)}`;
 const delimitedTools = new Set([
-  'nod_docs',
   'read_source',
   'proactive_issue',
   'apps',
@@ -500,7 +500,7 @@ export function createAgentRuntime(dependencies: {
             name === 'proactive_issue' ||
             name === 'task' ||
             (name === 'ask_user' && overBudget()) ||
-            (name === 'manage_personal_context' &&
+            (name === 'memory' &&
               [
                 'memory_read',
                 'memory_find',
@@ -515,10 +515,7 @@ export function createAgentRuntime(dependencies: {
         if (
           context.spendingLimitReached &&
           !reportingTools.has(name) &&
-          !(
-            name === 'manage_personal_context' &&
-            limitActions.has(String((params as { action?: unknown })?.action))
-          )
+          !(name === 'nod' && limitActions.has(String((params as { action?: unknown })?.action)))
         )
           throw new Error(
             `The owner's ${dollars(context.spendingLimitReached.monthlyUsd)} monthly spending limit is reached, so only changing spending limits and replying work now.`,
@@ -824,22 +821,16 @@ export function createAgentRuntime(dependencies: {
           .filter(
             (tool) =>
               !context.proactivity ||
-              [
-                'read_source',
-                'proactive_issue',
-                'manage_personal_context',
-                'task',
-                'ask_user',
-              ].includes(tool.name),
+              ['read_source', 'proactive_issue', 'memory', 'task', 'ask_user'].includes(tool.name),
           )
           .map((tool): AgentTool => {
             const { name, execute } = tool;
             const description =
-              context.proactivity && name === 'manage_personal_context'
+              context.proactivity && name === 'memory'
                 ? 'Read owner context. memory_read {path}, memory_find {query,area?}, history_search {query?,from?,to?,before?,around?}, and notification_preferences_get {} are the only available actions. Memory is context, not source evidence or permission.'
                 : tool.description;
             const parameters =
-              context.proactivity && name === 'manage_personal_context'
+              context.proactivity && name === 'memory'
                 ? Type.Object(
                     {
                       action: Type.Union(
@@ -909,9 +900,15 @@ export function createAgentRuntime(dependencies: {
         context.proactivity?.instructions ??
         systemPrompt(workspace, dependencies.skills, context.taskContext, context.background);
       const compactInstructions = {
-        systemPrompt: context.proactivity
-          ? system
-          : compactSystemPrompt(workspace, skills, context.taskContext, context.background),
+        systemPrompt:
+          context.proactivity?.instructions ??
+          systemPrompt(
+            workspace,
+            dependencies.skills,
+            context.taskContext,
+            context.background,
+            true,
+          ),
         ownerContext: compactOwnerContext(context),
       };
       const shared = {
@@ -1327,6 +1324,7 @@ export function createAgentRuntime(dependencies: {
             history: compactHistory(context.history),
             relatedConversation: undefined,
             tasks: [],
+            memoryBrief: context.memoryBrief && compactMemory(context.memoryBrief),
           }
         : context;
       const observer = context.proactivity
@@ -1335,7 +1333,6 @@ export function createAgentRuntime(dependencies: {
             resumed && !compact,
             currentUserTime(context.timeZone),
             sourceReads,
-            compact,
           )
         : undefined;
       const scheduled =
@@ -1346,13 +1343,12 @@ export function createAgentRuntime(dependencies: {
               omitted,
               currentUserTime(context.timeZone),
               analysis,
-              compact,
             )
           : undefined;
       const fallback =
         observer?.text ??
         scheduled?.text ??
-        instruct(firstInstruction(requestContext, resumed && !compact, omitted, analysis, compact));
+        instruct(firstInstruction(requestContext, resumed && !compact, omitted, analysis));
       const audio = nativeAudio(context.attachments, fallback);
       const nativeContext = audio
         ? {
@@ -1362,9 +1358,7 @@ export function createAgentRuntime(dependencies: {
         : requestContext;
       await session!.prompt(
         audio
-          ? instruct(
-              firstInstruction(nativeContext, resumed && !compact, omitted, analysis, compact),
-            )
+          ? instruct(firstInstruction(nativeContext, resumed && !compact, omitted, analysis))
           : fallback,
         images,
         audio,

@@ -229,7 +229,7 @@ test(
       return id;
     };
     const personal = (action: string, args: Record<string, unknown>, rejected = false): Step => ({
-      tool: 'manage_personal_context',
+      tool: /^(memory_|history_search|notification_preferences_)/.test(action) ? 'memory' : 'nod',
       args: { action, args },
       rejected,
     });

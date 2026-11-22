@@ -567,7 +567,10 @@ test(
                   const name =
                     plan.tool === 'synthetic_mcp'
                       ? options.tools.find((item) => item.name.endsWith('__execute_workflow'))!.name
-                      : (plan.tool ?? 'manage_personal_context');
+                      : (plan.tool ??
+                        (/^(memory_|history_search|notification_preferences_)/.test(plan.action)
+                          ? 'memory'
+                          : 'nod'));
                   const pending = activePlan.run(instruction, () =>
                     options.tools
                       .find((tool) => tool.name === name)!
@@ -1310,9 +1313,9 @@ test(
             sequential: true,
             chatOnly: true,
             calls: [
-              { tool: 'manage_personal_context', action: 'model_select', args: { args: before! } },
+              { tool: 'nod', action: 'model_select', args: { args: before! } },
               {
-                tool: 'manage_personal_context',
+                tool: 'nod',
                 action: 'model_select',
                 args: { args: { scope: 'background', use: 'light' } },
               },
@@ -2433,11 +2436,7 @@ test(
           );
           const log = JSON.stringify(
             results.get(
-              await propose(
-                'usage_get',
-                { from: '2000-01-01', to: '2099-12-31' },
-                'manage_personal_context',
-              ),
+              await propose('usage_get', { from: '2000-01-01', to: '2099-12-31' }, 'nod'),
             ),
           );
           assert.match(log, /untrusted_tool_result source=\\"usage\\"/);
@@ -2819,7 +2818,7 @@ test(
           let drafts = 0;
           confirmationModel = (_input, schema) => {
             drafts++;
-            assert.deepEqual(schema?.required, ['text', 'action', 'decline']);
+            assert.deepEqual(schema?.required, ['text', 'action', 'question', 'decline']);
             assert.equal(schema?.additionalProperties, false);
             return drafts === 1
               ? { text: 'Save the synthetic development rule?' }
@@ -2879,6 +2878,7 @@ test(
         const [approval] = await approvalsFor(turn);
         assert.equal(approval.status, 'pending');
         assert.equal(approval.action, 'GMAIL_DELETE_MESSAGE');
+        assert.equal(approval.details.earlierActions, undefined);
         const question = await confirmationFor(approval);
         assert.doesNotMatch(question, /fixture-mail-1/);
         assert.match(question, /permanently delete/i);
@@ -2956,6 +2956,12 @@ test(
           const [approval] = await approvalsFor(turn);
           assert.equal(approval.status, 'pending');
           assert.equal(approval.action, 'GMAIL_DELETE_DRAFT');
+          assert.deepEqual(approval.details.earlierActions, [
+            {
+              action: 'Gmail: create email draft',
+              target: 'cleanup@example.test · Synthetic team summary',
+            },
+          ]);
           const question = await confirmationFor(approval);
           assert.equal(question.includes(created), false);
           assert.match(question, /permanently delete.*unsent Gmail draft/i);

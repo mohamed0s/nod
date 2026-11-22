@@ -43,7 +43,7 @@ The library combines task guides in [`src/runtime/skills`](https://github.com/n8
 | `personal-finance`        | `sales-and-crm`         | `writing-and-content`    |
 | `privacy-and-accounts`    | `software-and-websites` | `visual-replies`         |
 | `shopping`                | `n8n`                   |                          |
-| `subscriptions-and-bills` |                         |                          |
+| `subscriptions-and-bills` | `nod`                   |                          |
 | `travel`                  |                         |                          |
 
 Eight guides have a reference for one specific case: recurring meetings, data imports, government forms, catalog synchronization, corpus research, purchase claims, existing travel bookings and n8n Telegram workflows.
