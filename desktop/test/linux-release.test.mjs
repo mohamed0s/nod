@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { linuxReleaseFiles, packageLinuxBundle } from '../scripts/linux-release.mjs';
-import { desktopBuildOptions } from '../scripts/release-tools.mjs';
+import { desktopBuildOptions, windowsUpdatePublisher } from '../scripts/release-tools.mjs';
 
 test('desktop release metadata keeps the trace token and release flag together', () => {
   const tracesToken = 'a'.repeat(64);
@@ -16,6 +16,19 @@ test('desktop release metadata keeps the trace token and release flag together',
     { tracesToken, release: true },
   );
   assert.throws(() => desktopBuildOptions({ NOD_TRACES_TOKEN: 'invalid token' }), /URL-safe/);
+});
+
+test('Windows builds accept unsigned updates only when unsigned and updating from another repository', () => {
+  const fork = { NOD_DESKTOP_UPDATE_REPOSITORY: 'synthetic-owner/nod' };
+  assert.equal(windowsUpdatePublisher(fork), 'unsigned');
+  for (const env of [
+    {},
+    { ...fork, NOD_RELEASE_BUILD: 'true' },
+    { ...fork, NOD_DESKTOP_UPDATE_SOURCE_URL: 'https://updates.example.invalid/nod' },
+    { NOD_DESKTOP_UPDATE_REPOSITORY: 'n8n-io/nod' },
+    { NOD_DESKTOP_UPDATE_REPOSITORY: 'N8N-IO/Nod' },
+  ])
+    assert.equal(windowsUpdatePublisher(env), undefined);
 });
 
 test('Linux release parts preserve the bundle and reject missing, changed or unrelated files', async (t) => {

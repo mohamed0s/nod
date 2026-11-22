@@ -6,7 +6,13 @@ import { packager } from '@electron/packager';
 import { assetHash } from '../runtime/assets.mjs';
 import { copyBundleSource, copyEngineDependencies } from './engine-dependencies.mjs';
 import { buildDesktopUI } from './build-ui.mjs';
-import { copyAgentDesktop, desktopBuildOptions, hardenElectron, run } from './release-tools.mjs';
+import {
+  copyAgentDesktop,
+  desktopBuildOptions,
+  hardenElectron,
+  run,
+  windowsUpdatePublisher,
+} from './release-tools.mjs';
 import { signWindowsFiles, windowsCodeFiles } from './windows-signing.mjs';
 
 if (process.platform !== 'win32' || process.arch !== 'x64')
@@ -38,11 +44,7 @@ if (
 const updateRepository = process.env.NOD_DESKTOP_UPDATE_REPOSITORY;
 if (updateRepository && !/^[A-Za-z0-9-]+\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(updateRepository))
   throw new Error('The desktop update repository must look like owner/name.');
-const unsignedUpdates =
-  !signed &&
-  !updateSourceUrl &&
-  Boolean(updateRepository) &&
-  updateRepository.toLowerCase() !== 'n8n-io/nod';
+const updatePublisher = windowsUpdatePublisher();
 const manifest = JSON.parse(await readFile(join(assets, 'manifest.json'), 'utf8'));
 if (
   manifest.platform !== 'win32-x64' ||
@@ -86,7 +88,7 @@ configuration.nodBuild = {
   platform: 'win32-x64',
   ...(updateSourceUrl ? { updateSourceUrl } : {}),
   ...(updateRepository ? { updateRepository } : {}),
-  ...(unsignedUpdates ? { updatePublisher: 'unsigned' } : {}),
+  ...(updatePublisher ? { updatePublisher } : {}),
   ...buildOptions,
 };
 delete configuration.devDependencies;
