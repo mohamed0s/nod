@@ -49,7 +49,7 @@ import { saveArtifactDownload } from '../main/downloads.mjs';
 import { createArtifactFiles } from '../main/artifact-files.mjs';
 import { createDesktopLifecycle, startupErrorDetails } from '../main/lifecycle.mjs';
 import { createMacEncryption } from '../main/mac-encryption.mjs';
-import { createChangeQueue } from '../main/source-watch.mjs';
+import { sourceChanges } from '../scripts/source-watch.mjs';
 import { waitFor } from '../runtime/index.mjs';
 import { appOpenPath } from '../main/app-links.mjs';
 import { trustSystemCertificates } from '../main/system-certificates.mjs';
@@ -823,6 +823,14 @@ async function runningDesktop(
           setImmediate(() => helper.emit('message', { ready: true }));
           return helper;
         }
+        if (/[\\/]web-build\.mjs$/.test(file)) {
+          const helper = Object.assign(new EventEmitter(), { file, args, options, sent: [] });
+          helper.kill = () => {
+            helper.killed = true;
+          };
+          helpers.push(helper);
+          return helper;
+        }
         if (/[\\/]onepassword\.mjs$/.test(file)) {
           const helper = Object.assign(new EventEmitter(), { file, args, options, sent: [] });
           helper.postMessage = (message, transfer) => helper.sent.push({ message, transfer });
@@ -839,9 +847,17 @@ async function runningDesktop(
         child.kind = 'engine';
         child.sent = [];
         child.transfers = [];
+        child.liveEngines = children.filter(
+          (item) => item.kind === 'engine' && !item.exited,
+        ).length;
         child.postMessage = (message, transfer) => {
           child.sent.push(message);
           if (transfer) child.transfers.push({ message, transfer });
+          if (message?.type === 'nod-shutdown')
+            setImmediate(() => {
+              child.exited = true;
+              child.emit('exit', 0);
+            });
         };
         child.environment = options.env;
         child.port = options.env.PORT;
@@ -849,6 +865,7 @@ async function runningDesktop(
         child.stderr = Object.assign(new EventEmitter(), { resume() {} });
         child.kill = () => {
           child.killed = true;
+          child.exited = true;
           child.emit('exit', 0);
         };
         if (reportReady)
@@ -1063,6 +1080,8 @@ async function runningDesktop(
       requestQuit: () => app.quit(),
       restartForUpdate,
       restartForSource,
+      startWebBuild,
+      watchingSources: () => watchingSources,
       crash: () => { engine = undefined; enginePreferencesReady = false; },
     };
     })()`,
@@ -3823,69 +3842,181 @@ test('desktop proxy overrides reach only isolated source engines and retain orig
   );
 });
 
-test('source changes restart the engine once per burst and never during a restart', async () => {
-  const flushes = [];
-  let release;
-  let active = 0;
-  const queue = createChangeQueue({
-    delay: 20,
-    flush: async (paths) => {
-      assert.equal(++active, 1);
-      flushes.push([...paths].sort());
-      if (flushes.length === 1) await new Promise((resolve) => (release = resolve));
-      active--;
-    },
-  });
-  for (const path of ['src/server/b.ts', 'src/server/a.ts', 'src/server/b.ts']) queue.add(path);
-  for (let attempt = 0; !release && attempt < 100; attempt++)
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  queue.add('src/server/c.ts');
-  queue.add('src/server/d.ts');
-  await new Promise((resolve) => setTimeout(resolve, 80));
-  assert.equal(flushes.length, 1);
-  release();
-  for (let attempt = 0; flushes.length < 2 && attempt < 100; attempt++)
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  await queue.close();
-  assert.deepEqual(flushes, [
-    ['src/server/a.ts', 'src/server/b.ts'],
-    ['src/server/c.ts', 'src/server/d.ts'],
-  ]);
-});
-
-test('an unpackaged source restart keeps the window and port, and only source runs watch', async (t) => {
+test('only unpackaged source runs watch, and the web build gets no keys', async (t) => {
   for (const scenario of [
     { name: 'source run', watched: true },
     { name: 'watch turned off', environment: { NOD_DESKTOP_WATCH: '0' } },
-    { name: 'packaged app', packaged: true },
+    { name: 'packaged app', packaged: true, environment: { NOD_DESKTOP_WATCH: 'true' } },
   ]) {
     await t.test(scenario.name, async (t) => {
       const f = await runningDesktop(t, async () => Response.json({ ok: true }), {
         allowStart: true,
         packaged: scenario.packaged,
-        environment: scenario.environment,
+        environment: {
+          PATH: 'synthetic-path',
+          NOD_TRACES_TOKEN: 'synthetic-trace-token-0123456789',
+          NOD_FEEDBACK_TOKEN: 'synthetic-feedback-token-0123456789',
+          ...scenario.environment,
+        },
       });
       t.after(() => f.close());
+      assert.equal(f.watchingSources(), Boolean(scenario.watched));
       f.crash();
       assert.equal((await f.prepare()).phase, 'ready');
-      const [first] = f.children;
-      assert.equal(first.environment.NOD_DESKTOP_WATCH, scenario.watched ? 'true' : undefined);
+      const [engine] = f.children;
+      assert.equal(engine.environment.NOD_DESKTOP_WATCH, undefined);
       if (!scenario.watched) return;
-      f.showEngine();
-      const window = f.windows.find((item) => item.url && !item.isDestroyed());
-      assert.ok(window);
-      assert.equal((await f.restartForSource()).phase, 'ready');
-      assert.equal(first.killed, true);
-      assert.equal(f.children.length, 2);
-      assert.equal(f.children[1].port, first.port);
-      assert.equal(f.children[1].environment.NOD_DESKTOP_WATCH, 'true');
+      const build = f.startWebBuild();
+      assert.match(build.file, /[\\/]desktop[\\/]scripts[\\/]web-build\.mjs$/);
+      assert.equal(build.options.env.PATH, 'synthetic-path');
+      assert.equal(build.options.env.NODE_ENV, 'production');
       assert.deepEqual(
-        f.windows.filter((item) => item.url && !item.isDestroyed()),
-        [window],
+        Object.keys(build.options.env).filter((key) => key.startsWith('NOD_')),
+        [],
       );
-      assert.equal(window.url, `http://127.0.0.1:${first.port}`);
+      for (const secret of [
+        engine.environment.NOD_VAULT_KEY,
+        engine.environment.NOD_DESKTOP_AUTH_TOKEN,
+        'synthetic-trace-token-0123456789',
+      ].filter(Boolean))
+        assert.equal(Object.values(build.options.env).includes(secret), false);
     });
   }
+});
+
+test('a source restart waits for running work, then restarts on the same port behind the open window', async (t) => {
+  let running = [{ source: 'web', visible: true, task: false }];
+  const f = await runningDesktop(
+    t,
+    async (url) =>
+      Response.json(new URL(url).pathname === '/api/desktop/status' ? { running } : { ok: true }),
+    { allowStart: true },
+  );
+  t.after(() => f.close());
+  f.crash();
+  assert.equal((await f.prepare()).phase, 'ready');
+  f.showEngine();
+  const window = f.windows.find((item) => item.url && !item.isDestroyed());
+  const [first] = f.children;
+  const waiting = await f.restartForSource();
+  assert.equal(waiting.outcome, 'waiting');
+  assert.equal(waiting.running, 1);
+  assert.equal(f.children.length, 1);
+  assert.equal(first.exited, undefined);
+  assert.equal(
+    first.sent.some((message) => message?.type === 'nod-shutdown'),
+    false,
+  );
+  running = [];
+  const result = await f.restartForSource();
+  assert.equal(result.outcome, 'restarted');
+  assert.equal(result.status.phase, 'ready');
+  assert.equal(
+    first.sent.some((message) => message?.type === 'nod-shutdown'),
+    true,
+  );
+  assert.equal(first.killed, undefined);
+  assert.equal(f.children.length, 2);
+  assert.equal(f.children[1].liveEngines, 0);
+  assert.equal(f.children[1].port, first.port);
+  assert.deepEqual(
+    f.windows.filter((item) => item.url && !item.isDestroyed()),
+    [window],
+  );
+});
+
+test('a failed source restart shows the error and the next change starts the engine again', async (t) => {
+  for (const scenario of ['engine exits while starting', 'keys fail to unlock']) {
+    await t.test(scenario, async (t) => {
+      const crash = scenario === 'engine exits while starting';
+      const f = await runningDesktop(t, async () => Response.json({ running: [], ok: true }), {
+        allowStart: true,
+        reportReady: !crash,
+      });
+      t.after(() => f.close());
+      const started = async (count, action) => {
+        const pending = action();
+        for (let attempt = 0; f.children.length < count && attempt < 200; attempt++)
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        assert.equal(f.children.length, count);
+        return { pending };
+      };
+      const ready = (child) => {
+        if (crash) child.emit('message', { type: 'nod-ready', port: Number(child.port) });
+      };
+      f.crash();
+      const prepared = await started(1, () => f.prepare());
+      ready(f.children[0]);
+      assert.equal((await prepared.pending).phase, 'ready');
+      f.showEngine();
+      const window = f.windows.find((item) => item.url && !item.isDestroyed());
+      const environment = f.storage.store.environment;
+      let result;
+      if (crash) {
+        const failed = await started(2, () => f.restartForSource());
+        f.children[1].stderr.emit('data', Buffer.from('Error: Synthetic import failure\n'));
+        f.children[1].emit('exit', 1);
+        result = await failed.pending;
+      } else {
+        f.storage.store.environment = async () => {
+          throw new Error('Synthetic key unlock failure');
+        };
+        result = await f.restartForSource();
+        assert.equal(f.children.length, 1);
+        f.storage.store.environment = environment;
+      }
+      assert.equal(result.status.phase, 'error');
+      assert.match(
+        result.status.error,
+        crash ? /Synthetic import failure/ : /Synthetic key unlock failure/,
+      );
+      assert.equal(window.isDestroyed(), true);
+      assert.ok(f.windows.some((item) => item.path && !item.isDestroyed()));
+      const retried = await started(crash ? 3 : 2, () => f.restartForSource());
+      ready(f.children.at(-1));
+      const recovered = await retried.pending;
+      assert.equal(recovered.outcome, 'restarted');
+      assert.equal(recovered.status.phase, 'ready');
+    });
+  }
+});
+
+test('source saves that do not parse, docs and editor files leave the engine running', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'nod-source-watch-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'src', 'server'), { recursive: true });
+  await writeFile(join(root, 'src', 'server', 'broken.ts'), 'export const value = {;\n');
+  await writeFile(join(root, 'src', 'server', 'view.tsx'), 'export const view = <p>ok</p>;\n');
+  const logs = [];
+  const log = {
+    log: (line) => logs.push(line),
+    warn: (line) => logs.push(line),
+    error: (line) => logs.push(line),
+  };
+  let restarts = 0;
+  const apply = sourceChanges({
+    root,
+    runtime: [],
+    log,
+    restart: async () => {
+      restarts++;
+      return { outcome: 'restarted', status: { phase: 'ready' } };
+    },
+  });
+  await apply(['src/server/broken.ts', 'src/server/view.tsx']);
+  assert.equal(restarts, 0);
+  assert.match(logs.join('\n'), /src\/server\/broken\.ts:1:\d+/);
+  await apply([
+    'docs/src/content/docs/use/chat.md',
+    'src/web/app.tsx',
+    'src/server/.broken.ts.swp',
+    'src/server/broken.ts~',
+    'src/server/broken.ts___jb_tmp___',
+  ]);
+  assert.equal(restarts, 0);
+  await writeFile(join(root, 'src', 'server', 'broken.ts'), 'export const value = {};\n');
+  await apply(['src/server/broken.ts']);
+  assert.equal(restarts, 1);
 });
 
 test('packaged pages add their content policy without replacing server policy or changing artifact responses', async (t) => {

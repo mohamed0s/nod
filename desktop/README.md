@@ -18,4 +18,4 @@ pnpm run desktop:build     # app, DMG and runtime pack in dist/desktop
 
 Set `NOD_DESKTOP_USER_DATA` to a new directory for a fresh development profile.
 
-`pnpm run desktop:dev` follows your checkout: web changes show in the window, other `src` changes restart the engine behind the open window, and the terminal says when a change needs an app restart or a new runtime. Set `NOD_DESKTOP_WATCH=0` to turn it off. See [Edit while it runs](../docs/src/content/docs/deploy/desktop-app.mdx#edit-while-it-runs).
+`pnpm run desktop:dev` follows your checkout: web changes are rebuilt into `dist/web` and the window reloads, other `src` changes restart the engine once nothing is running, and the terminal says when a change needs an app restart or a new runtime. Set `NOD_DESKTOP_WATCH=0` to turn it off (PowerShell: `$env:NOD_DESKTOP_WATCH='0'`). See [Edit while it runs](../docs/src/content/docs/deploy/desktop-app.mdx#edit-while-it-runs).
