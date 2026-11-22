@@ -1,4 +1,3 @@
-import { Fragment } from 'react';
 import type { Schedule, Task } from '../../shared/contracts';
 import {
   canReuseWorkCost,
@@ -74,23 +73,6 @@ function laneTarget(
       saved<ModelsResponse>('/api/models/routes', { lane, route }, (result) =>
         pageDataCache.update('/api/models', () => result),
       ),
-  };
-}
-
-function backupTarget(data: ModelsResponse, index: number): ModelTarget {
-  const list = data.backups ?? [];
-  return {
-    title: index < list.length ? `Backup model ${index + 1}` : 'Add a backup model',
-    value: list[index] ?? null,
-    defaults: index < list.length ? [{ value: null, label: 'No backup', model: null }] : [],
-    save: (choice) => {
-      const next = [...list];
-      if (choice && choice !== 'light') next[index] = choice;
-      else next.splice(index, 1);
-      return saved<ModelsResponse>('/api/models/backups', { backups: next }, (result) =>
-        pageDataCache.update('/api/models', () => result),
-      );
-    },
   };
 }
 
@@ -180,7 +162,6 @@ export function ModelSentences() {
   const data = models.data;
   if (!data) return null;
   const chat = modelOf(data, data.selection);
-  const backups = data.backups ?? [];
   const lane = (kind: ModelLane) => {
     const value = data.routes?.[kind];
     const light = value === 'light' && data.light && modelOf(data, data.light);
@@ -242,25 +223,6 @@ export function ModelSentences() {
           />
           .
         </p>
-        {chat && (
-          <p>
-            If it’s busy or unavailable, Nod tries{' '}
-            {backups.length
-              ? backups.map((choice, index) => (
-                  <Fragment key={`${choice.connectionId}:${choice.modelId}`}>
-                    {index ? ', then ' : ''}
-                    <ModelPicker
-                      appearance="statement"
-                      manageConnections={false}
-                      target={backupTarget(data, index)}
-                      label={modelOf(data, choice)?.name ?? unavailableLabel}
-                    />
-                  </Fragment>
-                ))
-              : 'no other model'}
-            .
-          </p>
-        )}
         <p>Schedules use {lane('schedule')}.</p>
         <p>Work Nod starts on its own uses {lane('background')}.</p>
         {ownSchedules.map((schedule) => (
@@ -288,16 +250,6 @@ export function ModelSentences() {
           </p>
         ))}
       </div>
-      {chat && backups.length < 3 && (
-        <p className="model-sentences-note">
-          <ModelPicker
-            appearance="statement"
-            manageConnections={false}
-            target={backupTarget(data, backups.length)}
-            label="Add a backup model"
-          />
-        </p>
-      )}
       {chat?.audio && (
         <p className="model-sentences-note">
           {chat.textModelName ? `Text support: ${chat.textModelName}` : 'Text model unavailable'}

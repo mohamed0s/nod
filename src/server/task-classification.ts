@@ -152,7 +152,7 @@ export function createTaskClassification(options: {
                 signal.addEventListener('abort', aborted, { once: true });
               }),
               options.curator.curate(
-                { task: 'classify', instructions, input: { request }, fallback: false },
+                { task: 'classify', instructions, input: { request } },
                 signal,
               ),
             ]);

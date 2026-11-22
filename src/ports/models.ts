@@ -1,4 +1,3 @@
-import { ModelRequestError } from './agent.ts';
 import type {
   ModelChoice,
   ModelProvider,
@@ -32,16 +31,6 @@ export class ModelAuthError extends Error {
     options?: ErrorOptions,
   ) {
     super(message, options);
-  }
-}
-
-export class ModelUnavailableError extends ModelRequestError {
-  constructor(
-    message: string,
-    readonly attempts: string[],
-    readonly providerStatus?: number,
-  ) {
-    super(message);
   }
 }
 
@@ -79,7 +68,6 @@ export interface ModelDefinition {
 }
 
 export interface ModelAccess {
-  connectionId?: string;
   provider: ModelProvider;
   method: ModelMethod;
   definition: ModelDefinition;
