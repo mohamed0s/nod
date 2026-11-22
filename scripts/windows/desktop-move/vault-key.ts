@@ -3,10 +3,10 @@ import { stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseArgs } from 'node:util';
-import { appRunning, checkPlanKey, readPlan, readVaultKey } from './shared.ts';
+import { appRunning, checkPlanKey, readPlan, readVaultKey, stagedFiles } from './shared.ts';
 
 const helper = fileURLToPath(new URL('vault-key-electron.mjs', import.meta.url));
+const electronTimeoutMs = 90_000;
 
 function electronPath(given?: string) {
   if (given) return given;
@@ -20,33 +20,48 @@ function electronPath(given?: string) {
   }
 }
 
-function runElectron(electron: string, args: string[]) {
+export function runElectron(electron: string, args: string[], timeoutMs = electronTimeoutMs) {
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
-  return new Promise<void>((resolve, reject) => {
+  return new Promise<string>((resolve, reject) => {
     const child = spawn(electron, [helper, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
     const output: Buffer[] = [];
     const errors: Buffer[] = [];
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, timeoutMs);
     child.stdout.on('data', (chunk: Buffer) => output.push(chunk));
     child.stderr.on('data', (chunk: Buffer) => errors.push(chunk));
-    child.on('error', (error) => reject(new Error(`Electron could not start: ${error.message}`)));
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      reject(new Error(`Electron could not start: ${error.message}`));
+    });
     child.on('close', (code) => {
+      clearTimeout(timer);
       const text = Buffer.concat(output).toString().trim();
-      if (text) console.log(text);
-      if (code === 0) return resolve();
+      if (timedOut)
+        return reject(
+          new Error(
+            `The Electron key helper did not finish within ${timeoutMs / 1000} seconds and was stopped. The desktop settings were not changed unless it said so above.${text ? ` Output: ${text}` : ''}`,
+          ),
+        );
+      if (code === 0) return resolve(text);
       const reason = Buffer.concat(errors)
         .toString()
         .split(/\r?\n/)
         .filter((line) => line && !line.startsWith('['))
         .join('\n')
         .slice(-2000);
-      reject(new Error(reason || `Electron exited with code ${code}.`));
+      reject(new Error(reason || `The Electron key helper exited with code ${code}.`));
     });
   });
 }
 
 export async function setVaultKey(options: { staging: string; env: string; electron?: string }) {
   const plan = await readPlan(options.staging);
+  await stagedFiles(plan, options.staging);
   const { key } = await readVaultKey(options.env);
   checkPlanKey(plan, key);
   if (await appRunning(plan.userData)) throw new Error('Quit Nod first, then run this again.');
@@ -66,28 +81,8 @@ export async function setVaultKey(options: { staging: string; env: string; elect
     '--env',
     options.env,
   ];
-  await runElectron(electron, ['set', ...args]);
-  await runElectron(electron, ['verify', ...args]);
-}
-
-if (import.meta.main) {
-  const { values } = parseArgs({
-    options: {
-      staging: { type: 'string' },
-      env: { type: 'string' },
-      electron: { type: 'string' },
-    },
-  });
-  if (!values.staging || !values.env) {
-    console.error(
-      'Usage: vault-key.ts --staging <folder from convert> --env <nod\\.env> [--electron <electron.exe>]',
-    );
-    process.exit(2);
-  }
-  try {
-    await setVaultKey({ staging: values.staging, env: values.env, electron: values.electron });
-  } catch (error) {
-    console.error(`Vault key step failed: ${(error as Error).message}`);
-    process.exit(1);
-  }
+  return [
+    await runElectron(electron, ['set', ...args]),
+    await runElectron(electron, ['verify', ...args]),
+  ];
 }

@@ -3,7 +3,15 @@ import { constants } from 'node:fs';
 import { copyFile, open, readFile, rename, rm } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { app, safeStorage } from 'electron';
+
+if (process.type !== 'browser') {
+  process.stderr.write(
+    'This helper must run as the Electron app, not as Node. ELECTRON_RUN_AS_NODE is set in this terminal; run it through import.ts, which clears it.\n',
+  );
+  process.exit(1);
+}
+
+const { app, safeStorage } = await import('electron');
 
 function fail(message) {
   process.stderr.write(`${message}\n`);
@@ -11,6 +19,10 @@ function fail(message) {
 }
 process.on('uncaughtException', (error) => fail(error.message));
 process.on('unhandledRejection', (error) => fail(error?.message ?? String(error)));
+setTimeout(
+  () => fail('The Electron key helper stopped after 60 seconds without finishing.'),
+  60_000,
+);
 
 const { values, positionals } = parseArgs({
   options: {
@@ -23,12 +35,11 @@ const { values, positionals } = parseArgs({
 });
 const mode = positionals[0];
 const userData = values['user-data'];
-if (!['set', 'verify'].includes(mode) || !values.staging || !values.env || !userData) {
-  process.stderr.write(
-    'Usage: vault-key-electron.mjs set|verify --staging <folder> --env <.env> --user-data <desktop folder>\n',
+if (!['set', 'verify'].includes(mode) || !values.staging || !values.env || !userData)
+  fail(
+    'Usage: vault-key-electron.mjs set|verify --staging <folder> --env <.env> --user-data <desktop folder>',
   );
-  app.exit(2);
-} else if (!isAbsolute(userData)) fail('The desktop folder must be an absolute path.');
+else if (!isAbsolute(userData)) fail('The desktop folder must be an absolute path.');
 else {
   app.setPath('userData', userData);
   app.setName('Nod');
@@ -81,13 +92,19 @@ async function start() {
   }
   const original = await readFile(path, 'utf8');
   const value = JSON.parse(original);
-  let current;
-  try {
-    current = safeStorage.decryptString(Buffer.from(value.secrets.vaultKey, 'base64'));
-  } catch {}
-  if (current === encoded) {
-    process.stdout.write('The desktop profile already uses the source Vault key.\n');
-    return app.quit();
+  if (value.secrets.vaultKey) {
+    let current;
+    try {
+      current = safeStorage.decryptString(Buffer.from(value.secrets.vaultKey, 'base64'));
+    } catch (error) {
+      throw new Error(
+        `The desktop profile’s saved Vault key does not open with the Windows key in ${join(userData, 'Local State')} (${error.message}). This helper isn’t using the same key store as Nod, so nothing was changed. Check that NOD_DESKTOP_USER_DATA is ${userData} and that you are signed in as the Windows user who set up the desktop app.`,
+      );
+    }
+    if (current === encoded) {
+      process.stdout.write('The desktop profile already uses the source Vault key.\n');
+      return app.quit();
+    }
   }
   await copyFile(path, `${path}.before-move`, constants.COPYFILE_EXCL).catch((error) => {
     if (error.code !== 'EEXIST') throw error;
