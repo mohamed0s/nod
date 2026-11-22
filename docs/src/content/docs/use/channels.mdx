@@ -222,19 +222,28 @@ Both channels have task controls. `/tasks` lists open tasks, with one message pe
 
 ## Telegram topics
 
-Telegram can split your private chat with the bot into topics, one per task, like the chat list in the Nod app. The Bot API added topics in private chats in version 9.3 and let bots create them in version 9.4.
+Telegram can split your private chat with the bot into topics, one per chat, like the chat list in the Nod app. The Bot API added topics in private chats in version 9.3 and let bots create them in version 9.4.
 
-To turn them on, open [BotFather](https://t.me/BotFather), select **Open** to start its mini app, choose your bot, then turn on **Threaded Mode** in its settings. Nod notices the change within five minutes, or when it restarts. In the same settings, stop users from creating topics if you want to keep writing to the main chat in General. If you allow it, Telegram puts each new conversation you start in its own topic, and Nod treats each one as a new chat.
+To turn them on, open [BotFather](https://t.me/BotFather), select **Open** to start its mini app, choose your bot, then turn on **Threaded Mode** in its settings. Nod notices the change within five minutes, or when it restarts.
+
+The same settings decide where you talk to the main chat:
+
+- **Users can't create topics.** You write to the main chat in **General**. Its replies, scheduled results and notifications arrive there.
+- **Users can create topics.** Telegram puts anything you type in General into a new topic, so General can't reach the main chat. Nod opens a topic named **Main** for it instead. Write there to talk to the main chat. Its replies, scheduled results and notifications arrive there too. Each new conversation you start in General gets its own topic, and Nod treats each one as a new chat.
 
 With topics on:
 
-- The main chat stays in **General**, with scheduled results and notifications. A task started inside a scheduled run stays there with that run.
-- Each task gets a topic named after it when its first message arrives. Its progress, questions, approvals, files and result go there. If Telegram refuses to create the topic, that message arrives in General, and Nod tries again with the task's next message.
+- A message in the **Main** topic works like one in General: it goes to the main chat, and Nod answers where you asked. If you later stop users from creating topics, the Main topic keeps working, and a message you send in General gets its answer in General.
+- A task started inside a scheduled run stays with that run, in General or the Main topic.
+- Each chat gets a topic named after it when its first message arrives. Its progress, questions, approvals, files and result go there. If Telegram refuses to create the topic, that message arrives where the main chat lives, and Nod tries again with the chat's next message.
+- A chat you start in the Nod app gets a topic too, so you can follow and continue it from Telegram. Nod's own messages in that chat go there. Your messages stay in the app, and the topic's name tells you what the chat is about. Nod sends only messages from the last 10 minutes, so an older chat gets its topic when Nod next writes in it. Nothing from **Main** in the app is copied, and neither is work Nod starts on its own, such as background checks. If Telegram refuses to create the topic, or topics are off when Nod sends, that message stays in the app. If Telegram can't be reached, Nod tries again for up to 30 minutes, waiting up to five minutes between tries.
+- Messages from work you started in the app arrive silently, except questions, approval requests and the last message of each reply. A voice note or file that follows the reply's text arrives silently too. Nod holds a message that might be its last for up to 15 seconds, to know whether to notify you.
 - When you rename a chat in the app, or a new chat gets its short title after Nod's first reply, its topic is renamed to match. If Telegram refuses, the chat keeps its new name in the app, and Nod tries again before its next message in that topic. A chat you start in a topic you made keeps your topic's name: it gets no short title, and its topic changes only when you rename the chat in the app.
-- Anything you write in a task's topic goes to that task, as a reply to its latest message. A "yes" there answers that task's approval, a sign-in code goes only to that task's sign-in, and `/status` or `/stop` there applies to that task only. Approval buttons under a question in a task's topic answer only that question. `/clear` works only in General, where it clears the main chat; a task's topic refuses it.
+- Anything you write in a chat's topic goes to that chat, as a reply to the latest message Nod sent you in that topic, wherever you started the chat. A "yes" there answers that chat's approval only if Nod sent it in that topic, never one that hasn't arrived yet. A sign-in code goes only to that chat's sign-in, and `/status` or `/stop` there applies to that chat only. Approval buttons under a question in a chat's topic answer only that question. `/clear` works only in General or the Main topic, where it clears the main chat. A chat's topic refuses it.
 - A message in a topic that Nod didn't create starts a new chat, like **New chat** in the app. Later messages in that topic stay in that chat. `/stop` there stops nothing, and `/tasks` and `/status` there cover all tasks.
-- In General, a "yes" without a reply answers only the latest message Nod sent in General, never an approval waiting in a task's topic. A sign-in code sent in General goes only to the main chat's sign-in; for another one, reply to its request.
-- If you delete a task's topic, Nod opens a new one for the task's next message, including voice notes, contacts, locations and files.
+- In General or the Main topic, a "yes" without a reply answers only the latest message Nod sent in that place, never an approval waiting in a chat's topic. A sign-in code sent there goes only to the main chat's sign-in. For another one, reply to its request.
+- If you delete a chat's topic, Nod opens a new one for the chat's next message, including voice notes, contacts, locations and files. If you delete the Main topic, Nod opens a new one the next time it writes to the main chat. When users can create topics, that message waits for it rather than going to General, for up to 30 minutes.
+- Closing a chat in the app leaves its topic in Telegram. Telegram lets bots close topics only in groups.
 
 Without topics, Nod works as before: task messages reply to the task's first message in one chat.
 

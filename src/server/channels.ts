@@ -13,7 +13,11 @@ import { languageText } from './communication.ts';
 import { ChannelMediaFailure, type ChannelMedia } from './channel-media.ts';
 import type { WorkAdmission } from './work-admission.ts';
 import type { LiveWork } from './activity.ts';
-import { MessagingConnectionError, MessagingTopicError } from '../ports/messaging.ts';
+import {
+  MessagingConnectionError,
+  MessagingRefusedError,
+  MessagingTopicError,
+} from '../ports/messaging.ts';
 import type {
   ChannelPairingRequest,
   InboundApproval,
@@ -26,7 +30,15 @@ import type { ChatConfirmationInput } from './approvals.ts';
 import { channelText } from './channel-text.ts';
 import { appPages } from '../shared/app-links.ts';
 import { pendingAnswerChoicesSql } from './answer-choices.ts';
+import { ownerStarted } from './turn-chain.ts';
 
+const laterReply = `EXISTS (SELECT 1 FROM messages n WHERE n.turn_id=u.id AND n.owner_id=u.owner_id AND n.role='assistant'
+  AND n.hidden_at IS NULL AND (n.text<>'' OR n.presentation IS NOT NULL) AND (n.created_at,n.id)>(m.created_at,m.id))`;
+const sentBefore = (time: string, number: string) =>
+  `(CASE WHEN ${number}::bigint IS NULL OR cardinality(o.provider_message_ids)=0
+      OR EXISTS (SELECT 1 FROM unnest(o.provider_message_ids) p WHERE p !~ '^-?[0-9]+:[0-9]+$')
+    THEN o.updated_at<=${time}
+    ELSE (SELECT max(split_part(p,':',2)::bigint) FROM unnest(o.provider_message_ids) p)<${number}::bigint END)`;
 const replyCommand = /^\/(memory|context|usage)(?:@[A-Za-z0-9_]+)?$/i;
 const taskCommand = /^\/(tasks|status|stop|clear)(?:@[A-Za-z0-9_]+)?$/i;
 
@@ -180,6 +192,9 @@ interface OutboxRow extends ChannelIdentity {
   answer_choices: unknown;
   answer_choices_pending: boolean;
   browser_handoff: boolean;
+  web: boolean;
+  quiet: boolean;
+  created_at: Date;
 }
 const messageSchema = z
   .object({
@@ -214,6 +229,11 @@ const reactionSchema = z.object({
   messageId: z.string().min(1).max(256),
   reaction: z.string().max(64).refine(isMessageReaction).nullable(),
 });
+
+function providerNumber(row: ChannelIdentity & { source_id: string }) {
+  const id = row.source_id.slice(`channel:${row.provider}:${row.account_id}:`.length);
+  return /^-?[0-9]+:([0-9]+)$/.exec(id)?.[1] ?? null;
+}
 
 function conversationChannel(row: ChannelIdentity) {
   const identity = createHash('sha256')
@@ -362,10 +382,17 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
   );
   CREATE UNIQUE INDEX IF NOT EXISTS channel_topics_task ON channel_topics(owner_id,provider,account_id,sender_id,task_id);
   ALTER TABLE channel_topics ADD COLUMN IF NOT EXISTS name text;
+  CREATE TABLE IF NOT EXISTS channel_main_topics (
+    owner_id text NOT NULL, provider text NOT NULL, account_id text NOT NULL, sender_id text NOT NULL,
+    topic_id text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY(owner_id,provider,account_id,sender_id)
+  );
   CREATE INDEX IF NOT EXISTS channel_inbox_pending ON channel_inbox(state,created_at);
   CREATE INDEX IF NOT EXISTS channel_outbox_pending ON channel_outbox(state,created_at);
   CREATE INDEX IF NOT EXISTS channel_inbox_turn ON channel_inbox(turn_id);
-  CREATE INDEX IF NOT EXISTS channel_inbox_channel ON channel_inbox(owner_id,channel,state,received_at DESC)`);
+  CREATE INDEX IF NOT EXISTS channel_inbox_channel ON channel_inbox(owner_id,channel,state,received_at DESC);
+  CREATE INDEX IF NOT EXISTS channel_outbox_sent_topic ON channel_outbox(topic_id,updated_at DESC) WHERE state='sent';
+  CREATE INDEX IF NOT EXISTS channel_inbox_route ON channel_inbox(owner_id,provider,account_id,sender_id,received_at DESC)`);
   await pool.query(
     `UPDATE channel_outbox o SET
        state=CASE WHEN o.state='sending' THEN 'uncertain' ELSE 'pending' END,
@@ -382,8 +409,11 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
   let lastError: string | null = null;
   let receiving = new AbortController();
   const pendingMedia = new Map<string, Promise<void>>();
-  const topicsOn = new Map<string, boolean>();
+  const modes = new Map<string, { enabled: boolean; ownerTopics: boolean; at: number }>();
   const createdTopics = new Map<string, string>();
+  const mainTopicRetry = new Map<string, number>();
+  const modeRetry = new Map<string, number>();
+  const sendRetry = new Map<string, { at: number; tries: number }>();
   async function saveReply(
     client: PoolClient,
     sourceId: string,
@@ -569,28 +599,54 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
 
   async function taskInTopic(row: InboxRow) {
     return (
-      (
-        await pool.query<{ id: string | null }>(
-          `SELECT (SELECT m.id FROM messages m LEFT JOIN turns w ON w.id=m.turn_id AND w.owner_id=m.owner_id
-             WHERE m.owner_id=t.owner_id AND m.thread_id=th.id AND m.hidden_at IS NULL AND (w.task_id=t.id OR m.id=t.message_id)
-             ORDER BY m.role='assistant' DESC,m.created_at DESC,m.id DESC LIMIT 1) AS id
+      await pool.query<{ id: string | null; notice: boolean | null }>(
+        `WITH topic AS (
+           SELECT c.owner_id,c.provider,c.account_id,c.sender_id,c.topic_id,t.id AS task_id,t.message_id AS start_id,th.id AS thread_id
            FROM channel_topics c JOIN tasks t ON t.id=c.task_id AND t.owner_id=c.owner_id
            JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
            JOIN threads th ON th.id=u.thread_id AND th.owner_id=t.owner_id AND th.archived_at IS NULL
-           WHERE c.owner_id=$1 AND c.provider=$2 AND c.account_id=$3 AND c.sender_id=$4 AND c.topic_id=$5`,
-          [ownerId, row.provider, row.account_id, row.sender_id, row.topic_id],
-        )
-      ).rows[0]?.id ?? undefined
-    );
+           WHERE c.owner_id=$1 AND c.provider=$2 AND c.account_id=$3 AND c.sender_id=$4 AND c.topic_id=$5),
+         seen AS (
+           SELECT m.id,m.turn_id,m.created_at,o.updated_at,
+             (m.thread_id=topic.thread_id AND (w.task_id=topic.task_id OR m.id=topic.start_id)) AS own
+           FROM topic JOIN channel_inbox i ON i.owner_id=topic.owner_id AND i.provider=topic.provider
+             AND i.account_id=topic.account_id AND i.sender_id=topic.sender_id
+           JOIN channel_outbox o ON o.source_id=i.source_id
+           JOIN messages m ON m.id=o.message_id AND m.owner_id=i.owner_id
+           LEFT JOIN turns w ON w.id=m.turn_id AND w.owner_id=m.owner_id
+           WHERE o.state='sent' AND o.topic_id=topic.topic_id AND ${sentBefore('$6', '$7')}
+             AND m.role='assistant' AND m.hidden_at IS NULL)
+         SELECT COALESCE(
+           (SELECT id FROM seen WHERE own ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT 1),
+           (SELECT m.id FROM messages m JOIN turns w ON w.id=m.turn_id AND w.owner_id=m.owner_id
+            WHERE m.owner_id=topic.owner_id AND m.thread_id=topic.thread_id AND m.role<>'assistant'
+              AND m.hidden_at IS NULL AND w.task_id=topic.task_id
+            ORDER BY m.created_at DESC,m.id DESC LIMIT 1),
+           topic.start_id) AS id,
+           (SELECT turn_id IS NULL FROM seen ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT 1) AS notice
+         FROM topic`,
+        [
+          ownerId,
+          row.provider,
+          row.account_id,
+          row.sender_id,
+          row.topic_id,
+          row.created_at,
+          providerNumber(row),
+        ],
+      )
+    ).rows[0];
   }
 
   async function topicsShown(row: ChannelIdentity) {
     return (
-      topicsOn.get(`${row.provider}:${row.account_id}`) ??
+      modes.get(`${row.provider}:${row.account_id}`)?.enabled ||
       Boolean(
         (
           await pool.query(
-            'SELECT 1 FROM channel_topics WHERE owner_id=$1 AND provider=$2 AND account_id=$3 AND sender_id=$4 LIMIT 1',
+            `SELECT 1 FROM channel_topics WHERE owner_id=$1 AND provider=$2 AND account_id=$3 AND sender_id=$4
+             UNION ALL SELECT 1 FROM channel_main_topics WHERE owner_id=$1 AND provider=$2 AND account_id=$3 AND sender_id=$4
+             LIMIT 1`,
             [ownerId, row.provider, row.account_id, row.sender_id],
           )
         ).rowCount,
@@ -598,9 +654,23 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     );
   }
 
+  async function mainTopic(row: ChannelIdentity) {
+    return (
+      await pool.query<{ topic_id: string }>(
+        'SELECT topic_id FROM channel_main_topics WHERE owner_id=$1 AND provider=$2 AND account_id=$3 AND sender_id=$4',
+        [ownerId, row.provider, row.account_id, row.sender_id],
+      )
+    ).rows[0]?.topic_id;
+  }
+
+  async function inMainTopic(row: ChannelIdentity, topicId?: string | null) {
+    return Boolean(topicId) && topicId === (await mainTopic(row));
+  }
+
   async function codeSession(identity: ChannelIdentity, topicId?: string) {
-    if (!topicId)
-      return (await topicsShown(identity))
+    const main = await inMainTopic(identity, topicId);
+    if (!topicId || main)
+      return main || (await topicsShown(identity))
         ? (
             await pool.query<{ id: string }>(
               'SELECT id FROM threads WHERE owner_id=$1 AND archived_at IS NULL',
@@ -618,17 +688,25 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     return task.rows[0]?.session_id ?? randomUUID();
   }
 
-  async function shownInGeneral(row: InboxRow) {
+  async function shownInMain(row: InboxRow) {
     const shown = (
       await pool.query<{ id: string; turn_id: string | null }>(
         `SELECT m.id,m.turn_id FROM channel_outbox o JOIN channel_inbox i ON i.source_id=o.source_id
          JOIN messages m ON m.id=o.message_id AND m.owner_id=i.owner_id
          LEFT JOIN threads th ON th.id=m.thread_id AND th.owner_id=m.owner_id
          WHERE i.owner_id=$1 AND i.provider=$2 AND i.account_id=$3 AND i.sender_id=$4
-           AND o.state='sent' AND o.topic_id IS NULL AND o.updated_at<=$5
+           AND o.state='sent' AND ${row.topic_id ? 'o.topic_id=$7' : 'o.topic_id IS NULL'} AND ${sentBefore('$5', '$6')}
            AND m.role='assistant' AND m.hidden_at IS NULL AND (m.thread_id IS NULL OR th.archived_at IS NULL)
          ORDER BY o.updated_at DESC,m.created_at DESC,m.id DESC LIMIT 1`,
-        [ownerId, row.provider, row.account_id, row.sender_id, row.created_at],
+        [
+          ownerId,
+          row.provider,
+          row.account_id,
+          row.sender_id,
+          row.created_at,
+          providerNumber(row),
+          ...(row.topic_id ? [row.topic_id] : []),
+        ],
       )
     ).rows[0];
     return shown?.turn_id ? shown.id : null;
@@ -1148,12 +1226,15 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     const channel = conversationChannel(pending);
     if (closed || replacing) return false;
     const permittedBeforeAnswer = permitted(pending);
-    const topicTarget = pending.topic_id ? await taskInTopic(pending) : undefined;
-    const newChat = Boolean(pending.topic_id) && !topicTarget;
-    const replyToMessageId =
-      (pending.provider_reply_id && !newChat
+    const inMain = await inMainTopic(pending, pending.topic_id);
+    const topic = inMain ? null : pending.topic_id;
+    const topicTarget = topic ? await taskInTopic(pending) : undefined;
+    const newChat = Boolean(topic) && !topicTarget?.id;
+    const native =
+      pending.provider_reply_id && !newChat
         ? await nativeReply(pending, pending.thread_id, pending.provider_reply_id)
-        : undefined) ?? topicTarget;
+        : undefined;
+    const replyToMessageId = native ?? topicTarget?.id ?? undefined;
     const hasReply = Boolean(replyToMessageId || (pending.provider_reply_id && !newChat));
     const hiddenBeforeAnswer = replyToMessageId
       ? await hiddenReplyTarget(pool, replyToMessageId)
@@ -1174,8 +1255,8 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
             .catch(() => 'uncertain' as const)) ?? 'uncertain')
         : undefined;
     const shown =
-      !pending.topic_id && !pending.provider_reply_id && (await topicsShown(pending))
-        ? await shownInGeneral(pending)
+      !topic && !pending.provider_reply_id && (inMain || (await topicsShown(pending)))
+        ? await shownInMain(pending)
         : undefined;
     const answer =
       !permittedBeforeAnswer ||
@@ -1183,6 +1264,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       command ||
       newChat ||
       shown === null ||
+      (!native && topicTarget?.notice) ||
       pending.attachments?.length ||
       (pending.provider_reply_id && !replyToMessageId)
         ? undefined
@@ -1251,7 +1333,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
           if (target.rows[0]?.hidden_at && !retiredBeforeAnswer) throw replyTargetChanged;
         }
         const reply =
-          command === 'clear' && row.topic_id
+          command === 'clear' && topic
             ? {
                 threadId:
                   currentThread?.id ??
@@ -1265,7 +1347,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
                       ).rows[0]?.id ?? null)),
                 replies: [
                   {
-                    text: 'Send /clear in General. It clears only the main chat; task topics keep their history.',
+                    text: 'Send /clear in the Main topic or General. It clears only the main chat; task topics keep their history.',
                   },
                 ],
                 afterCommit: undefined,
@@ -1358,6 +1440,131 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       ON CONFLICT(message_id) DO NOTHING`,
       [ownerId],
     );
+    if (!transport.topics) return;
+    const mirrored = `FROM messages m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
+      WHERE m.owner_id=$1 AND m.created_at>now()-interval '10 minutes' AND m.role='assistant'
+        AND m.hidden_at IS NULL AND u.channel='web' AND u.session_id::text=to_jsonb(u)->>'task_id'
+        AND EXISTS (SELECT 1 FROM (SELECT f.source FROM turns f WHERE f.owner_id=u.owner_id AND f.session_id=u.session_id
+          ORDER BY f.created_at,f.id LIMIT 1) f WHERE ${ownerStarted('f')})
+        AND NOT EXISTS (SELECT 1 FROM channel_outbox q WHERE q.message_id=m.id)`;
+    if (!(await pool.query(`SELECT 1 ${mirrored} LIMIT 1`, [ownerId])).rowCount) return;
+    const [route] = await topicRoutes((mode) => mode.enabled);
+    if (route)
+      await pool.query(
+        `INSERT INTO channel_outbox(message_id,source_id) SELECT m.id,$2 ${mirrored}
+         ON CONFLICT(message_id) DO NOTHING`,
+        [ownerId, route.source_id],
+      );
+  }
+
+  async function topicMode(row: { provider: string; account_id: string }, signal: AbortSignal) {
+    const mode = (await transport.topics?.({
+      channelId: row.provider,
+      accountId: row.account_id,
+      signal,
+    })) ?? { enabled: false, ownerTopics: false };
+    modes.set(`${row.provider}:${row.account_id}`, { ...mode, at: Date.now() });
+    modeRetry.delete(`${row.provider}:${row.account_id}`);
+    return mode;
+  }
+
+  async function cachedMode(row: { provider: string; account_id: string }) {
+    const key = `${row.provider}:${row.account_id}`;
+    const known = modes.get(key);
+    if (known && Date.now() - known.at < 60_000) return known;
+    if ((modeRetry.get(key) ?? 0) > Date.now())
+      return known ?? { enabled: false, ownerTopics: false };
+    try {
+      return await topicMode(row, AbortSignal.any([receiving.signal, AbortSignal.timeout(30_000)]));
+    } catch (cause) {
+      logRepeatedFailure('channel_topic_failed', row.provider, cause, { provider: row.provider });
+      modeRetry.set(key, Date.now() + 60_000);
+      return known ?? { enabled: false, ownerTopics: false };
+    }
+  }
+
+  async function topicRoutes(
+    wanted: (mode: { enabled: boolean; ownerTopics: boolean }) => boolean,
+  ) {
+    updateConfiguration();
+    const found: Array<ChannelIdentity & { thread_id: string; source_id: string }> = [];
+    if (!transport.topics) return found;
+    for (const channel of channels) {
+      if (channel.status !== 'configured' || !channel.accountId) continue;
+      const identity = { provider: channel.id, account_id: channel.accountId };
+      const known = modes.get(`${channel.id}:${channel.accountId}`);
+      if (known && Date.now() - known.at < 60_000 && !wanted(known)) continue;
+      for (const sender of channel.allowedSenderIds) {
+        const route = (
+          await pool.query<ChannelIdentity & { thread_id: string; source_id: string }>(
+            `SELECT provider,account_id,sender_id,thread_id,source_id FROM channel_inbox
+             WHERE owner_id=$1 AND provider=$2 AND account_id=$3 AND sender_id=$4
+             ORDER BY received_at DESC LIMIT 1`,
+            [ownerId, channel.id, channel.accountId, sender],
+          )
+        ).rows[0];
+        if (!route || !permitted(route)) continue;
+        if (!wanted(await cachedMode(identity))) break;
+        found.push(route);
+      }
+    }
+    return found;
+  }
+
+  async function mainTopicStep() {
+    if (!transport.createTopic) return;
+    for (const route of await topicRoutes((mode) => mode.ownerTopics))
+      if (!(await mainTopic(route)))
+        await openMainTopic(
+          route,
+          AbortSignal.any([receiving.signal, AbortSignal.timeout(30_000)]),
+        ).catch((cause: unknown) =>
+          logRepeatedFailure('channel_topic_failed', route.provider, cause, {
+            provider: route.provider,
+          }),
+        );
+  }
+
+  async function openMainTopic(row: ChannelIdentity & { thread_id: string }, signal: AbortSignal) {
+    const retry = JSON.stringify([row.provider, row.account_id, row.sender_id]);
+    if (!transport.createTopic || (mainTopicRetry.get(retry) ?? 0) > Date.now()) return undefined;
+    const key = JSON.stringify([row.provider, row.account_id, row.sender_id, null]);
+    const cached = createdTopics.get(key);
+    const reused =
+      cached &&
+      !(
+        await pool.query(
+          'SELECT 1 FROM channel_topics WHERE owner_id=$1 AND provider=$2 AND account_id=$3 AND sender_id=$4 AND topic_id=$5',
+          [ownerId, row.provider, row.account_id, row.sender_id, cached],
+        )
+      ).rowCount
+        ? cached
+        : undefined;
+    let topicId: string;
+    try {
+      topicId =
+        reused ??
+        (await transport.createTopic({
+          channelId: row.provider,
+          accountId: row.account_id,
+          threadId: row.thread_id,
+          name: 'Main',
+          signal,
+        }));
+    } catch (cause) {
+      if (!signal.aborted) mainTopicRetry.set(retry, Date.now() + 300_000);
+      throw cause;
+    }
+    createdTopics.set(key, topicId);
+    const saved = await pool.query<{ topic_id: string }>(
+      `WITH added AS (INSERT INTO channel_main_topics(owner_id,provider,account_id,sender_id,topic_id)
+         VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING RETURNING topic_id)
+       SELECT topic_id FROM added UNION ALL SELECT topic_id FROM channel_main_topics
+       WHERE owner_id=$1 AND provider=$2 AND account_id=$3 AND sender_id=$4 LIMIT 1`,
+      [ownerId, row.provider, row.account_id, row.sender_id, topicId],
+    );
+    createdTopics.delete(key);
+    return saved.rows[0]?.topic_id ?? topicId;
   }
 
   async function currentMessage(
@@ -1388,14 +1595,28 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     const result = await pool.query<OutboxRow>(
       `WITH claimed AS (
       UPDATE channel_outbox SET state='preparing',claim_id=$2,updated_at=now() WHERE message_id=(
-        SELECT o.message_id FROM channel_outbox o JOIN channel_inbox i ON i.source_id=o.source_id JOIN messages m ON m.id=o.message_id WHERE o.state='pending' AND i.owner_id=$1 AND m.owner_id=$1 AND NOT(i.provider=ANY($3::text[])) ORDER BY m.created_at,m.id FOR UPDATE OF o SKIP LOCKED LIMIT 1
+        SELECT o.message_id FROM channel_outbox o JOIN channel_inbox i ON i.source_id=o.source_id JOIN messages m ON m.id=o.message_id WHERE o.state='pending' AND i.owner_id=$1 AND m.owner_id=$1 AND NOT(i.provider=ANY($3::text[]))
+          AND NOT (o.message_id=ANY($4::uuid[]))
+          AND NOT EXISTS (SELECT 1 FROM turns u WHERE u.id=m.turn_id AND u.owner_id=m.owner_id AND u.channel='web'
+            AND u.status IN ('queued','running') AND m.created_at>now()-interval '15 seconds' AND NOT ${laterReply})
+          ORDER BY m.created_at,m.id FOR UPDATE OF o SKIP LOCKED LIMIT 1
       ) RETURNING message_id,source_id,presentation
-    ) SELECT c.message_id,m.owner_id,m.thread_id AS message_thread_id,i.provider,i.account_id,i.sender_id,i.thread_id,i.topic_id AS source_topic_id,m.turn_id,
+    ) SELECT c.message_id,m.owner_id,m.created_at,m.thread_id AS message_thread_id,i.provider,i.account_id,i.sender_id,i.thread_id,i.topic_id AS source_topic_id,m.turn_id,
       (SELECT to_jsonb(u)->>'task_id' FROM turns u WHERE u.id=m.turn_id AND u.owner_id=m.owner_id) AS task_id,m.text,m.attachments,m.reply_to_message_id,c.presentation,m.presentation AS message_presentation,m.answer_choices,(${pendingAnswerChoicesSql}) AS answer_choices_pending,
       EXISTS (SELECT 1 FROM turns u WHERE u.id=m.turn_id AND u.owner_id=m.owner_id AND u.handoff_browser_id IS NOT NULL
-        AND m.id=(SELECT id FROM messages WHERE turn_id=u.id AND owner_id=u.owner_id AND role='assistant' ORDER BY created_at DESC,id DESC LIMIT 1)) AS browser_handoff
+        AND m.id=(SELECT id FROM messages WHERE turn_id=u.id AND owner_id=u.owner_id AND role='assistant' ORDER BY created_at DESC,id DESC LIMIT 1)) AS browser_handoff,
+      EXISTS (SELECT 1 FROM turns u WHERE u.id=m.turn_id AND u.owner_id=m.owner_id AND u.channel='web') AS web,
+      EXISTS (SELECT 1 FROM turns u WHERE u.id=m.turn_id AND u.owner_id=m.owner_id AND u.channel='web'
+        AND (u.status IN ('queued','running') OR ${laterReply} OR (m.text='' AND m.presentation IS NULL
+          AND EXISTS (SELECT 1 FROM messages n WHERE n.turn_id=u.id AND n.owner_id=u.owner_id AND n.role='assistant'
+            AND n.hidden_at IS NULL AND (n.text<>'' OR n.presentation IS NOT NULL))))) AS quiet
       FROM claimed c JOIN channel_inbox i ON i.source_id=c.source_id JOIN messages m ON m.id=c.message_id`,
-      [ownerId, claimId, unavailable],
+      [
+        ownerId,
+        claimId,
+        unavailable,
+        [...sendRetry].filter(([, retry]) => retry.at > Date.now()).map(([id]) => id),
+      ],
     );
     const row = result.rows[0];
     if (!row) return false;
@@ -1403,12 +1624,14 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       reason: string,
       state: 'preparing' | 'sending' = 'preparing',
       database: Pool | PoolClient = pool,
-    ) =>
-      database.query(
+    ) => {
+      sendRetry.delete(row.message_id);
+      return database.query(
         `UPDATE channel_outbox SET state='blocked',reason=$2,claim_id=NULL,updated_at=now()
          WHERE message_id=$1 AND claim_id=$3 AND state=$4`,
         [row.message_id, reason, claimId, state],
       );
+    };
     let reason: string | null =
       row.owner_id !== ownerId
         ? 'message_owner_changed'
@@ -1560,10 +1783,48 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     let postStarted = false;
     let topicId: string | undefined;
     try {
+      let topicFailure: unknown;
       topicId = await topicFor(row).catch((cause) => {
         logFailure('channel_topic_failed', cause);
+        topicFailure = cause;
         return undefined;
       });
+      const silent =
+        row.quiet &&
+        !(
+          await pool.query(
+            "SELECT 1 FROM approvals WHERE confirmation_message_id=$1 AND owner_id=$2 AND status='pending'",
+            [row.message_id, ownerId],
+          )
+        ).rowCount;
+      const retryable =
+        topicFailure !== undefined && !(topicFailure instanceof MessagingRefusedError);
+      if (
+        !topicId &&
+        retryable &&
+        Date.now() - new Date(row.created_at).getTime() < 1_800_000 &&
+        (row.web || modes.get(`${row.provider}:${row.account_id}`)?.ownerTopics)
+      ) {
+        const tries = (sendRetry.get(row.message_id)?.tries ?? 0) + 1;
+        sendRetry.set(row.message_id, {
+          at: Date.now() + Math.min(300_000, 15_000 * 2 ** (tries - 1)),
+          tries,
+        });
+        await pool.query(
+          `UPDATE channel_outbox SET state='pending',claim_id=NULL,updated_at=now()
+           WHERE message_id=$1 AND claim_id=$2 AND state='sending'`,
+          [row.message_id, claimId],
+        );
+        return true;
+      }
+      sendRetry.delete(row.message_id);
+      if (row.web && !topicId) {
+        await block(
+          !retryable ? 'topic_unavailable' : silent ? 'copy_expired' : 'topic_unreachable',
+          'sending',
+        );
+        return true;
+      }
       const target = row.reply_to_message_id
         ? ((
             await pool.query(
@@ -1601,6 +1862,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
           accountId: row.account_id,
           threadId: row.thread_id,
           ...(topicId ? { topicId } : {}),
+          ...(silent ? { silent } : {}),
           text,
           ...(approval
             ? {
@@ -1689,7 +1951,8 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       if (gone) {
         for (const [key, value] of createdTopics) if (value === topicId) createdTopics.delete(key);
         await pool.query(
-          `WITH gone AS (DELETE FROM channel_topics WHERE owner_id=$1 AND provider=$2 AND account_id=$3 AND sender_id=$4 AND topic_id=$5)
+          `WITH gone AS (DELETE FROM channel_topics WHERE owner_id=$1 AND provider=$2 AND account_id=$3 AND sender_id=$4 AND topic_id=$5),
+           main AS (DELETE FROM channel_main_topics WHERE owner_id=$1 AND provider=$2 AND account_id=$3 AND sender_id=$4 AND topic_id=$5)
            UPDATE channel_inbox SET topic_id=NULL WHERE owner_id=$1 AND provider=$2 AND account_id=$3 AND sender_id=$4 AND topic_id=$5 AND state<>'pending'`,
           [ownerId, row.provider, row.account_id, row.sender_id, topicId],
         );
@@ -1712,38 +1975,46 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
 
   async function topicFor(row: OutboxRow) {
     const wanted = row.turn_id ? row.task_id : row.source_topic_id;
-    if (!wanted || !transport.topics) return undefined;
+    if ((!wanted && !row.turn_id) || !transport.topics) return undefined;
     const target = {
       channelId: row.provider,
       accountId: row.account_id,
       signal: AbortSignal.any([receiving.signal, AbortSignal.timeout(30_000)]),
     };
-    const enabled = await transport.topics(target);
-    topicsOn.set(`${row.provider}:${row.account_id}`, enabled);
-    if (!enabled) return undefined;
-    if (!row.turn_id) return wanted;
-    const task = await pool.query<{ title: string; topic_id: string | null; name: string | null }>(
-      `SELECT t.title,c.topic_id,c.name FROM tasks t LEFT JOIN channel_topics c ON c.task_id=t.id AND c.owner_id=t.owner_id
-         AND c.provider=$3 AND c.account_id=$4 AND c.sender_id=$5
-       WHERE t.id=$1 AND t.owner_id=$2 AND t.session_id=t.id`,
-      [wanted, ownerId, row.provider, row.account_id, row.sender_id],
-    );
-    const found = task.rows[0];
-    if (!found) return undefined;
+    const mode = await topicMode(row, target.signal);
+    if (!mode.enabled) return undefined;
+    if (!row.turn_id) return wanted ?? undefined;
+    const task = wanted
+      ? await pool.query<{ title: string; topic_id: string | null; name: string | null }>(
+          `SELECT t.title,c.topic_id,c.name FROM tasks t LEFT JOIN channel_topics c ON c.task_id=t.id AND c.owner_id=t.owner_id
+             AND c.provider=$3 AND c.account_id=$4 AND c.sender_id=$5
+           WHERE t.id=$1 AND t.owner_id=$2 AND t.session_id=t.id`,
+          [wanted, ownerId, row.provider, row.account_id, row.sender_id],
+        )
+      : undefined;
+    const found = task?.rows[0];
+    if (!found) return row.web ? undefined : mainTopicFor(row, mode.ownerTopics, target.signal);
     if (found.topic_id) {
       if (found.name !== found.title)
         await nameTopic(row, found.topic_id, found.title, found.name === null, target.signal);
       return found.topic_id;
     }
-    if (!transport.createTopic) return undefined;
     const key = JSON.stringify([row.provider, row.account_id, row.sender_id, wanted]);
-    const topicId =
-      createdTopics.get(key) ??
-      (await transport.createTopic({
-        ...target,
-        threadId: row.thread_id,
-        name: task.rows[0].title,
-      }));
+    let topicId = createdTopics.get(key);
+    if (!topicId && !transport.createTopic)
+      return row.web ? undefined : mainTopicFor(row, mode.ownerTopics, target.signal);
+    if (!topicId)
+      try {
+        topicId = await transport.createTopic!({
+          ...target,
+          threadId: row.thread_id,
+          name: found.title,
+        });
+      } catch (cause) {
+        if (row.web || target.signal.aborted) throw cause;
+        logFailure('channel_topic_failed', cause);
+        return mainTopicFor(row, mode.ownerTopics, target.signal);
+      }
     createdTopics.set(key, topicId);
     const saved = await pool.query<{ topic_id: string }>(
       `WITH added AS (INSERT INTO channel_topics(owner_id,provider,account_id,sender_id,task_id,topic_id,name)
@@ -1754,6 +2025,15 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     );
     createdTopics.delete(key);
     return saved.rows[0]?.topic_id ?? topicId;
+  }
+
+  async function mainTopicFor(row: OutboxRow, ownerTopics: boolean, signal: AbortSignal) {
+    const main = await mainTopic(row);
+    if (main && row.source_topic_id === main) return main;
+    if (!ownerTopics) return undefined;
+    const topicId = main ?? (await openMainTopic(row, signal));
+    if (!topicId) throw new Error('The Main topic is unavailable.');
+    return topicId;
   }
 
   async function nameTopic(
@@ -1848,7 +2128,8 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
          AND (th.archived_at IS NULL OR o.live_status IS NOT NULL)
          AND cardinality(o.provider_message_ids)=1 AND m.attachments='[]'::jsonb
          AND m.presentation IS NULL AND o.presentation IS NULL AND o.approval_delivery IS NULL
-         AND (o.live_status IS NOT NULL OR o.message_id=ANY($2::uuid[]))`,
+         AND (o.live_status IS NOT NULL OR o.message_id=ANY($2::uuid[]))
+       ORDER BY m.created_at,m.id`,
       [ownerId, [...targets.keys()]],
     );
     for (const row of rows) {
@@ -2108,6 +2389,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
               return false;
             }
           };
+          await attempt(mainTopicStep);
           await attempt(enqueueOutbox);
           let inbox = true;
           let outbox = true;
@@ -2165,7 +2447,10 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       await transport.close();
       transport = next;
       confirmedProgress.clear();
-      topicsOn.clear();
+      modes.clear();
+      mainTopicRetry.clear();
+      modeRetry.clear();
+      sendRetry.clear();
       channels = next.channels.map((channel) => ({
         ...channel,
         allowedSenderIds: [...channel.allowedSenderIds],

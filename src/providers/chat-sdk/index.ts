@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Chat, ConsoleLogger, convertEmojiPlaceholders, type Root } from 'chat';
 import { TelegramAdapter, TelegramFormatConverter } from '@chat-adapter/telegram';
@@ -15,7 +16,11 @@ import type {
 } from '../../ports/messaging.ts';
 import { telegramSecret, telegramUserId } from '../../ports/channel-settings.ts';
 import { logRepeatedFailure } from '../../ports/failure-log.ts';
-import { MessagingConnectionError, MessagingTopicError } from '../../ports/messaging.ts';
+import {
+  MessagingConnectionError,
+  MessagingRefusedError,
+  MessagingTopicError,
+} from '../../ports/messaging.ts';
 import {
   telegramAttachments,
   telegramMessage,
@@ -99,15 +104,24 @@ class Telegram extends TelegramAdapter {
     Reflect.set(this, 'richMessagesAvailable', false);
   }
 
+  readonly quiet = new AsyncLocalStorage<true>();
+
   protected override telegramFetch<TResult>(
     method: string,
     payload?: Record<string, unknown> | FormData,
     request?: { signal?: AbortSignal },
   ) {
+    const silent =
+      Boolean(this.quiet.getStore()) && /^(send(?!ChatAction)|copy|forward)/.test(method);
+    if (silent && payload instanceof FormData) payload.set('disable_notification', 'true');
     return super.telegramFetch<TResult>(
       method,
-      payload && !(payload instanceof FormData) && 'text' in payload
-        ? { ...payload, link_preview_options: { is_disabled: true } }
+      payload && !(payload instanceof FormData)
+        ? {
+            ...payload,
+            ...('text' in payload ? { link_preview_options: { is_disabled: true } } : {}),
+            ...(silent ? { disable_notification: true } : {}),
+          }
         : payload,
       request,
     );
@@ -121,7 +135,13 @@ class Telegram extends TelegramAdapter {
     try {
       return super.throwTelegramApiError(method, status, data);
     } catch (cause) {
-      throw Object.assign(cause as Error, { refusal: telegramRefusal(status, data) });
+      throw Object.assign(cause as Error, {
+        refusal: telegramRefusal(status, data),
+        forbidden:
+          (data.error_code ?? status) === 403
+            ? data.description || 'Telegram refused it with status 403.'
+            : undefined,
+      });
     }
   }
 
@@ -139,16 +159,21 @@ class Telegram extends TelegramAdapter {
     return chunks(text).flatMap(fit);
   }
 
-  private topicState?: { enabled: boolean; at: number };
+  private topicState?: { enabled: boolean; ownerTopics: boolean; at: number };
 
-  async topicsEnabled(signal?: AbortSignal) {
+  async topicMode(signal?: AbortSignal) {
     if (!this.topicState || Date.now() - this.topicState.at >= 300_000) {
-      const me = await this.telegramFetch<{ has_topics_enabled?: boolean }>('getMe', undefined, {
-        signal,
-      });
-      this.topicState = { enabled: me.has_topics_enabled === true, at: Date.now() };
+      const me = await this.telegramFetch<{
+        has_topics_enabled?: boolean;
+        allows_users_to_create_topics?: boolean;
+      }>('getMe', undefined, { signal });
+      this.topicState = {
+        enabled: me.has_topics_enabled === true,
+        ownerTopics: me.has_topics_enabled === true && me.allows_users_to_create_topics === true,
+        at: Date.now(),
+      };
     }
-    return this.topicState.enabled;
+    return { enabled: this.topicState.enabled, ownerTopics: this.topicState.ownerTopics };
   }
 
   private topicName(title: string) {
@@ -185,7 +210,9 @@ class Telegram extends TelegramAdapter {
       { signal },
     ).catch((cause: unknown) => {
       this.topicState = undefined;
-      throw cause;
+      const { refusal, forbidden } = (cause ?? {}) as { refusal?: unknown; forbidden?: unknown };
+      const reason = typeof refusal === 'string' ? refusal : forbidden;
+      throw typeof reason === 'string' ? new MessagingRefusedError(reason, { cause }) : cause;
     });
     return String(z.number().int().positive().parse(topic.message_thread_id));
   }
@@ -958,8 +985,8 @@ export function createChatSdkTransport(
         input.channelId !== 'telegram' ||
         input.accountId !== env.TELEGRAM_BOT_TOKEN!.split(':')[0]
       )
-        return false;
-      return telegram.topicsEnabled(input.signal);
+        return { enabled: false, ownerTopics: false };
+      return telegram.topicMode(input.signal);
     },
     async createTopic(input) {
       if (
@@ -980,6 +1007,8 @@ export function createChatSdkTransport(
       await telegram.renameTopic(input.threadId, input.topicId, input.name, input.signal);
     },
     async post(input) {
+      if (input.silent && telegram && !telegram.quiet.getStore())
+        return telegram.quiet.run(true, () => transport.post(input));
       if (
         !channels.some(
           (channel) =>
@@ -1102,6 +1131,7 @@ export function createChatSdkTransport(
           body.set('chat_id', decoded.chatId);
           if (decoded.messageThreadId)
             body.set('message_thread_id', String(decoded.messageThreadId));
+          if (input.silent) body.set('disable_notification', 'true');
           const replyParameters = telegram!.replyParameters(input.replyToMessageId, decoded.chatId);
           if (replyParameters) body.set('reply_parameters', JSON.stringify(replyParameters));
           let bytes: Uint8Array;
@@ -1234,6 +1264,7 @@ export function createChatSdkTransport(
                   ...(decoded.messageThreadId
                     ? { message_thread_id: decoded.messageThreadId }
                     : {}),
+                  ...(input.silent ? { disable_notification: true } : {}),
                   reply_parameters: telegram!.replyParameters(
                     input.replyToMessageId,
                     decoded.chatId,

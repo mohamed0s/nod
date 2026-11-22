@@ -36,7 +36,12 @@ export function combineMessagingTransports(
       return transport.post(input);
     },
     async topics(input) {
-      return (await forChannel(input.channelId)?.topics?.(input)) ?? false;
+      return (
+        (await forChannel(input.channelId)?.topics?.(input)) ?? {
+          enabled: false,
+          ownerTopics: false,
+        }
+      );
     },
     async createTopic(input) {
       const transport = forChannel(input.channelId);

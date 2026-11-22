@@ -4,6 +4,8 @@ export class MessagingConnectionError extends Error {}
 
 export class MessagingTopicError extends Error {}
 
+export class MessagingRefusedError extends Error {}
+
 export class MessagingAttachmentError extends Error {
   constructor(readonly maxBytes: number) {
     super('The channel file is too large.');
@@ -116,9 +118,14 @@ export interface MessagingTransport {
     attachments?: MessagingAttachment[];
     replyToMessageId?: string;
     replyToText?: string;
+    silent?: boolean;
     attachmentFailure?: (files: { name: string; reason?: string }[]) => Promise<string | undefined>;
   }): Promise<{ id: string; ids?: string[]; approvalButtons?: true }>;
-  topics?(input: { channelId: string; accountId: string; signal?: AbortSignal }): Promise<boolean>;
+  topics?(input: {
+    channelId: string;
+    accountId: string;
+    signal?: AbortSignal;
+  }): Promise<{ enabled: boolean; ownerTopics: boolean }>;
   createTopic?(input: {
     channelId: string;
     accountId: string;
