@@ -622,6 +622,25 @@ export function createModelService(options: {
       if (definition) return { row, definition };
     }
   }
+  function usableBackups(connectionId: string | undefined, modelId: string) {
+    const seen = new Set([`${connectionId}:${modelId}`]);
+    return backups.flatMap((item) => {
+      const row = rows.find((candidate) => candidate.id === item.connectionId);
+      const definition =
+        row?.status === 'connected'
+          ? row.models.find(
+              (model) =>
+                model.choice.id === item.modelId &&
+                !model.choice.audio &&
+                model.choice.efforts.length > 0,
+            )
+          : undefined;
+      const key = `${item.connectionId}:${item.modelId}`;
+      if (!row || !definition || seen.has(key)) return [];
+      seen.add(key);
+      return [{ row, definition, item }];
+    });
+  }
   function classificationModel(otherConnections = false) {
     const selected = selection && { ...selection };
     const current = rows.find((row) => row.id === selected?.connectionId);
@@ -1222,11 +1241,7 @@ export function createModelService(options: {
         };
         return (
           paused(work) &&
-          backups.every(
-            (choice) =>
-              rows.find((item) => item.id === choice.connectionId)?.status !== 'connected' ||
-              paused(choice),
-          )
+          usableBackups(work.connectionId, work.modelId).every(({ item }) => paused(item))
         );
       } catch {
         return false;
@@ -1331,21 +1346,11 @@ export function createModelService(options: {
     },
     async candidates(choice: ModelSelection | null = selection): Promise<ModelAccess[]> {
       const primary = await service.resolve(false, choice);
-      const seen = new Set([`${primary.connectionId}:${primary.definition.choice.id}`]);
       const list = [primary];
-      for (const item of backups) {
-        const row = rows.find((candidate) => candidate.id === item.connectionId);
-        const definition =
-          row?.status === 'connected'
-            ? row.models.find(
-                (model) =>
-                  model.choice.id === item.modelId &&
-                  !model.choice.audio &&
-                  model.choice.efforts.length > 0,
-              )
-            : undefined;
-        if (!row || !definition || seen.has(`${row.id}:${item.modelId}`)) continue;
-        seen.add(`${row.id}:${item.modelId}`);
+      for (const { row, definition, item } of usableBackups(
+        primary.connectionId,
+        primary.definition.choice.id,
+      ))
         list.push({
           connectionId: row.id,
           provider: row.provider,
@@ -1358,7 +1363,6 @@ export function createModelService(options: {
           needsReconnect: (credential) =>
             needsReconnect(row.id, { models: row.models, credential }),
         });
-      }
       return list;
     },
     async setBackups(value: ModelSelection[], client?: PoolClient) {
