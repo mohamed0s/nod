@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { open, readFile } from 'node:fs/promises';
+import { open, readFile, realpath, stat } from 'node:fs/promises';
 import { basename, join, win32 } from 'node:path';
 import { finished } from 'node:stream/promises';
 import { parseEnv } from 'node:util';
@@ -50,6 +50,24 @@ export function desktopProfile(userData: string) {
     identity: distribution.slice(4),
     browserNamespace: browserNamespace(root),
   };
+}
+
+async function existingRealPath(path: string) {
+  const rest: string[] = [];
+  for (let current = win32.resolve(path); ; current = win32.dirname(current)) {
+    try {
+      return win32.join(await realpath(current), ...rest.reverse());
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || win32.dirname(current) === current)
+        throw error;
+      rest.push(win32.basename(current));
+    }
+  }
+}
+
+export async function inside(parent: string, child: string) {
+  const relative = win32.relative(await existingRealPath(parent), await existingRealPath(child));
+  return relative === '' || (relative.split(win32.sep)[0] !== '..' && !win32.isAbsolute(relative));
 }
 
 export async function profileOwner(profileRoot: string) {
@@ -111,10 +129,28 @@ export async function readPlan(staging: string) {
   if (
     profile.root !== plan.profileRoot ||
     profile.distribution !== plan.distribution ||
+    profile.identity !== plan.identity ||
     profile.browserNamespace !== plan.browserNamespace
   )
     throw new Error('The staging plan does not match its desktop folder. Run convert again.');
   return plan;
+}
+
+export async function stagedFiles(plan: Plan, staging: string) {
+  const sizes: Record<string, number> = {};
+  for (const name of [
+    'database.dump',
+    ...Object.entries(plan.archives)
+      .filter(([, made]) => made)
+      .map(([archive]) => `${archive}.tar`),
+  ])
+    sizes[name] = await stat(join(staging, name)).then(
+      (file) => file.size,
+      () => {
+        throw new Error(`The staging folder is missing ${name}. Run convert again.`);
+      },
+    );
+  return sizes;
 }
 
 export async function appRunning(userData: string) {
@@ -128,6 +164,25 @@ export async function appRunning(userData: string) {
     if (code === 'EBUSY' || code === 'EPERM' || code === 'EACCES') return true;
     throw error;
   }
+}
+
+export async function protectFolder(path: string) {
+  if (process.platform !== 'win32') return;
+  if (!process.env.SYSTEMROOT) throw new Error('Windows could not be found to protect the folder.');
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    '$acl = New-Object System.Security.AccessControl.DirectorySecurity',
+    '$acl.SetAccessRuleProtection($true, $false)',
+    "foreach ($sid in @([System.Security.Principal.WindowsIdentity]::GetCurrent().User, (New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-18'), (New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'))) {",
+    "  $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))",
+    '}',
+    '(Get-Item -LiteralPath $env:NOD_PROTECT_PATH).SetAccessControl($acl)',
+  ].join('\n');
+  await run(
+    join(process.env.SYSTEMROOT, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    ['-NoProfile', '-NonInteractive', '-Command', script],
+    { env: { ...process.env, NOD_PROTECT_PATH: path }, label: 'Protecting the staging folder' },
+  );
 }
 
 function decoded(bytes: Buffer) {
@@ -146,59 +201,77 @@ export function run(
     output?: string;
     env?: NodeJS.ProcessEnv;
     timeoutMs?: number;
+    label?: string;
   } = {},
 ) {
-  const label = `${basename(command)} ${args.find((arg) => !arg.startsWith('-')) ?? ''}`.trim();
+  const label =
+    options.label ??
+    `${basename(command)} ${args.find((arg) => !arg.startsWith('-')) ?? ''}`.trim();
   return new Promise<string>((resolve, reject) => {
     const child = spawn(command, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
       ...(options.env ? { env: options.env } : {}),
     });
+    let failure: Error | undefined;
+    const stop = (error: Error) => {
+      failure ??= error;
+      child.kill();
+    };
     const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    let stderrBytes = 0;
+    let stderr = Buffer.alloc(0);
     const timer =
       options.timeoutMs === undefined
         ? undefined
-        : setTimeout(() => child.kill(), options.timeoutMs);
-    const writing = options.output
-      ? finished(child.stdout.pipe(createWriteStream(options.output, { flags: 'wx' })))
-      : Promise.resolve();
-    if (!options.output) child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
+        : setTimeout(
+            () =>
+              stop(
+                new Error(
+                  `${label} did not finish within ${Math.round(options.timeoutMs! / 1000)} seconds and was stopped.`,
+                ),
+              ),
+            options.timeoutMs,
+          );
+    let writing: Promise<unknown> = Promise.resolve();
+    if (options.output) {
+      const target = createWriteStream(options.output, { flags: 'wx' });
+      writing = finished(target).catch((error: Error) =>
+        stop(new Error(`${label} output could not be saved: ${error.message}`)),
+      );
+      child.stdout.pipe(target);
+    } else child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
     child.stderr.on('data', (chunk: Buffer) => {
-      if (stderrBytes > 65_536) return;
-      stderrBytes += chunk.length;
-      stderr.push(chunk);
+      stderr = Buffer.concat([stderr, chunk]);
+      if (stderr.length > 65_536) stderr = stderr.subarray(stderr.length - 65_536);
     });
     child.stdin.on('error', () => {});
     if (typeof options.input === 'string') child.stdin.end(options.input);
     else if (options.input) {
       const source = createReadStream(options.input.file);
-      source.on('error', (error) => {
-        child.kill();
-        reject(new Error(`${label} input could not be read: ${error.message}`));
-      });
+      source.on('error', (error) =>
+        stop(new Error(`${label} input could not be read: ${error.message}`)),
+      );
       source.pipe(child.stdin);
     } else child.stdin.end();
     child.on('error', (error) => {
-      clearTimeout(timer);
-      reject(new Error(`${label} could not start: ${error.message}`));
+      failure ??= new Error(`${label} could not start: ${error.message}`);
+      if (child.pid === undefined) {
+        clearTimeout(timer);
+        reject(failure);
+      }
     });
     child.on('close', (code, signal) => {
       clearTimeout(timer);
-      writing.then(
-        () => {
-          if (code === 0) return resolve(decoded(Buffer.concat(stdout)).trim());
-          const reason = decoded(Buffer.concat(stderr)).trim().slice(-2000);
-          reject(
-            new Error(
-              `${label} failed (${signal ? `signal ${signal}` : `exit ${code}`})${reason ? `: ${reason}` : '.'}`,
-            ),
-          );
-        },
-        (error: Error) => reject(new Error(`${label} output could not be saved: ${error.message}`)),
-      );
+      void writing.then(() => {
+        if (failure) return reject(failure);
+        if (code === 0) return resolve(decoded(Buffer.concat(stdout)).trim());
+        const reason = decoded(stderr).trim().slice(-2000);
+        reject(
+          new Error(
+            `${label} failed (${signal ? `signal ${signal}` : `exit ${code}`})${reason ? `: ${reason}` : '.'}`,
+          ),
+        );
+      });
     });
   });
 }
