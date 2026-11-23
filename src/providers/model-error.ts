@@ -49,15 +49,30 @@ export async function modelServiceError(
     ) {
       const chunks: Uint8Array[] = [];
       let size = 0;
-      while (true) {
+      while (size < 16_384) {
         const { done, value } = await reader.read();
         if (done) break;
+        chunks.push(value.subarray(0, 16_384 - size));
         size += value.length;
-        if (size > 16_384) break;
-        chunks.push(value);
       }
-      const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-      const error = body.error ?? body;
+      const text = Buffer.concat(chunks).toString('utf8');
+      let body;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        const literal = /"(?:message|detail|msg)"\s*:\s*("(?:[^"\\]|\\.)*")/.exec(text)?.[1];
+        if (literal) body = { message: JSON.parse(literal) };
+      }
+      const item = Array.isArray(body) ? body[0] : body;
+      let error =
+        item?.error ??
+        (item?.detail !== undefined && item.message === undefined ? item.detail : item);
+      if (error?.error && typeof error.error === 'object') error = error.error;
+      if (Array.isArray(error))
+        error =
+          error
+            .flatMap((entry) => (typeof entry?.msg === 'string' ? [entry.msg] : []))
+            .join('; ') || undefined;
       if (typeof error === 'string') reason = serviceReason = error;
       else if (error && typeof error === 'object') {
         if (typeof error.message === 'string') serviceReason = error.message;

@@ -135,6 +135,33 @@ test('channel verification keeps service failures specific and removes submitted
     ['https://fixture.example.test/v1'],
   );
   assert.equal(literal.reason, 'https://fixtureXexampleXtest/v1 | [redacted]');
+  for (const [body, status, reason] of [
+    [
+      [{ error: { code: 429, message: 'Synthetic quota exceeded' } }],
+      429,
+      'Synthetic quota exceeded',
+    ],
+    [{ detail: 'Synthetic not authenticated' }, 401, 'Synthetic not authenticated'],
+    [
+      { detail: [{ msg: 'Synthetic field required' }, { msg: 'Synthetic value too long' }] },
+      422,
+      'Synthetic field required; Synthetic value too long',
+    ],
+    [
+      { detail: { error: { message: 'Synthetic model at capacity', type: 'rate_limit_error' } } },
+      429,
+      'Synthetic model at capacity',
+    ],
+    [
+      { error: { message: 'Synthetic context too long', padding: 'x'.repeat(20_000) } },
+      400,
+      'Synthetic context too long',
+    ],
+  ] as const) {
+    const failure = await modelServiceError(Response.json(body, { status }), 'Synthetic service');
+    assert.equal(failure.reason, reason);
+    assert.ok(failure.message.includes(reason));
+  }
   const whatsapp = {
     accessToken: 'synthetic-meta-access-token',
     appSecret: 'a'.repeat(32),
