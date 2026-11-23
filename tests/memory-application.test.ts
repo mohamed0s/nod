@@ -267,6 +267,58 @@ test(
         await application.app.inject({ method: 'GET', url: '/api/memory', headers })
       ).json() as MemoryView;
     try {
+      await t.test('API text is refused before route handling', async () => {
+        const handled = t.mock.fn();
+        application.app.addHook('preHandler', async () => {
+          handled();
+        });
+        const nul = 'Synthetic\u0000text';
+        for (const [method, url, payload] of [
+          ['POST', '/api/messages', { clientMessageId: randomUUID(), text: nul }],
+          ['PATCH', '/api/preferences', { rules: nul }],
+          ['PATCH', '/api/preferences', { notificationRule: nul }],
+          [
+            'POST',
+            '/api/schedules',
+            {
+              title: nul,
+              prompt: 'Synthetic',
+              kind: 'recurring',
+              cron: '0 9 * * *',
+              timeZone: 'UTC',
+            },
+          ],
+          [
+            'POST',
+            '/api/schedules',
+            {
+              title: 'Synthetic',
+              prompt: nul,
+              kind: 'recurring',
+              cron: '0 9 * * *',
+              timeZone: 'UTC',
+            },
+          ],
+          ['GET', '/api/messages/search?q=%00', undefined],
+          ['GET', '/api/messages/around/%00', undefined],
+          ['PATCH', '/api/preferences', { 'Synthetic\u0000key': 'Synthetic' }],
+          [
+            'POST',
+            '/api/messages',
+            { clientMessageId: randomUUID(), text: 'Synthetic', extra: [{ text: nul }] },
+          ],
+        ] as const) {
+          const refused = await application.app.inject({
+            method,
+            url,
+            headers: { ...headers, ...(payload ? { 'content-type': 'application/json' } : {}) },
+            payload,
+          });
+          assert.equal(refused.statusCode, 400, `${method} ${url}`);
+          assert.match(refused.json().error, /null character/);
+        }
+        assert.equal(handled.mock.callCount(), 0);
+      });
       await t.test(
         'one backend serves setup while queued turns wait for the computer',
         async () => {

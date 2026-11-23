@@ -3681,7 +3681,10 @@ async function initializeApplication(
       clearTimeout(timer);
     }
   }
-  app.addHook('onReady', async () => activity.start());
+  app.addHook('onReady', async () => {
+    void discovered.servers().catch((error) => logFailure('mcp_tool_list_preload', error));
+    return activity.start();
+  });
   app.addHook('onClose', async () => {
     stopConnectionInventory();
     const failures: unknown[] = [];

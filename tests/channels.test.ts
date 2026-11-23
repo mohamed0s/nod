@@ -232,6 +232,11 @@ test('contact previews read vCard 2.1, 3.0 and 4.0 without treating field values
     contactCards('BEGIN:VCARD\r\nFN:First\r\nBEGIN:VCARD\r\nFN:Second\r\nEND:VCARD'),
     [],
   );
+  const escaped = contactCards(
+    'BEGIN:VCARD\r\nFN:Synthetic\r\nTITLE:C:\\\\new\\\\\r\nORG:Line\\nOne\\NTwo\\, \\;\r\nEND:VCARD',
+  )[0];
+  assert.equal(escaped.title, 'C:\\new\\');
+  assert.equal(escaped.organization, 'Line\nOne\nTwo, ;');
 });
 
 const vcardOf = (...lines: string[]) => ['BEGIN:VCARD', ...lines, 'END:VCARD'].join('\r\n');

@@ -808,6 +808,9 @@ const mcpPart = (value: string) =>
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '') || 'app';
 
+const mcpGuide = (namespace: string, instructions?: string) =>
+  untrustedBlock(`${namespace} MCP server guide`, instructions || 'This server supplied no guide.');
+
 export function mcpNamespaces(servers: NonNullable<RuntimeContext['mcpServers']>) {
   const taken = new Set<string>();
   return servers.map((server) => {
@@ -819,21 +822,32 @@ export function mcpNamespaces(servers: NonNullable<RuntimeContext['mcpServers']>
   });
 }
 
-export function connectedTools(
-  turn: Turn,
-): Array<NodTool & { deferred: NonNullable<AgentToolMetadata['deferred']> }> {
-  const { context, confirm } = turn;
+export function mcpToolNames(servers: NonNullable<RuntimeContext['mcpServers']>) {
   const names = new Set<string>();
-  return mcpNamespaces(context.mcpServers ?? []).flatMap(({ server, namespace }) => {
-    const deferred = {
-      namespace,
-      description: `${server.name} (${server.accountName}), a connected MCP server`,
-    };
-    return server.tools.flatMap((tool) => {
+  return mcpNamespaces(servers).map(({ server, namespace }) => ({
+    server,
+    namespace,
+    tools: server.tools.map((tool) => {
       const base = `mcp__${namespace}__${mcpPart(tool.name)}`.slice(0, 60);
       let name = base;
       for (let count = 2; names.has(name); count++) name = `${base}_${count}`;
       names.add(name);
+      return { tool, name };
+    }),
+  }));
+}
+
+export function connectedTools(
+  turn: Turn,
+): Array<NodTool & { deferred: NonNullable<AgentToolMetadata['deferred']> }> {
+  const { context, confirm } = turn;
+  return mcpToolNames(context.mcpServers ?? []).flatMap(({ server, namespace, tools }) => {
+    const deferred = {
+      namespace,
+      description: `${server.name} (${server.accountName}), a connected MCP server`,
+      guide: mcpGuide(namespace, server.instructions),
+    };
+    return tools.flatMap(({ tool, name }) => {
       return [
         {
           name,
@@ -1102,10 +1116,7 @@ export function nodTools(
           );
           if (guide) {
             if (p.file) throw new Error('An MCP server guide has no reference files.');
-            return untrustedBlock(
-              `${guide.namespace} MCP server guide`,
-              guide.server.instructions || 'This server supplied no guide.',
-            );
+            return mcpGuide(guide.namespace, guide.server.instructions);
           }
           if (
             skills?.core?.includes(p.name) ||

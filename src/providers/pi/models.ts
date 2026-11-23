@@ -52,7 +52,7 @@ import { piUsageMetrics } from './usage.ts';
 import { audioUsage, nativeAudioRequest, readsNativeAudio } from './audio.ts';
 import { completeAssistantMessage } from './checkpoint.ts';
 import { modelContext } from './context.ts';
-import { modelServiceError } from '../model-error.ts';
+import { ModelServiceError, modelServiceError } from '../model-error.ts';
 import {
   antLingModel,
   nativeAudioModel,
@@ -60,6 +60,7 @@ import {
   assistantModelId,
   assistantModels,
   cloudflareCredential,
+  discoveryCause,
   nativeCatalog,
 } from './model-catalog.ts';
 
@@ -275,11 +276,7 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
     const headers: Record<string, string> = credential.key
       ? { Authorization: `Bearer ${credential.key}` }
       : {};
-    const secrets = [credential.url, credential.key ?? ''].flatMap((value) => [
-      value,
-      encodeURIComponent(value),
-      JSON.stringify(value).slice(1, -1),
-    ]);
+    const secrets = [credential.url, credential.key ?? ''];
     const failures: ModelCatalogFailure[] = [];
     let found: { url: string; data: unknown[] } | undefined;
     for (const url of credential.url.endsWith('/v1')
@@ -409,15 +406,15 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
     }
     return models;
   }
-  async function cloudResponse(url: string, init: RequestInit, rejected: string) {
+  async function cloudResponse(url: string, init: RequestInit, service: string, key: string) {
     const response = await request(url, {
       ...init,
       redirect: 'error',
       signal: AbortSignal.timeout(15000),
     });
     if ([400, 401, 403, 404].includes(response.status)) {
-      await response.body?.cancel();
-      throw new ModelAuthError(rejected);
+      const error = await modelServiceError(response, `${service} model discovery`, [key]);
+      throw new ModelAuthError(error.message);
     }
     return response;
   }
@@ -430,7 +427,8 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
         await cloudResponse(
           `${root}${path}`,
           { headers: { Authorization: `Bearer ${credential.key}` } },
-          'Amazon Bedrock didn’t accept this key in that Region. Check both, and that the key can list models.',
+          'Amazon Bedrock',
+          credential.key,
         ),
       );
     const available = new Set(
@@ -471,8 +469,10 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
       },
     );
     if ([400, 401, 403].includes(response.status)) {
-      await response.body?.cancel();
-      throw new ModelAuthError('Google Vertex AI didn’t accept this API key.');
+      const error = await modelServiceError(response, 'Google Vertex AI model discovery', [
+        credential.key,
+      ]);
+      throw new ModelAuthError(error.message);
     }
     if (!response.ok && response.status !== 404)
       throw await modelServiceError(response, 'Google Vertex AI model discovery', [credential.key]);
@@ -487,7 +487,8 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
       await cloudResponse(
         `${credential.url}/models`,
         { headers: { 'api-key': credential.key } },
-        'This Azure OpenAI endpoint didn’t accept the key. Check the endpoint and the key.',
+        'Azure OpenAI',
+        credential.key,
       ),
     );
     return [definition({ ...model, baseUrl: credential.url })];
@@ -712,12 +713,14 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
           },
         );
         if (!response.ok) {
-          await response.body?.cancel();
+          const error = await modelServiceError(response, 'Anthropic workspace discovery', [
+            credential.key,
+          ]);
           if ([400, 401, 403, 404].includes(response.status))
             throw new ModelAuthError(
-              'Nod couldn’t discover a workspace for this key. Enter its Workspace ID from the Claude Console.',
+              `${error.message} Enter its Workspace ID from the Claude Console.`,
             );
-          throw new Error(`Anthropic workspace discovery failed (${response.status}).`);
+          throw error;
         }
         workspaces = z
           .object({
@@ -738,8 +741,13 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
           })
           .parse(await response.json());
       } catch (cause) {
-        if (cause instanceof ModelAuthError) throw cause;
-        throw new Error('The model list couldn’t be loaded. Try again.', { cause });
+        if (cause instanceof ModelAuthError || cause instanceof ModelServiceError) throw cause;
+        throw new Error(
+          `Anthropic workspace discovery failed: ${discoveryCause(cause, [credential.key])}.`,
+          {
+            cause,
+          },
+        );
       }
       if (!workspaces.data.length)
         throw new ModelAuthError(
