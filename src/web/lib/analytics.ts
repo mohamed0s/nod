@@ -129,7 +129,8 @@ type AnalyticsEvents = {
       | 'close_chat'
       | 'open_browser'
       | 'show_activity'
-      | 'show_commands';
+      | 'show_commands'
+      | 'reply';
   };
   tab_viewed: { page: 'apps'; tab: 'all' | 'connected' };
   ui_error: {
@@ -280,6 +281,7 @@ const eventProperties: Record<keyof AnalyticsEvents, Record<string, readonly unk
       'open_browser',
       'show_activity',
       'show_commands',
+      'reply',
     ],
   },
   tab_viewed: {

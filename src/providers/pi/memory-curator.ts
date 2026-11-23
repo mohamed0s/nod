@@ -31,6 +31,7 @@ const untraced = new Set([
   'review',
   'style',
   'skill',
+  'ideas',
   'classify',
   'title',
   'check',
@@ -114,7 +115,7 @@ function failure(
   const status = [...(reply.errorMessage ?? '').matchAll(/\(HTTP (\d{3})\)/g)].at(-1)?.[1];
   const current = `${model.provider}/${model.id}`;
   const message = `${label} Task: ${task}. Model: ${[...tried, current].join('; then ')}.${detail}`;
-  const retryable = { retryable: isRetryableAssistantError(reply) };
+  const retryable = { providerRetryable: isRetryableAssistantError(reply) };
   if (unavailable)
     return Object.assign(
       new ModelUnavailableError(
@@ -318,7 +319,7 @@ export function createPiMemoryCurator(options: {
                   }
                 : {}),
               signal: deadline ? AbortSignal.any([deadline, ...(signal ? [signal] : [])]) : signal,
-              maxTokens: bounded ? 512 : 8192,
+              maxTokens: bounded ? 512 : task === 'ideas' ? 2048 : 8192,
               ...(sessionId ? { sessionId } : {}),
               ...(bounded ? { maxRetries: 0, timeoutMs: 10_000 } : {}),
               ...(turnBound && model.provider === 'compatible'
@@ -393,7 +394,11 @@ export function createPiMemoryCurator(options: {
           ? await complete()
           : await retryAssistantCall(
               complete,
-              { enabled: task !== 'vision' && !bounded, maxRetries: 2, baseDelayMs: 250 },
+              {
+                enabled: task !== 'vision' && task !== 'ideas' && !bounded,
+                maxRetries: 2,
+                baseDelayMs: 250,
+              },
               signal,
             );
         if (

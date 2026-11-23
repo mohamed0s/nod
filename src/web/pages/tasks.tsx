@@ -36,6 +36,7 @@ import { captureAnalytics } from '../lib/analytics';
 import { formatDateTime, useDateFormat } from '../lib/date-format';
 import { post, errorMessage } from '../lib/api';
 import { ScheduleRow } from './schedule';
+import { ScheduleIdeas } from '../components/schedule-ideas';
 import { LiveLine } from '../components/live-line';
 import { WorkModel } from '../components/model-choices';
 
@@ -143,38 +144,14 @@ function TaskCommands({ id }: { id: string }) {
 export function TaskCard({
   task,
   live,
-  onScheduled,
-  inChat = false,
   pinned = false,
 }: {
   task: Task;
   live?: Activity;
-  onScheduled?(): void;
-  inChat?: boolean;
   pinned?: boolean;
 }) {
   const headingId = useId();
   const [expanded, setExpanded] = useState(false);
-  const card = useRef<HTMLElement>(null);
-  useEffect(() => {
-    if (!inChat) return;
-    const open = (event: Event) => {
-      const element = card.current;
-      if (
-        (event as CustomEvent<{ taskId?: unknown }>).detail?.taskId !== task.id ||
-        !element?.getClientRects().length
-      )
-        return;
-      event.preventDefault();
-      setExpanded(true);
-      element.focus({ preventScroll: true });
-      element.classList.remove('task-preview-pulse');
-      void element.offsetWidth;
-      element.classList.add('task-preview-pulse');
-    };
-    window.addEventListener('nod:open-task', open);
-    return () => window.removeEventListener('nod:open-task', open);
-  }, [inChat, task.id]);
   const [showActivity, setShowActivity] = useState(false);
   const [showCommands, setShowCommands] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -200,19 +177,7 @@ export function TaskCard({
   const showLive = live && (task.status === 'working' || task.status === 'queued') ? live : null;
   const shownInChat = pinned && ['needs_you', 'done', 'cancelled'].includes(task.status);
   return (
-    <article
-      ref={card}
-      className="task-preview"
-      data-status={task.status}
-      data-task-id={task.id}
-      onAnimationEnd={(event) => {
-        if (event.animationName === 'task-preview-pulse')
-          event.currentTarget.classList.remove('task-preview-pulse');
-      }}
-      aria-labelledby={headingId}
-      tabIndex={-1}
-      data-message-id={inChat ? task.messageId : undefined}
-    >
+    <article className="task-preview" data-status={task.status} aria-labelledby={headingId}>
       <h2 className="task-preview-heading">
         <button
           type="button"
@@ -416,7 +381,7 @@ export function TaskCard({
             {error && <Notice>{error}</Notice>}
             {showActivity && <TaskActivity id={task.id} />}
             {showCommands && <TaskCommands id={task.id} />}
-            {task.status === 'done' && <ScheduleTask taskId={task.id} onCreated={onScheduled} />}
+            {task.status === 'done' && <ScheduleTask taskId={task.id} />}
           </div>
         </div>
       </div>
@@ -461,6 +426,7 @@ export function Scheduled({
   const schedules = usePageData<Schedule[]>('/api/schedules');
   const tasks = usePageData<Task[]>('/api/tasks');
   const open = (tasks.data ?? []).filter((task) => !closed(task));
+  const finished = (tasks.data ?? []).filter(closed);
   const upcoming = (schedules.data ?? [])
     .filter((schedule) => schedule.enabled && schedule.nextRun)
     .sort((a, b) => a.nextRun!.localeCompare(b.nextRun!) || a.id.localeCompare(b.id));
@@ -503,18 +469,32 @@ export function Scheduled({
           ))}
         </div>
       )}
+      {finished.length > 0 && (
+        <details className="schedule-inactive">
+          <summary>
+            Finished <span>{finished.length}</span>
+            <ChevronDown size={16} aria-hidden="true" />
+          </summary>
+          <div className="saved-plan-list">
+            {finished.map((task) => (
+              <TaskCard key={task.id} task={task} />
+            ))}
+          </div>
+        </details>
+      )}
       {!schedules.data ? (
         schedules.loading && <Pending label="Loading schedules…" />
       ) : (
         <>
           {upcoming.length ? (
-            <div className="saved-plan-list">
+            <div className="schedule-list">
               {upcoming.map((schedule) => (
                 <ScheduleRow
                   key={schedule.id}
                   schedule={schedule}
                   activity={activity}
                   onAsk={onAsk}
+                  defaultOpen={upcoming.length === 1}
                 />
               ))}
             </div>
@@ -540,18 +520,20 @@ export function Scheduled({
                 Inactive <span>{inactive.length}</span>
                 <ChevronDown size={16} aria-hidden="true" />
               </summary>
-              <div className="saved-plan-list">
+              <div className="schedule-list">
                 {inactive.map((schedule) => (
                   <ScheduleRow
                     key={schedule.id}
                     schedule={schedule}
                     activity={activity}
                     onAsk={onAsk}
+                    defaultOpen={!upcoming.length && inactive.length === 1}
                   />
                 ))}
               </div>
             </details>
           )}
+          <ScheduleIdeas first={empty} onAsk={onAsk} />
         </>
       )}
     </div>

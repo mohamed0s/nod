@@ -197,6 +197,7 @@ import { createPersonalService } from './personal.ts';
 import { createOnboardingSuggestions } from './onboarding-suggestions.ts';
 import { createOnboardingProfile } from './onboarding-profile.ts';
 import { createMemoryLearning, initializeMemoryLearning } from './memory-learning.ts';
+import { createScheduleIdeas } from './schedule-ideas.ts';
 import { createMemoryService, importMemoryFile } from './memory.ts';
 import { createMemoryRecall } from './memory-recall.ts';
 import { createLearnedSkills } from './learned-skills.ts';
@@ -705,7 +706,9 @@ export async function createApplication(
     workers?: boolean;
     channels?: boolean;
     heartbeat?: boolean;
+    rateLimit?: boolean;
     runtimeReady?: Promise<void>;
+    starting?: (step: string) => void;
   } = {},
 ) {
   const diagnostics: {
@@ -739,7 +742,9 @@ async function initializeApplication(
     workers?: boolean;
     channels?: boolean;
     heartbeat?: boolean;
+    rateLimit?: boolean;
     runtimeReady?: Promise<void>;
+    starting?: (step: string) => void;
   },
   diagnostics: {
     log?: Awaited<ReturnType<typeof createFeedbackLog>>;
@@ -837,8 +842,10 @@ async function initializeApplication(
   }
   const privacyNotice = await loadPrivacyNoticeFile(process.env.NOD_PRIVACY_NOTICE_FILE);
   await mkdir(dataRoot, { recursive: true, mode: 0o700 });
+  options.starting?.('database');
   await initializeDatabase();
   await adapters.initialize?.();
+  options.starting?.('threads');
   await initializeThreads();
   const artifacts = localArtifacts;
   async function sweepArtifacts() {
@@ -1014,6 +1021,7 @@ async function initializeApplication(
     },
   });
   const memoryStore = createPostgresObjectStore({ database: pool, ownerId });
+  options.starting?.('memory');
   await memoryStore.initialize();
   await importMemoryFile(memoryStore, join(dataRoot, 'objects', 'memory'));
   const memory = createMemoryService({
@@ -1171,7 +1179,7 @@ async function initializeApplication(
             adapters.models!.paused({ kind: 'schedule', schedule: model }),
         }
       : {}),
-    watchable: async (connectionIds) => integrations.watchable(connectionIds),
+    watchable: (connectionIds, client) => integrations.watchable(connectionIds, client),
     watchState: async (connectionIds) => integrations.watchState(connectionIds),
   });
   await personal.initialize({ workers: options.workers });
@@ -1298,6 +1306,7 @@ async function initializeApplication(
     },
     due: () => proactivity.due(),
   });
+  options.starting?.('apps');
   const grantVault = await createAppGrantVault(pool, {
     ownerId,
     keyStore: adapters.keyStore,
@@ -1410,6 +1419,16 @@ async function initializeApplication(
     browserConnections: (client) => browserConnections.list(client),
     icon,
   });
+  const scheduleIdeas = createScheduleIdeas({
+    pool,
+    ownerId,
+    curator,
+    memory: () => memory.load(),
+    limitReached: async () => Boolean(await ledger.reachedLimit()),
+    apps: async () => (await integrations.connectedApps()).map((app) => app.slug),
+    run: (work) => analytics.withSystemWork(ownerId, 'schedule_ideas', work),
+  });
+  await scheduleIdeas.initialize();
   vault = await createVault(pool, {
     signal: closing.signal,
     analytics: captureAnalytics,
@@ -2979,7 +2998,12 @@ async function initializeApplication(
               Object.keys(args).length ? await activityLog.read(args, 200) : await ledger.read(),
             ),
           );
-        return personal.manage(action, args, { ...provenance, turnId: turn.turnId });
+        const source = { ...provenance, turnId: turn.turnId };
+        if (action === 'schedule_record_observation')
+          return withTurnLock({ turnId: turn.turnId, signal }, (client) =>
+            personal.manage(action, args, source, { client }),
+          );
+        return personal.manage(action, args, source);
       },
       requestPayment: async (turn, input, show) => {
         const { image, ...result } = await payments.request(turn, input);
@@ -3370,6 +3394,7 @@ async function initializeApplication(
   };
   const app = await createApp({
     failureLog: diagnostics.failure,
+    rateLimit: options.rateLimit,
     analytics: captureAnalytics,
     admission,
     artifacts,
@@ -3472,6 +3497,7 @@ async function initializeApplication(
   localFiles.registerRoutes(app);
   computerUse.registerRoutes(app);
   personal.registerRoutes(app);
+  scheduleIdeas.registerRoutes(app);
   onboardingSuggestions.registerRoutes(app);
   onboardingProfile.registerRoutes(app);
   tasks.registerRoutes(app);

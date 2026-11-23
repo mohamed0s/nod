@@ -329,6 +329,7 @@ const lifecycle = createDesktopLifecycle({
         dataRoot: profileRoot,
         resourcesPath: engineRoot,
         preserveRuntimeCache: testInstall,
+        computerDirectory: await settings.computerDirectory(),
         resolveDownloadUrl: updateSource?.runtimeDownloadUrl,
         signal,
         onStatus: (value) => {
@@ -2940,6 +2941,8 @@ async function startEngine({ runtime, signal, pending = false }) {
     needsRuntimeArchive: false,
     unlockingKeys: false,
   });
+  let step;
+  let deadline = started + 600_000;
   const child = utilityProcess.fork(join(engineRoot, 'desktop', 'main', 'engine.mjs'), [], {
     cwd: engineRoot,
     env: environment,
@@ -2950,6 +2953,17 @@ async function startEngine({ runtime, signal, pending = false }) {
   child.on('message', (message) => {
     if (engine === child && message?.type === 'nod-ready' && message.port === port) {
       engineBound = true;
+      deadline = Date.now() + 120_000;
+    }
+    if (engine === child && message?.type === 'nod-starting') {
+      const next = startupEventFacts(undefined, { step: message.step }).step;
+      if (next && next !== step) {
+        step = next;
+        if (step !== 'loading') deadline = Date.now() + 120_000;
+        void writeDiagnostic(
+          `Background service step: ${step} after ${((Date.now() - started) / 1000).toFixed(1)}s.`,
+        ).catch(() => {});
+      }
     }
     if (engine === child && message?.type === 'nod-1password-open') openOnePassword(child);
     if (engine === child && message?.type === 'nod-trash') void moveToTrash(child, message);
@@ -3025,11 +3039,15 @@ async function startEngine({ runtime, signal, pending = false }) {
       showSettings('general', true);
     }
   });
-  const deadline = started + 120_000;
   let ready = false;
+  let slow = false;
   let lastFailure = 'none';
   let lastHealthStatus;
   while (Date.now() < deadline && engine === child && !signal.aborted) {
+    if (!slow && Date.now() - started > 20_000) {
+      slow = true;
+      update({ message: 'Starting Nod. This can take a few minutes.' });
+    }
     try {
       const response = await engineRequest('/api/health');
       lastHealthStatus = response.status;
@@ -3049,8 +3067,13 @@ async function startEngine({ runtime, signal, pending = false }) {
   if (!ready && engine === child && !signal.aborted && Date.now() >= deadline) {
     const waited = ((Date.now() - started) / 1000).toFixed(1);
     await writeDiagnostic(
-      `Background service health check timed out after ${waited}s. Engine process still running: yes. Last health check: ${lastFailure}. Engine reported its port: ${engineBound ? 'yes' : 'no'}.`,
-      { event: 'health_timeout', durationMs: Date.now() - started, httpStatus: lastHealthStatus },
+      `Background service health check timed out after ${waited}s. Engine process still running: yes. Last health check: ${lastFailure}. Engine reported its port: ${engineBound ? 'yes' : 'no'}. Last startup step: ${step ?? 'none'}.`,
+      {
+        event: 'health_timeout',
+        durationMs: Date.now() - started,
+        httpStatus: lastHealthStatus,
+        step,
+      },
     ).catch(() => {});
   }
   if (!ready || engine !== child || signal.aborted) {
@@ -3091,6 +3114,7 @@ async function prepare(options = {}) {
       progress: status.runtime.progress,
       secondsLeft: status.runtime.secondsLeft,
       needsRuntimeArchive: false,
+      needsStorage: false,
     });
     return lifecycle.start({ retry: options?.retry === true });
   })()
@@ -3119,6 +3143,7 @@ async function prepare(options = {}) {
         details: startupErrorDetails(error),
         needsRuntimeArchive: error.code === 'RUNTIME_ARCHIVE_REQUIRED',
         needsWsl: error.code === 'NOD_WSL_REQUIRED',
+        needsStorage: error.code === 'NOD_COMPUTER_STORAGE_FULL',
         needsServerConnection: error.code === 'NOD_SERVER_TOKEN_UNAVAILABLE',
       });
       return status;
@@ -3139,6 +3164,27 @@ function replayOnboarding() {
   onboardingSetupOpen = true;
   void showSettings('onboarding', true);
   return status;
+}
+
+async function chooseComputerDirectory() {
+  if (process.platform !== 'win32' || lifecycle.busy || quitting || !status.runtime.needsStorage)
+    throw new Error('This setup action is unavailable.');
+  const chosen = await dialog.showOpenDialog(setupWindow, {
+    title: 'Choose a folder for Nod’s private computer',
+    buttonLabel: 'Use this folder',
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  if (chosen.canceled || !chosen.filePaths[0] || quitting) return status;
+  const directory = resolve(chosen.filePaths[0]);
+  const profile = resolve(profileRoot).toLowerCase();
+  if (
+    [profile, `${profile}\\`, `${profile}/`].some((path, index) =>
+      index ? directory.toLowerCase().startsWith(path) : directory.toLowerCase() === path,
+    )
+  )
+    throw new Error('Choose a folder outside Nod’s own data.');
+  await settings.save({ computerDirectory: directory });
+  return prepare({ retry: true });
 }
 
 async function importRuntime() {
@@ -3692,6 +3738,10 @@ else {
           needsWsl: false,
         });
         return status;
+      });
+      ipcMain.handle('nod:runtime:choose-folder', (event) => {
+        allowSetup(event);
+        return chooseComputerDirectory();
       });
       ipcMain.handle('nod:chat-read:get', (event, ownerId, threadId) => {
         if (!isEngine(event)) throw new Error('This action is unavailable.');

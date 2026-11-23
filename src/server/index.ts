@@ -25,8 +25,16 @@ const runtimeReady =
         parent.on('message', ready);
       })
     : undefined;
+const starting = (step: string) => {
+  if (desktopMode)
+    (
+      process as NodeJS.Process & { parentPort?: { postMessage(message: unknown): void } }
+    ).parentPort?.postMessage({ type: 'nod-starting', step });
+};
+starting('loaded');
 const { app } = await createApplication(createDefaultAdapters(process.env), {
   runtimeReady,
+  starting,
 });
 closeApplication = () => app.close();
 if (!desktopMode && process.env.NODE_ENV !== 'production') {
@@ -99,6 +107,7 @@ if (desktopMode) {
     if ((event.data as { type?: string })?.type === 'nod-shutdown') void shutdown();
   });
 }
+starting('listening');
 await app.listen({
   port,
   host,
