@@ -321,7 +321,10 @@ export function createPiMemoryCurator(options: {
         throw Object.assign(
           new Error(`${label} Task: ${task}. Model: ${model.provider}/${model.id}.${detail}`),
           status
-            ? { providerStatus: Number(status), retryable: isRetryableAssistantError(reply) }
+            ? {
+                providerStatus: Number(status),
+                providerRetryable: isRetryableAssistantError(reply),
+              }
             : {},
         );
       }

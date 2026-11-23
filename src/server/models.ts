@@ -482,7 +482,7 @@ export function createModelService(options: {
       .catch((error: unknown) => {
         if (
           pendingCheck === check &&
-          !(Object(error).providerStatus === 429 && Object(error).retryable)
+          !(Object(error).providerStatus === 429 && Object(error).providerRetryable)
         )
           checkIssue = {
             reason: createTextRedactor([...secrets])(

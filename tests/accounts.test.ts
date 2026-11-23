@@ -3810,7 +3810,7 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
       checks.at(-1)!.reject(
         Object.assign(new Error('HTTP 429: Synthetic model is at capacity.'), {
           providerStatus: 429,
-          retryable: true,
+          providerRetryable: true,
         }),
       );
       await new Promise((resolve) => setImmediate(resolve));
@@ -3821,7 +3821,7 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
       checks.at(-1)!.reject(
         Object.assign(new Error('HTTP 429: Synthetic insufficient_quota.'), {
           providerStatus: 429,
-          retryable: false,
+          providerRetryable: false,
         }),
       );
       await new Promise((resolve) => setImmediate(resolve));
@@ -4471,7 +4471,7 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
       );
     await assert.rejects(
       curator.curate({ task: 'check', instructions: 'Return only {"ok":true}.', input: {} }),
-      { providerStatus: 429, retryable: true },
+      { providerStatus: 429, providerRetryable: true },
     );
     assert.equal(calls, 10);
 
