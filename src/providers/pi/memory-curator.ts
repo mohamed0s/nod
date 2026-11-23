@@ -114,13 +114,20 @@ function failure(
   const status = [...(reply.errorMessage ?? '').matchAll(/\(HTTP (\d{3})\)/g)].at(-1)?.[1];
   const current = `${model.provider}/${model.id}`;
   const message = `${label} Task: ${task}. Model: ${[...tried, current].join('; then ')}.${detail}`;
+  const retryable = { retryable: isRetryableAssistantError(reply) };
   if (unavailable)
-    return new ModelUnavailableError(
-      message,
-      [...tried, `${current} (${reply.errorMessage?.trim().slice(0, 150)})`],
-      status ? Number(status) : undefined,
+    return Object.assign(
+      new ModelUnavailableError(
+        message,
+        [...tried, `${current} (${reply.errorMessage?.trim().slice(0, 150)})`],
+        status ? Number(status) : undefined,
+      ),
+      retryable,
     );
-  return Object.assign(new Error(message), status ? { providerStatus: Number(status) } : {});
+  return Object.assign(
+    new Error(message),
+    status ? { providerStatus: Number(status), ...retryable } : {},
+  );
 }
 
 export function createPiMemoryCurator(options: {

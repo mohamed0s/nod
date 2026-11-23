@@ -510,7 +510,10 @@ export function createModelService(options: {
     const port = saved?.type === 'endpoint' ? new URL(saved.url).port : undefined;
     const check = selectionCheck()
       .catch((error: unknown) => {
-        if (pendingCheck === check)
+        if (
+          pendingCheck === check &&
+          !(Object(error).providerStatus === 429 && Object(error).retryable)
+        )
           checkIssue = {
             reason: createTextRedactor([...secrets])(
               modelFailureReason(error instanceof Error ? error.message : String(error)),
