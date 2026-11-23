@@ -14,6 +14,7 @@ import {
 } from '../ports/agent.ts';
 import {
   apiKeyConnectionProviders,
+  lightestEffort,
   modelProviderInfo,
   modelProviderNames,
   modelProviders,
@@ -262,6 +263,7 @@ export interface ApplicationAdapters {
   keepAwake?: KeepAwake;
   localFilesHome?: string;
   memoryCurator?: MemoryCurator;
+  recallCurator?: MemoryCurator;
   classificationCurator?: MemoryCurator;
   imageCurator?: MemoryCurator;
   onboardingCurator?: MemoryCurator;
@@ -406,7 +408,7 @@ export function createDefaultAdapters(
     get provider() {
       return models.current.provider;
     },
-    resolve: () => models.candidates('memory'),
+    resolve: () => models.resolve(true),
     configured: () => models.configured,
     traces,
   });
@@ -414,7 +416,21 @@ export function createDefaultAdapters(
     get provider() {
       return models.current.provider;
     },
-    resolve: () => models.candidates('lightest'),
+    resolve: async () => {
+      const access = await models.resolve();
+      return {
+        ...access,
+        effort: lightestEffort(access.definition.choice.efforts),
+        ...(access.textModel
+          ? {
+              textModel: {
+                ...access.textModel,
+                effort: lightestEffort(access.textModel.definition.choice.efforts),
+              },
+            }
+          : {}),
+      };
+    },
     configured: () => models.configured,
     traces,
   });
@@ -498,7 +514,7 @@ export function createDefaultAdapters(
     },
     models,
     agent: createPiAgent({
-      resolve: (choice) => models.candidates('work', choice),
+      resolve: (choice) => models.candidates(choice),
       provider,
       model,
       sessionRoot: join(dataRoot, 'sessions'),
@@ -605,18 +621,26 @@ export function createDefaultAdapters(
     integrationBrowser,
     keyStore,
     memoryCurator: modelCurator,
+    recallCurator: createPiMemoryCurator({
+      get provider() {
+        return models.current.provider;
+      },
+      resolve: () => models.candidates(undefined, true),
+      configured: () => models.configured,
+      traces,
+    }),
     trustCurator: createPiMemoryCurator({
       get provider() {
         return models.current.provider;
       },
-      resolve: () => models.candidates('small'),
+      resolve: () => models.resolveClassification(true),
       configured: () => models.hasClassificationModel(true),
     }),
     classificationCurator: createPiMemoryCurator({
       get provider() {
         return models.current.provider;
       },
-      resolve: () => models.candidates('light'),
+      resolve: () => models.resolveClassification(),
       configured: () => models.hasClassificationModel(),
     }),
     imageCurator: createPiMemoryCurator({
@@ -624,7 +648,7 @@ export function createDefaultAdapters(
         return models.current.provider;
       },
       configured: () => models.hasImageModel(),
-      resolve: () => models.candidates('image'),
+      resolve: () => models.resolveImage(),
       traces,
     }),
     onboardingCurator: selectedCurator,
@@ -673,11 +697,6 @@ export function createDefaultAdapters(
       return models.current;
     },
   };
-}
-
-function pinnedReviewers(curator: MemoryCurator, review: (model: MemoryCurator) => ModelReview) {
-  return async () =>
-    curator.configured ? (await curator.pinned?.().catch(() => undefined))?.map(review) : undefined;
 }
 
 function alternativeModel(models: ApplicationAdapters['models']) {
@@ -915,32 +934,22 @@ async function initializeApplication(
     : curator;
   void adapters.models?.setSelectionCheck(() =>
     onboardingCurator.curate(
-      {
-        task: 'check',
-        instructions: 'Return only {"ok":true}.',
-        input: {},
-        automatic: false,
-        fallback: false,
-      },
+      { task: 'check', instructions: 'Return only {"ok":true}.', input: {}, automatic: false },
       AbortSignal.timeout(30_000),
     ),
   );
   const decisions = adapters.decisions && ledger.decisions(adapters.decisions);
-  const reviewWith =
-    (model: MemoryCurator): ModelReview =>
-    async (instructions, input, signal, question, responseSchema) => {
-      if (question) {
-        const result = await decisions?.check({ instructions, input, question }, signal);
-        if (result !== undefined) return result;
-        const values = question.choices.map(({ value }) => value);
-        instructions += `\nReply with only JSON with one property, ${JSON.stringify(question.name)}. Its value must be one of: ${values.map((value) => JSON.stringify(value)).join(', ')}.`;
-      }
-      return model.configured
-        ? model.curate({ task: 'review', instructions, input, responseSchema }, signal)
-        : undefined;
-    };
-  const review = reviewWith(onboardingCurator);
-  const reviewers = pinnedReviewers(onboardingCurator, reviewWith);
+  const review: ModelReview = async (instructions, input, signal, question, responseSchema) => {
+    if (question) {
+      const result = await decisions?.check({ instructions, input, question }, signal);
+      if (result !== undefined) return result;
+      const values = question.choices.map(({ value }) => value);
+      instructions += `\nReply with only JSON with one property, ${JSON.stringify(question.name)}. Its value must be one of: ${values.map((value) => JSON.stringify(value)).join(', ')}.`;
+    }
+    return onboardingCurator.configured
+      ? onboardingCurator.curate({ task: 'review', instructions, input, responseSchema }, signal)
+      : undefined;
+  };
   const mailCheck = createMailCheck({ curator, decisions });
   const skillLibrary = createSkillLibrary(
     [
@@ -1075,7 +1084,12 @@ async function initializeApplication(
           }
         : undefined,
   });
-  const memoryRecall = createMemoryRecall({ pool, ownerId, memory, curator });
+  const memoryRecall = createMemoryRecall({
+    pool,
+    ownerId,
+    memory,
+    curator: adapters.recallCurator ? ledger.curator(adapters.recallCurator) : curator,
+  });
   const writingStyle = createWritingStyleLearning({ memory, curator });
   let channels: Awaited<ReturnType<typeof createChannels>> | undefined;
   const communication = createCommunication({
@@ -1084,7 +1098,6 @@ async function initializeApplication(
     review,
     canDeliverLiteral: (channel, text, literal) =>
       channels?.canDeliverLiteral(channel, text, literal) ?? false,
-    reviewers,
     preferences: async () =>
       (await memory.load()).entries
         .filter(
@@ -2274,9 +2287,10 @@ async function initializeApplication(
         : adapters.classificationCurator
           ? ledger.curator(adapters.classificationCurator)
           : curator;
-  const trustReview =
-    (model: MemoryCurator): ModelReview =>
-    async (instructions, input, signal, question) => {
+  const trust = createTrust({
+    pool,
+    ownerId,
+    review: async (instructions, input, signal, question) => {
       if (question) {
         const values = question.choices.map(({ value }) => JSON.stringify(value)).join(', ');
         instructions +=
@@ -2284,15 +2298,10 @@ async function initializeApplication(
             ? `\nReply with only JSON containing exactly two properties: ${JSON.stringify(question.name)} set to one of ${values}, and "probability" set to a number from 0 to 1 expressing confidence in that label.`
             : `\nReply with only JSON with one property, ${JSON.stringify(question.name)}. Its value must be one of: ${values}.`;
       }
-      return model.configured
-        ? model.curate({ task: 'review', instructions, input }, signal)
+      return trustCurator.configured
+        ? trustCurator.curate({ task: 'review', instructions, input }, signal)
         : undefined;
-    };
-  const trust = createTrust({
-    pool,
-    ownerId,
-    review: trustReview(trustCurator),
-    reviewers: pinnedReviewers(trustCurator, trustReview),
+    },
     ...(adapters.trustModel === 'decision' && adapters.trustDecisions
       ? { decisions: ledger.decisions(adapters.trustDecisions) }
       : {}),

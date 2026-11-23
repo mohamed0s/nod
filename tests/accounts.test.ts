@@ -4601,8 +4601,6 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
       false,
     );
     await assert.rejects(curator.curate(request), /Automatic requests to this model are paused/);
-    const { ModelUnavailableError } = await import('../src/ports/models.ts');
-    await assert.rejects(curator.curate(request), ModelUnavailableError);
     assert.equal(calls, 2);
     const ledger = createLedger({
       pool: { query: async () => ({ rows: [] }) } as never,
@@ -5903,7 +5901,6 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
     const ownerId = 'fixture-backup-owner';
     const owner = await f.create(ownerId, backend);
     const local = await owner.addEndpoint(`${address}/v1`);
-    await owner.addEndpoint(`${address}/second/v1`);
     await owner.addKey('openai', 'fixture-backup-openai-key');
     await owner.addKey('openai', 'fixture-backup-openai-key', { region: 'eu' });
     const openai = owner.view().connections.filter((row) => row.provider === 'openai');
@@ -5924,23 +5921,47 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
       { connectionId: global.id, modelId: 'gpt-6.1-sol', effort: 'high' },
     ]);
     assert.deepEqual(
-      (await restarted.candidates('work')).map((access) => access.definition.choice.id),
+      (await restarted.candidates()).map((access) => access.definition.choice.id),
       ['fixture-local', 'gpt-6-luna', 'gpt-6.1-sol'],
     );
+    const { createHash } = await import('node:crypto');
+    const [selected] = await restarted.candidates();
+    const credentialTag = createHash('sha256')
+      .update(JSON.stringify(await selected!.read()))
+      .digest('hex');
+    const failure = { credentialTag, reason: 'Synthetic key rejected.', failures: 1 };
+    const pause = (status: string) =>
+      f.database.query('UPDATE model_connections SET status=$2, request_failures=$3 WHERE id=$1', [
+        local,
+        status,
+        JSON.stringify({ 'fixture-local': { ...failure, retryAt: Date.now() + 60_000 } }),
+      ]);
+    const schedule = { kind: 'schedule' as const };
+    await pause('reconnect');
+    const broken = await f.create(ownerId, backend);
+    assert.equal(broken.paused(schedule), true);
+    await assert.rejects(broken.candidates(), /OpenAI-compatible connection/);
+    await pause('connected');
+    assert.equal((await f.create(ownerId, backend)).paused(schedule), false);
+    await f.database.query("UPDATE model_connections SET request_failures='{}' WHERE id=$1", [
+      local,
+    ]);
 
     await restarted.select({ connectionId: global.id, modelId: 'gpt-6.1-sol', effort: 'high' });
     await restarted.setBackups([
+      { connectionId: global.id, modelId: 'gpt-6.1-sol', effort: 'high' },
       { connectionId: eu.id, modelId: 'gpt-6.1-sol', effort: 'high' },
       { connectionId: local, modelId: 'fixture-local', effort: 'off' },
     ]);
     assert.deepEqual(
-      (await restarted.candidates('small')).map((access) => [
-        access.definition.spec.baseUrl,
+      (await restarted.candidates()).map((access) => [
+        access.connectionId,
         access.definition.choice.id,
       ]),
       [
-        ['https://api.openai.com/v1', 'gpt-6-luna'],
-        ['https://eu.api.openai.com/v1', 'gpt-6-luna'],
+        [global.id, 'gpt-6.1-sol'],
+        [eu.id, 'gpt-6.1-sol'],
+        [local, 'fixture-local'],
       ],
     );
     await assert.rejects(
@@ -8567,7 +8588,7 @@ test('startup reports require review and keep exact redacted content through sen
       phase: 'error',
       error: `Synthetic failure for ${privateName} ${secret}`,
       details: 'HTTP 503',
-      failure: { class: 'Error', httpStatus: 503 },
+      failure: { class: 'Error', httpStatus: 503, wslCode: 'ERROR_FILE_EXISTS' },
     },
     delivery: {
       configured: true,
@@ -8604,6 +8625,7 @@ test('startup reports require review and keep exact redacted content through sen
   ])
     assert.ok(!content.includes(value), value);
   assert.match(content, /503/);
+  assert.equal(JSON.parse(content).startup.failure.wslCode, 'ERROR_FILE_EXISTS');
   assert.ok(!content.includes('2026-11-19T'));
   assert.equal(typeof JSON.parse(content).startupLog.entries[0].ageMs, 'number');
   options.startupLog.entries = [
@@ -9726,18 +9748,21 @@ test('startup facts keep only structured bounded codes and do not call getters o
       code: 'NOD_WSL_REQUIRED',
       step: 'import',
       exitCode: 4294967295,
+      wslCode: 'ERROR_FILE_EXISTS',
     }),
     {
       detailsOmitted: true,
       exitCode: 4294967295,
       code: 'NOD_WSL_REQUIRED',
       step: 'import',
+      wslCode: 'ERROR_FILE_EXISTS',
     },
   );
   assert.deepEqual(
     startupErrorFacts({
       code: 'NOD_SYNTHETIC_PRIVATE_CODE',
       step: 'C:\\Users\\Synthetic Owner',
+      wslCode: 'SYNTHETIC_PRIVATE_WSL_CODE',
     }),
     { detailsOmitted: true },
   );
@@ -9748,6 +9773,7 @@ test('startup facts keep only structured bounded codes and do not call getters o
         'name',
         'code',
         'step',
+        'wslCode',
         'syscall',
         'status',
         'phase',

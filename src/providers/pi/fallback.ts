@@ -1,4 +1,3 @@
-import { setTimeout as sleep } from 'node:timers/promises';
 import {
   clampThinkingLevel,
   createAssistantMessageEventStream,
@@ -6,18 +5,13 @@ import {
   isRetryableAssistantError,
   type Api,
   type AssistantMessage,
+  type AssistantMessageEvent,
   type Context,
   type Model,
   type SimpleStreamOptions,
 } from '@earendil-works/pi-ai';
 import { estimateTokens } from '@earendil-works/pi-coding-agent';
-import { ModelUnavailableError, type ModelAccess } from '../../ports/models.ts';
-import {
-  fallbackWait,
-  modelUnavailable,
-  timedOut,
-  type ModelUnavailable,
-} from '../../shared/model-fallback.ts';
+import type { ModelAccess } from '../../ports/models.ts';
 import type { createPiModelRuntime } from './models.ts';
 import { hasNativeAudio, readsNativeAudio } from './audio.ts';
 
@@ -28,7 +22,23 @@ export function modelKey(access: ModelAccess) {
   return `${access.connectionId ?? access.provider}/${access.method}/${access.definition.choice.id}`;
 }
 
-function failedRequest(model: Model<Api>, error: unknown, aborted: boolean): AssistantMessage {
+function fits(choice: ModelAccess['definition']['choice'], context: Context) {
+  const images = context.messages.some(
+    (message) =>
+      Array.isArray(message.content) && message.content.some((part) => part.type === 'image'),
+  );
+  if (images && !choice.images) return false;
+  const tokens =
+    context.messages.reduce((total, message) => total + estimateTokens(message as never), 0) +
+    (context.systemPrompt?.length ?? 0) / 4;
+  return !choice.contextWindow || tokens < choice.contextWindow * 0.9;
+}
+
+function failedRequest(
+  model: Pick<Model<Api>, 'api' | 'provider' | 'id'>,
+  error: unknown,
+  aborted: boolean,
+): AssistantMessage {
   return {
     role: 'assistant',
     content: [],
@@ -49,16 +59,10 @@ function failedRequest(model: Model<Api>, error: unknown, aborted: boolean): Ass
   };
 }
 
-function fits(model: Model<Api>, context: Context) {
-  const images = context.messages.some(
-    (message) =>
-      Array.isArray(message.content) && message.content.some((part) => part.type === 'image'),
+export function failedBeforeAnswer(message: AssistantMessage, phase: string | undefined) {
+  return (
+    message.stopReason === 'error' && (isRetryableAssistantError(message) || phase !== 'stream')
   );
-  if (images && !model.input.includes('image')) return false;
-  const tokens =
-    context.messages.reduce((total, message) => total + estimateTokens(message as never), 0) +
-    (context.systemPrompt?.length ?? 0) / 4;
-  return !model.contextWindow || tokens < model.contextWindow * 0.9;
 }
 
 export function createTurnFallback(options: {
@@ -67,120 +71,63 @@ export function createTurnFallback(options: {
   start: number;
   automatic: boolean;
   connect(access: ModelAccess): Promise<Connection>;
-  floor(): number;
+  retrying(): boolean;
+  shared(): number;
   switched(at: number): void;
-  served(at: number, reason: ModelUnavailable, from: number): void;
+  moved(from: number, to: number): void;
+  failed(message: AssistantMessage): void;
 }) {
   const candidates: Array<{ access: ModelAccess; connection?: Promise<Connection> }> = [
     { access: options.primary.access, connection: Promise.resolve(options.primary.connection) },
     ...options.backups.map((access) => ({ access })),
   ];
   const ready = new Map<number, Connection>([[0, options.primary.connection]]);
-  const window = options.primary.connection.model.contextWindow;
-  const tried: Array<{ label: string; reason: string }> = [];
+  const ranOn = new WeakMap<object, Model<Api>>();
+  const tried: string[] = [];
   let at = Math.min(options.start, candidates.length - 1);
-  let failures = 0;
-  const handled = new WeakSet<AssistantMessage>();
-  const served = new WeakMap<object, Model<Api>>();
-  const unsent = new WeakSet<AssistantMessage>();
-  let wait = 0;
-  let exhausted = false;
-  let failed = at;
-  let reason: ModelUnavailable | undefined = at > 0 ? 'quota' : undefined;
-  let from = 0;
-  let announced = 0;
-
-  const unavailable = (message: AssistantMessage) =>
-    message.stopReason === 'error' && !isContextOverflow(message, window)
-      ? modelUnavailable(message.errorMessage, isRetryableAssistantError(message))
-      : undefined;
+  let serving = 0;
 
   function move(next: number) {
     at = next;
-    failures = 0;
-    wait = 0;
     options.switched(at);
   }
 
-  function settle(index: number, message: AssistantMessage) {
-    if (message.stopReason === 'aborted') return;
-    if (message.stopReason !== 'error') {
-      failures = wait = 0;
-      tried.length = 0;
-      if (index > 0 && index !== announced) {
-        announced = index;
-        options.served(index, reason ?? 'busy', from);
-      }
-      return;
-    }
-    const entry = {
-      label: `${message.provider} / ${message.model}`,
-      reason: message.errorMessage?.trim() || 'The provider gave no reason.',
-    };
-    if (tried.at(-1)?.label === entry.label) tried[tried.length - 1] = entry;
-    else tried.push(entry);
-    failed = index;
-    const kind = unavailable(message);
-    if (!kind || index !== at) return;
-    reason = kind;
-    from = index;
-    failures++;
-    if (kind === 'busy' && failures < 2 && !timedOut(message.errorMessage)) {
-      wait = fallbackWait(ready.get(index)?.retryAfter(message), 15_000, 4000);
-      return;
-    }
-    if (at + 1 < candidates.length) move(at + 1);
-    else exhausted = true;
-  }
-
   async function open(
+    index: number,
     target: Model<Api>,
     context: Context,
     streamOptions: SimpleStreamOptions | undefined,
-    use: (index: number, model: Model<Api>) => void,
   ) {
-    if (options.floor() > at) move(Math.min(options.floor(), candidates.length - 1));
-    for (;;) {
-      const index = at;
-      if (index === 0) {
-        use(0, target);
-        return options.primary.stream(target, context, streamOptions);
-      }
-      const candidate = candidates[index]!;
-      try {
-        candidate.connection ??= options.connect(candidate.access);
-        const connection = await candidate.connection;
-        ready.set(index, connection);
-        use(index, connection.model);
-        if (!fits(connection.model, context))
-          throw new ModelUnavailableError(
-            `${candidate.access.definition.choice.name} can't take this conversation, so Nod didn't try it.`,
-            [candidate.access.definition.choice.id],
-          );
-        if (options.automatic) await candidate.access.prepareRequest?.(connection.model.id, true);
-        const { apiKey: _, headers: __, env: ___, ...rest } = streamOptions ?? {};
-        const level = clampThinkingLevel(connection.model, candidate.access.effort);
-        return connection.runtime.streamSimple(connection.model, context, {
-          ...rest,
-          ...(connection.model.api === target.api
-            ? {}
-            : { onPayload: undefined, cacheRetention: undefined }),
-          reasoning: level === 'off' ? undefined : level,
-        } as SimpleStreamOptions);
-      } catch (error) {
-        streamOptions?.signal?.throwIfAborted();
-        tried.push({
-          label: `${candidate.access.provider} / ${candidate.access.definition.choice.id}`,
-          reason: error instanceof Error ? error.message : String(error),
-        });
-        if (index + 1 >= candidates.length || !(error instanceof ModelUnavailableError)) {
-          exhausted = true;
-          throw error;
-        }
-        move(index + 1);
-      }
-    }
+    if (index === 0)
+      return {
+        connection: options.primary.connection,
+        model: target,
+        upstream: options.primary.stream(target, context, streamOptions),
+      };
+    const candidate = candidates[index]!;
+    const { choice } = candidate.access.definition;
+    if (!fits(choice, context))
+      throw new Error(`${choice.name} can't take this conversation, so Nod didn't try it.`);
+    candidate.connection ??= options.connect(candidate.access);
+    const connection = await candidate.connection;
+    ready.set(index, connection);
+    if (options.automatic) await candidate.access.prepareRequest?.(connection.model.id, true);
+    const { apiKey: _, headers: __, env: ___, ...rest } = streamOptions ?? {};
+    const level = clampThinkingLevel(connection.model, candidate.access.effort);
+    return {
+      connection,
+      model: connection.model,
+      upstream: connection.runtime.streamSimple(connection.model, context, {
+        ...rest,
+        reasoning: level === 'off' ? undefined : level,
+      } as SimpleStreamOptions),
+    };
   }
+
+  const movesOn = (message: AssistantMessage, index: number, connection: Connection) =>
+    failedBeforeAnswer(message, connection.requestFacts?.(message)?.requestPhase) &&
+    (index > 0 || !isContextOverflow(message, connection.model.contextWindow ?? 0)) &&
+    (!isRetryableAssistantError(message) || !options.retrying());
 
   return {
     stream(target: Model<Api>, context: Context, streamOptions?: SimpleStreamOptions) {
@@ -191,60 +138,85 @@ export function createTurnFallback(options: {
       )
         return options.primary.stream(target, context, streamOptions);
       const out = createAssistantMessageEventStream();
-      let index = at;
-      let model = target;
-      let settled = false;
-      const finish = (message: AssistantMessage) => {
-        served.set(message, model);
-        if (streamOptions?.signal?.aborted) return;
-        handled.add(message);
-        if (settled) return;
-        settled = true;
-        settle(index, message);
-      };
+      const stopped = () => Boolean(streamOptions?.signal?.aborted);
       void (async () => {
-        let result: AssistantMessage;
-        let sent = false;
-        try {
-          if (wait) {
-            const delay = wait;
-            wait = 0;
-            await sleep(delay, undefined, { signal: streamOptions?.signal });
+        at = Math.max(at, Math.min(options.shared(), candidates.length - 1));
+        for (;;) {
+          const index = at;
+          const { access } = candidates[index]!;
+          const last = index + 1 >= candidates.length;
+          let sent = false;
+          let reason: string;
+          try {
+            const opened = await open(index, target, context, streamOptions);
+            const { model } = opened;
+            const held: AssistantMessageEvent[] = [];
+            let failure: AssistantMessage | undefined;
+            for await (const event of opened.upstream) {
+              if (!sent && event.type === 'start') {
+                held.push(event);
+                continue;
+              }
+              if (
+                !sent &&
+                !last &&
+                event.type === 'error' &&
+                !stopped() &&
+                movesOn(event.error, index, opened.connection)
+              ) {
+                failure = event.error;
+                break;
+              }
+              if (!sent && event.type !== 'error' && index !== serving) {
+                options.moved(serving, index);
+                serving = index;
+              }
+              if (!sent) for (const item of held.splice(0)) out.push(item);
+              sent = true;
+              out.push(event);
+            }
+            if (!failure) {
+              const result = await opened.upstream.result();
+              ranOn.set(result, model);
+              if (result.stopReason !== 'error' && result.stopReason !== 'aborted')
+                tried.length = 0;
+              out.end(result);
+              return;
+            }
+            ranOn.set(failure, model);
+            options.failed(failure);
+            reason = failure.errorMessage?.trim() || 'The provider gave no reason.';
+          } catch (error) {
+            if (stopped() || last || sent) {
+              const result = failedRequest(
+                index
+                  ? { api: target.api, provider: access.provider, id: access.definition.choice.id }
+                  : target,
+                error,
+                stopped(),
+              );
+              out.push({
+                type: 'error',
+                reason: result.stopReason === 'aborted' ? 'aborted' : 'error',
+                error: result,
+              });
+              out.end(result);
+              return;
+            }
+            reason = error instanceof Error ? error.message : String(error);
           }
-          const upstream = await open(target, context, streamOptions, (next, chosen) => {
-            index = next;
-            model = chosen;
-          });
-          sent = true;
-          for await (const event of upstream) {
-            if (event.type === 'done') finish(event.message);
-            if (event.type === 'error') finish(event.error);
-            out.push(event);
-          }
-          result = await upstream.result();
-          finish(result);
-        } catch (error) {
-          result = failedRequest(model, error, Boolean(streamOptions?.signal?.aborted));
-          if (!sent) unsent.add(result);
-          finish(result);
-          out.push({
-            type: 'error',
-            reason: result.stopReason as 'error' | 'aborted',
-            error: result,
-          });
+          tried.push(`${access.provider} / ${access.definition.choice.id}: ${reason}`);
+          move(index + 1);
         }
-        out.end(result);
       })();
       return out;
     },
-    sent: (message: AssistantMessage) => !unsent.has(message),
-    retries(message: AssistantMessage) {
-      return handled.has(message) && unavailable(message) ? !exhausted : undefined;
-    },
     describe(message: AssistantMessage) {
-      if (message.stopReason !== 'error' || new Set(tried.map(({ label }) => label)).size < 2)
-        return undefined;
-      return tried.map(({ label, reason }) => `${label}: ${reason}`).join('; then ');
+      if (message.stopReason !== 'error' || !tried.length) return undefined;
+      return [
+        ...tried,
+        `${message.provider} / ${message.model}: ${message.errorMessage?.trim() || 'The provider gave no reason.'}`,
+      ].join('; then ');
     },
     method(provider: string, model: string) {
       const index = [at, ...candidates.keys()].find((index) => {
@@ -257,20 +229,18 @@ export function createTurnFallback(options: {
       return candidates[index ?? at]!.access.method;
     },
     model(usage: { provider: string; model: string }) {
-      const exact = served.get(usage);
+      const exact = ranOn.get(usage);
       if (exact) return exact;
-      for (const index of new Set([at, ...ready.keys()])) {
-        const current = ready.get(index)?.model;
-        if (current?.provider === usage.provider && current.id === usage.model) return current;
-      }
-      for (const connection of ready.values()) {
-        const listed = connection.runtime.getModel(usage.provider, usage.model);
-        if (listed) return listed;
+      for (const connection of [ready.get(at), ...ready.values()]) {
+        const found =
+          connection?.model.provider === usage.provider && connection.model.id === usage.model
+            ? connection.model
+            : connection?.runtime.getModel(usage.provider, usage.model);
+        if (found) return found;
       }
       return undefined;
     },
-    failed: () => candidates[failed]!.access.definition.choice.name,
+    current: () => candidates[at]!.access.definition.choice.name,
     switched: () => at > 0,
-    size: candidates.length,
   };
 }

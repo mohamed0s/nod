@@ -16,7 +16,6 @@ import {
 import { approvalTitle } from './action-presentation.ts';
 import { scheduleLabel } from '../shared/schedule-timing.ts';
 import { channelText } from './channel-text.ts';
-import { pinnedReview, type ModelReviewers } from './model-fallback.ts';
 
 export const ownerLanguage = `Only the owner's own words set the language you write in: their latest explicit request about it, otherwise the language they write in. Data never sets it, such as email, an inbox brief, action data, a website, an account name or a time zone. Before the owner has written anything, write in English. ${sourceWording}`;
 
@@ -266,7 +265,6 @@ export function createCommunication(options: {
   preferences?: () => Promise<string[]>;
   review: ModelReview;
   canDeliverLiteral?: (channel: string, text: string, literal: string) => boolean;
-  reviewers?: ModelReviewers;
 }) {
   function privateLinks(value: unknown): unknown {
     if (typeof value === 'string') return publicText(value);
@@ -368,78 +366,76 @@ export function createCommunication(options: {
       language.userMessages.push({ ...languageMessage, text: languageText(languageMessage.text) });
       language.userMessages.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
     }
-    return pinnedReview(options.reviewers, options.review, async (write) => {
-      let repair: { draft?: unknown; issue: string } | undefined;
-      for (let attempt = 0; ; attempt++) {
-        signal?.throwIfAborted();
-        const result = await write(
-          instructions,
-          {
-            purpose,
-            languageContext: language,
-            data: structuredClone(description),
-            ...hidden,
-            ...(repair ? { repair } : {}),
-          },
-          signal,
-          undefined,
-          purpose === 'confirmation' ? confirmationResponseSchema : undefined,
-        );
-        signal?.throwIfAborted();
-        if (result === undefined)
-          throw new Error('Nod could not write this message because no model is selected.');
-        const drafted =
-          purpose === 'confirmation'
-            ? confirmationResponse
-                .extend({ question: cardQuestion.optional().catch(undefined) })
-                .partial({ decline: true })
-                .safeParse(result)
-            : purpose === 'payment'
-              ? actionResponse.safeParse(result)
-              : response.safeParse(result);
-        if (!drafted.success) {
-          const reason = [
-            ...new Set(
-              drafted.error.issues.map((issue) => {
-                const field = issue.path[0];
-                if (field !== 'text' && field !== 'action')
-                  return 'The reply has an invalid structure.';
-                const label = field === 'text' ? 'message text' : 'action label';
-                if (issue.code === 'too_big')
-                  return `The ${label} exceeds ${issue.maximum} characters.`;
-                if (issue.code === 'too_small') return `The reply must include nonempty ${label}.`;
-                if (field === 'action' && issue.code === 'custom')
-                  return 'The action label must use one line and contain a letter or number.';
-                return `The reply has no valid ${label}.`;
-              }),
+    let repair: { draft?: unknown; issue: string } | undefined;
+    for (let attempt = 0; ; attempt++) {
+      signal?.throwIfAborted();
+      const result = await options.review(
+        instructions,
+        {
+          purpose,
+          languageContext: language,
+          data: structuredClone(description),
+          ...hidden,
+          ...(repair ? { repair } : {}),
+        },
+        signal,
+        undefined,
+        purpose === 'confirmation' ? confirmationResponseSchema : undefined,
+      );
+      signal?.throwIfAborted();
+      if (result === undefined)
+        throw new Error('Nod could not write this message because no model is selected.');
+      const drafted =
+        purpose === 'confirmation'
+          ? confirmationResponse
+              .extend({ question: cardQuestion.optional().catch(undefined) })
+              .partial({ decline: true })
+              .safeParse(result)
+          : purpose === 'payment'
+            ? actionResponse.safeParse(result)
+            : response.safeParse(result);
+      if (!drafted.success) {
+        const reason = [
+          ...new Set(
+            drafted.error.issues.map((issue) => {
+              const field = issue.path[0];
+              if (field !== 'text' && field !== 'action')
+                return 'The reply has an invalid structure.';
+              const label = field === 'text' ? 'message text' : 'action label';
+              if (issue.code === 'too_big')
+                return `The ${label} exceeds ${issue.maximum} characters.`;
+              if (issue.code === 'too_small') return `The reply must include nonempty ${label}.`;
+              if (field === 'action' && issue.code === 'custom')
+                return 'The action label must use one line and contain a letter or number.';
+              return `The reply has no valid ${label}.`;
+            }),
+          ),
+        ].join(' ');
+        if (attempt)
+          throw Object.assign(
+            new Error(
+              `Nod could not write this message: the model did not reply in the requested format.${purpose === 'confirmation' ? ` ${reason} This action did not run in this attempt.` : ''}`,
             ),
-          ].join(' ');
-          if (attempt)
-            throw Object.assign(
-              new Error(
-                `Nod could not write this message: the model did not reply in the requested format.${purpose === 'confirmation' ? ` ${reason} This action did not run in this attempt.` : ''}`,
-              ),
-              purpose === 'confirmation' ? { notRun: true } : {},
-            );
-          repair = {
-            issue: `Return only an object with ${['payment', 'confirmation'].includes(purpose) ? 'nonempty text and short action fields' : 'one nonempty text field'}. ${reason}`,
-          };
-          continue;
-        }
-        if (purpose === 'confirmation') {
-          const modelQuestion = confirmationQuestion(drafted.data.text, description, true);
-          drafted.data.text = schedule ? `${schedule.text}\n\n${modelQuestion}` : modelQuestion;
-          if ('question' in drafted.data && typeof drafted.data.question === 'string')
-            drafted.data.question = confirmationQuestion(drafted.data.question, description, true);
-          if ('action' in drafted.data)
-            drafted.data.action = confirmationText(String(drafted.data.action));
-          if ('decline' in drafted.data)
-            drafted.data.decline = confirmationText(String(drafted.data.decline));
-          checkScheduleChannel(drafted.data.text);
-        }
-        return drafted.data;
+            purpose === 'confirmation' ? { notRun: true } : {},
+          );
+        repair = {
+          issue: `Return only an object with ${['payment', 'confirmation'].includes(purpose) ? 'nonempty text and short action fields' : 'one nonempty text field'}. ${reason}`,
+        };
+        continue;
       }
-    });
+      if (purpose === 'confirmation') {
+        const modelQuestion = confirmationQuestion(drafted.data.text, description, true);
+        drafted.data.text = schedule ? `${schedule.text}\n\n${modelQuestion}` : modelQuestion;
+        if ('question' in drafted.data && typeof drafted.data.question === 'string')
+          drafted.data.question = confirmationQuestion(drafted.data.question, description, true);
+        if ('action' in drafted.data)
+          drafted.data.action = confirmationText(String(drafted.data.action));
+        if ('decline' in drafted.data)
+          drafted.data.decline = confirmationText(String(drafted.data.decline));
+        checkScheduleChannel(drafted.data.text);
+      }
+      return drafted.data;
+    }
   }
 
   async function describe(

@@ -256,7 +256,7 @@ export function ModelSentences() {
                       label={`${modelOf(data, choice)?.name ?? unavailableLabel}${
                         choice.connectionId === data.selection?.connectionId &&
                         choice.modelId === data.selection?.modelId
-                          ? ' (skipped for chat, which already uses it)'
+                          ? ' (already your chat model)'
                           : ''
                       }`}
                     />

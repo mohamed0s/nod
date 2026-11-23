@@ -1236,7 +1236,7 @@ export function createAgentRuntime(dependencies: {
           }
           if (event.type === 'fallback' && event.to !== fallbackNoted) {
             fallbackNoted = event.to;
-            const note = `${event.from} was ${event.reason}, so this used ${event.to}.`;
+            const note = `${event.from} failed, so this used ${event.to}.`;
             pendingReplies = pendingReplies.then(() =>
               context.emit('retry', note, { execution }).catch(() => {}),
             );

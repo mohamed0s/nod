@@ -1,8 +1,6 @@
-import { setTimeout as sleep } from 'node:timers/promises';
 import {
   InMemoryCredentialStore,
   getSupportedThinkingLevels,
-  isContextOverflow,
   isRetryableAssistantError,
   type Api,
   type AssistantMessage,
@@ -11,10 +9,10 @@ import {
 } from '@earendil-works/pi-ai';
 import { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { retryAssistantCall } from '@earendil-works/pi-ai/utils/retry';
-import { createPiModelRuntime, localModelSilenceMs } from './models.ts';
-import { ModelUnavailableError, type ModelAccess } from '../../ports/models.ts';
+import { createPiModelRuntime } from './models.ts';
+import { failedBeforeAnswer } from './fallback.ts';
+import type { ModelAccess } from '../../ports/models.ts';
 import { lightestEffort, modelPricingSignature } from '../../shared/models.ts';
-import { fallbackWait, modelUnavailable, timedOut } from '../../shared/model-fallback.ts';
 import type { MemoryCurator } from '../../ports/memory-curator.ts';
 import { agentModels, memoryModels } from '../../shared/model-defaults.ts';
 import { piUsageMetrics } from './usage.ts';
@@ -36,8 +34,6 @@ const untraced = new Set([
   'title',
   'check',
 ]);
-
-const checks = new Set(['review', 'access', 'classify', 'attention', 'check', 'activity']);
 
 const longCache = 55 * 60_000;
 const recentInstructions = new Map<string, number>();
@@ -85,55 +81,10 @@ function json(text: string) {
   return parse(text) ?? parse(/```(?:json)?\s*([\s\S]*)```/.exec(text)?.[1] ?? '');
 }
 
-function failure(
-  task: string,
-  reply: AssistantMessage,
-  model: Model<Api>,
-  tried: string[],
-  unavailable: boolean,
-  expired = false,
-) {
-  const label =
-    task === 'vision'
-      ? 'The image model is unavailable.'
-      : task === 'classify' || task === 'attention' || task === 'activity'
-        ? 'The classification model is unavailable.'
-        : task === 'review' || task === 'access'
-          ? 'The action review model is unavailable.'
-          : task === 'check'
-            ? 'The selected model is unavailable.'
-            : task === 'title'
-              ? 'The chat title model is unavailable.'
-              : 'The memory model is unavailable.';
-  const detail = expired
-    ? ' The request timed out.'
-    : reply.stopReason === 'error' && reply.errorMessage
-      ? ` The provider said: ${reply.errorMessage.trim().slice(0, 300)}`
-      : reply.stopReason === 'length'
-        ? ' The reply stopped at the token limit.'
-        : '';
-  const status = [...(reply.errorMessage ?? '').matchAll(/\(HTTP (\d{3})\)/g)].at(-1)?.[1];
-  const current = `${model.provider}/${model.id}`;
-  const message = `${label} Task: ${task}. Model: ${[...tried, current].join('; then ')}.${detail}`;
-  const retryable = { providerRetryable: isRetryableAssistantError(reply) };
-  if (unavailable)
-    return Object.assign(
-      new ModelUnavailableError(
-        message,
-        [...tried, `${current} (${reply.errorMessage?.trim().slice(0, 150)})`],
-        status ? Number(status) : undefined,
-      ),
-      retryable,
-    );
-  return Object.assign(
-    new Error(message),
-    status ? { providerStatus: Number(status), ...retryable } : {},
-  );
-}
-
 export function createPiMemoryCurator(options: {
   provider: string;
   resolve?: () => Promise<ModelAccess | ModelAccess[] | undefined>;
+  retry?: boolean;
   configured?: () => boolean;
   model?: string;
   lightest?: boolean;
@@ -141,21 +92,22 @@ export function createPiMemoryCurator(options: {
   runtime?: ModelRuntime;
   traces?: ModelTraces;
   estimateAnthropicRequestUsd?: (model: Model<Api>, body: RequestInit['body']) => number | null;
-  chained?: boolean;
 }): MemoryCurator {
   let loaded: ReturnType<typeof load> | undefined;
-  async function load(access: ModelAccess | undefined, automatic: boolean) {
-    if (access) {
+  async function load(automatic: boolean, resolved: ModelAccess | ModelAccess[] | undefined) {
+    const access = [resolved ?? []].flat()[0];
+    if (options.resolve && !access) throw new Error('The selected model is unavailable.');
+    if (access)
       await access.prepareRequest?.(
         access.textModel?.definition.choice.id ?? access.definition.choice.id,
         automatic,
       );
+    if (access)
       return {
         ...(await createPiModelRuntime(access, { automatic })),
         effort: access.effort,
         subscription: access.method === 'subscription',
       };
-    }
     const runtime =
       options.runtime ??
       (await ModelRuntime.create({
@@ -180,17 +132,9 @@ export function createPiMemoryCurator(options: {
       effort: options.lightest ? lightestEffort(getSupportedThinkingLevels(model)) : undefined,
       subscription: false,
       requestFacts: undefined,
-      retryAfter: undefined,
     };
   }
-  async function candidates() {
-    if (!options.resolve) return [undefined];
-    const resolved = await options.resolve();
-    const list = resolved === undefined ? [] : [resolved].flat();
-    if (!list.length) throw new Error('The selected model is unavailable.');
-    return list;
-  }
-  const curator: MemoryCurator = {
+  return {
     get id() {
       return options.provider;
     },
@@ -198,11 +142,30 @@ export function createPiMemoryCurator(options: {
       return options.configured?.() ?? Boolean(options.apiKey);
     },
     async curate(
-      { task, instructions, input, responseSchema, images, automatic = true, fallback },
+      { task, instructions, input, responseSchema, images, automatic = true },
       signal,
       report,
     ) {
       signal?.throwIfAborted();
+      const candidates = await options.resolve?.();
+      if (Array.isArray(candidates) && candidates.length > 1)
+        for (const [index, access] of candidates.entries()) {
+          const last = index === candidates.length - 1;
+          try {
+            return await createPiMemoryCurator({
+              ...options,
+              resolve: async () => access,
+              retry: last,
+            }).curate(
+              { task, instructions, input, responseSchema, images, automatic },
+              signal,
+              report,
+            );
+          } catch (error) {
+            if (last || signal?.aborted || (error as { movesOn?: boolean }).movesOn === false)
+              throw error;
+          }
+        }
       const traceTurnId = crypto.randomUUID();
       const bounded =
         task === 'classify' ||
@@ -212,238 +175,193 @@ export function createPiMemoryCurator(options: {
         task === 'title';
       const turnBound =
         signal !== undefined && ['review', 'access', 'skill', 'remember'].includes(task);
-      const listed = await candidates();
-      const chain = fallback === false ? listed.slice(0, 1) : listed;
-      const chained = options.chained === true || chain.length > 1;
-      const tried: string[] = [];
-      for (const [index, access] of chain.entries()) {
-        const last = index === chain.length - 1;
-        let connection: Awaited<ReturnType<typeof load>>;
-        try {
-          if (options.resolve) connection = await load(access, automatic);
-          else {
-            loaded ??= load(undefined, automatic).catch((error) => {
-              loaded = undefined;
-              throw error;
-            });
-            connection = await loaded;
-          }
-        } catch (error) {
-          if (last || !access || signal?.aborted || !(error instanceof ModelUnavailableError))
-            throw error;
-          tried.push(
-            `${access.provider}/${access.definition.choice.id} (${error.message.slice(0, 150)})`,
-          );
-          continue;
-        }
-        const { runtime, model, effort, subscription, requestFacts } = connection;
-        const sessionId = ['opencode', 'opencode-go'].includes(model.provider)
-          ? crypto.randomUUID()
-          : undefined;
-        let attempt = 0;
-        let expired = false;
-        const complete = async () => {
-          attempt++;
-          const deadline =
-            turnBound && (!chained || last)
-              ? undefined
-              : AbortSignal.timeout(bounded ? 10_000 : 45_000);
-          const context: Context = {
-            systemPrompt: instructions,
-            messages: [
-              {
-                role: 'user',
-                content:
-                  task === 'vision'
-                    ? [{ type: 'text', text: JSON.stringify(input) }, ...(images ?? [])]
-                    : JSON.stringify(input),
-                timestamp: Date.now(),
-              },
-            ],
-          };
-          const startedAt = new Date().toISOString();
-          const started = performance.now();
-          let reply: AssistantMessage | undefined;
-          const estimate = options.estimateAnthropicRequestUsd;
-          const dispatched: RequestInit['body'][] | undefined =
-            estimate &&
-            requestFacts &&
-            !subscription &&
-            task !== 'vision' &&
-            model.provider === 'anthropic' &&
-            model.api === 'anthropic-messages'
-              ? []
-              : undefined;
-          try {
-            reply = await runtime.completeSimple(model, context, {
-              ...(dispatched
-                ? {
-                    fetch: (url: string | URL | Request, init?: RequestInit) => {
-                      if (!init?.signal?.aborted) dispatched.push(init?.body);
-                      return fetch(url, init);
-                    },
-                  }
-                : {}),
-              ...(model.api === 'anthropic-messages'
-                ? {
-                    onPayload: uncachedInput,
-                    ...(keepInstructions(`${model.provider}:${model.id}:${instructions}`)
-                      ? { cacheRetention: 'long' as const }
-                      : {}),
-                  }
-                : {}),
-              ...(responseSchema
-                ? {
-                    onPayload: (payload: unknown, target: Model<Api>) => {
-                      if (target.api === 'anthropic-messages') return uncachedInput(payload);
-                      if (
-                        target.provider !== 'openai' ||
-                        target.api !== 'openai-responses' ||
-                        !/^gpt-(?:5|6)(?:[.-]|$)/.test(target.id)
-                      )
-                        return undefined;
-                      const body = payload as { text?: Record<string, unknown> };
-                      return {
-                        ...body,
-                        text: {
-                          ...body.text,
-                          format: {
-                            type: 'json_schema',
-                            name: 'response',
-                            strict: true,
-                            schema: responseSchema,
-                          },
-                        },
-                      };
-                    },
-                  }
-                : {}),
-              signal: deadline ? AbortSignal.any([deadline, ...(signal ? [signal] : [])]) : signal,
-              maxTokens: bounded ? 512 : task === 'ideas' ? 2048 : 8192,
-              ...(sessionId ? { sessionId } : {}),
-              ...(bounded ? { maxRetries: 0, timeoutMs: 10_000 } : {}),
-              ...(turnBound && model.provider === 'compatible'
-                ? { timeoutMs: localModelSilenceMs }
-                : {}),
-              reasoning: effort === 'off' ? undefined : effort,
-            });
-          } finally {
-            expired = chained && Boolean(deadline?.aborted) && !signal?.aborted;
-            const metrics = piUsageMetrics(reply?.usage);
-            const target = reply && (runtime.getModel(reply.provider, reply.model) ?? model);
-            const status: ProviderUsageEvent['status'] =
-              expired && bounded
-                ? 'failed'
-                : reply?.stopReason === 'aborted' || (!reply && signal?.aborted)
-                  ? 'cancelled'
-                  : !reply || reply.stopReason === 'error'
-                    ? 'failed'
-                    : 'succeeded';
-            let budgetEstimateUsd: number | null | undefined;
-            if (status === 'cancelled' && dispatched && estimate) {
-              budgetEstimateUsd = 0;
-              for (const body of dispatched) {
-                const cost = estimate(model, body);
-                if (cost === null) {
-                  budgetEstimateUsd = null;
-                  break;
-                }
-                budgetEstimateUsd += cost;
-              }
-            }
-            report?.({
-              id: crypto.randomUUID(),
-              attempt,
-              provider: reply?.provider ?? model.provider,
-              model: reply?.model ?? model.id,
-              durationMs: performance.now() - started,
-              ...metrics,
-              pricingSignature: modelPricingSignature(target?.cost, target?.api),
-              status,
-              costUsd: subscription ? null : (metrics.costUsd ?? null),
-              ...(subscription ? { estimateUsd: metrics.costUsd ?? null } : {}),
-              pricing: subscription ? ('unavailable' as const) : (metrics.pricing ?? 'unavailable'),
-              ...(budgetEstimateUsd === undefined ? {} : { budgetEstimateUsd }),
-            });
-          }
-          const target = runtime.getModel(reply.provider, reply.model) ?? model;
-          if (!untraced.has(task) && options.traces?.active())
-            options.traces.record(
-              piModelTrace(
-                {
-                  model: target,
-                  context,
-                  message: reply,
-                  startedAt,
-                  request: requestFacts?.(reply),
-                },
-                { source: 'curator', task, session_id: traceTurnId, turn_id: traceTurnId },
-              ),
-            );
-          return reply;
+      if (options.resolve) loaded = undefined;
+      loaded ??= load(automatic, candidates).catch((error) => {
+        loaded = undefined;
+        throw error;
+      });
+      const { runtime, model, effort, subscription, requestFacts } = await loaded;
+      const sessionId = ['opencode', 'opencode-go'].includes(model.provider)
+        ? crypto.randomUUID()
+        : undefined;
+      let attempt = 0;
+      const complete = async () => {
+        attempt++;
+        const context: Context = {
+          systemPrompt: instructions,
+          messages: [
+            {
+              role: 'user',
+              content:
+                task === 'vision'
+                  ? [{ type: 'text', text: JSON.stringify(input) }, ...(images ?? [])]
+                  : JSON.stringify(input),
+              timestamp: Date.now(),
+            },
+          ],
         };
-        const unavailable = (reply: AssistantMessage) =>
-          signal?.aborted
-            ? undefined
-            : expired
-              ? ('busy' as const)
-              : reply.stopReason === 'error' && !isContextOverflow(reply, model.contextWindow)
-                ? modelUnavailable(reply.errorMessage, isRetryableAssistantError(reply))
-                : undefined;
-        let reply = chained
-          ? await complete()
-          : await retryAssistantCall(
-              complete,
-              {
-                enabled: task !== 'vision' && task !== 'ideas' && !bounded,
-                maxRetries: 2,
-                baseDelayMs: 250,
-              },
-              signal,
-            );
-        if (
-          chained &&
-          fallback !== false &&
-          !expired &&
-          !timedOut(reply.errorMessage) &&
-          unavailable(reply) === 'busy' &&
-          (await sleep(
-            fallbackWait(connection.retryAfter?.(reply), checks.has(task) ? 3000 : 15_000, 250),
-            true,
-            { signal },
-          ).catch(() => false))
-        )
-          reply = await complete();
-        if (
-          reply.stopReason !== 'error' &&
-          reply.stopReason !== 'aborted' &&
-          reply.stopReason !== 'length'
-        )
-          return json(
-            reply.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join(''),
-          );
-        const kind = unavailable(reply);
-        if (kind && !last) {
-          tried.push(`${model.provider}/${model.id} (${reply.errorMessage?.trim().slice(0, 150)})`);
-          continue;
+        const startedAt = new Date().toISOString();
+        const started = performance.now();
+        let reply: AssistantMessage | undefined;
+        const estimate = options.estimateAnthropicRequestUsd;
+        const dispatched: RequestInit['body'][] | undefined =
+          estimate &&
+          requestFacts &&
+          !subscription &&
+          task !== 'vision' &&
+          model.provider === 'anthropic' &&
+          model.api === 'anthropic-messages'
+            ? []
+            : undefined;
+        try {
+          reply = await runtime.completeSimple(model, context, {
+            ...(dispatched
+              ? {
+                  fetch: (url: string | URL | Request, init?: RequestInit) => {
+                    if (!init?.signal?.aborted) dispatched.push(init?.body);
+                    return fetch(url, init);
+                  },
+                }
+              : {}),
+            ...(model.api === 'anthropic-messages'
+              ? {
+                  onPayload: uncachedInput,
+                  ...(keepInstructions(`${model.provider}:${model.id}:${instructions}`)
+                    ? { cacheRetention: 'long' as const }
+                    : {}),
+                }
+              : {}),
+            ...(responseSchema
+              ? {
+                  onPayload: (payload: unknown, target: Model<Api>) => {
+                    if (target.api === 'anthropic-messages') return uncachedInput(payload);
+                    if (
+                      target.provider !== 'openai' ||
+                      target.api !== 'openai-responses' ||
+                      !/^gpt-(?:5|6)(?:[.-]|$)/.test(target.id)
+                    )
+                      return undefined;
+                    const body = payload as { text?: Record<string, unknown> };
+                    return {
+                      ...body,
+                      text: {
+                        ...body.text,
+                        format: {
+                          type: 'json_schema',
+                          name: 'response',
+                          strict: true,
+                          schema: responseSchema,
+                        },
+                      },
+                    };
+                  },
+                }
+              : {}),
+            signal: turnBound
+              ? signal
+              : AbortSignal.any([
+                  AbortSignal.timeout(bounded ? 10_000 : 45_000),
+                  ...(signal ? [signal] : []),
+                ]),
+            maxTokens: bounded ? 512 : task === 'ideas' ? 2048 : 8192,
+            ...(sessionId ? { sessionId } : {}),
+            ...(bounded ? { maxRetries: 0, timeoutMs: 10_000 } : {}),
+            reasoning: effort === 'off' ? undefined : effort,
+          });
+        } finally {
+          const metrics = piUsageMetrics(reply?.usage);
+          const target = reply && (runtime.getModel(reply.provider, reply.model) ?? model);
+          const status: ProviderUsageEvent['status'] =
+            reply?.stopReason === 'aborted' || (!reply && signal?.aborted)
+              ? 'cancelled'
+              : !reply || reply.stopReason === 'error'
+                ? 'failed'
+                : 'succeeded';
+          let budgetEstimateUsd: number | null | undefined;
+          if (status === 'cancelled' && dispatched && estimate) {
+            budgetEstimateUsd = 0;
+            for (const body of dispatched) {
+              const cost = estimate(model, body);
+              if (cost === null) {
+                budgetEstimateUsd = null;
+                break;
+              }
+              budgetEstimateUsd += cost;
+            }
+          }
+          const usage = {
+            id: crypto.randomUUID(),
+            attempt,
+            provider: reply?.provider ?? model.provider,
+            model: reply?.model ?? model.id,
+            durationMs: performance.now() - started,
+            ...metrics,
+            pricingSignature: modelPricingSignature(target?.cost, target?.api),
+            status,
+            costUsd: subscription ? null : (metrics.costUsd ?? null),
+            ...(subscription ? { estimateUsd: metrics.costUsd ?? null } : {}),
+            pricing: subscription ? ('unavailable' as const) : (metrics.pricing ?? 'unavailable'),
+            ...(budgetEstimateUsd === undefined ? {} : { budgetEstimateUsd }),
+          };
+          report?.(usage);
         }
-        throw failure(task, reply, model, tried, chained && Boolean(kind), expired);
+        const target = runtime.getModel(reply.provider, reply.model) ?? model;
+        if (!untraced.has(task) && options.traces?.active())
+          options.traces.record(
+            piModelTrace(
+              { model: target, context, message: reply, startedAt, request: requestFacts?.(reply) },
+              { source: 'curator', task, session_id: traceTurnId, turn_id: traceTurnId },
+            ),
+          );
+        return reply;
+      };
+      const reply = await retryAssistantCall(
+        complete,
+        {
+          enabled: options.retry !== false && task !== 'vision' && task !== 'ideas' && !bounded,
+          maxRetries: 2,
+          baseDelayMs: 250,
+        },
+        signal,
+      );
+      if (
+        reply.stopReason === 'error' ||
+        reply.stopReason === 'aborted' ||
+        reply.stopReason === 'length'
+      ) {
+        const label =
+          task === 'vision'
+            ? 'The image model is unavailable.'
+            : task === 'classify' || task === 'attention' || task === 'activity'
+              ? 'The classification model is unavailable.'
+              : task === 'review' || task === 'access'
+                ? 'The action review model is unavailable.'
+                : task === 'check'
+                  ? 'The selected model is unavailable.'
+                  : task === 'title'
+                    ? 'The chat title model is unavailable.'
+                    : 'The memory model is unavailable.';
+        const detail =
+          reply.stopReason === 'error' && reply.errorMessage
+            ? ` The provider said: ${reply.errorMessage.trim().slice(0, 300)}`
+            : reply.stopReason === 'length'
+              ? ' The reply stopped at the token limit.'
+              : '';
+        const status = [...(reply.errorMessage ?? '').matchAll(/\(HTTP (\d{3})\)/g)].at(-1)?.[1];
+        throw Object.assign(
+          new Error(`${label} Task: ${task}. Model: ${model.provider}/${model.id}.${detail}`),
+          { movesOn: failedBeforeAnswer(reply, requestFacts?.(reply)?.requestPhase) },
+          status
+            ? {
+                providerStatus: Number(status),
+                providerRetryable: isRetryableAssistantError(reply),
+              }
+            : {},
+        );
       }
-      throw new Error('The selected model is unavailable.');
-    },
-    async pinned() {
-      if (!options.resolve) return [curator];
-      const listed = await candidates();
-      if (listed.length < 2) return [curator];
-      return listed.map((access) =>
-        createPiMemoryCurator({
-          ...options,
-          resolve: async () => access,
-          configured: () => true,
-          chained: true,
-        }),
+      return json(
+        reply.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join(''),
       );
     },
   };
-  return curator;
 }

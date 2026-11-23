@@ -11,13 +11,11 @@ import type {
 import {
   ModelAuthError,
   ModelCatalogError,
-  ModelUnavailableError,
   ModelWorkspaceSelectionError,
 } from '../ports/models.ts';
 import { ModelRequestError } from '../ports/agent.ts';
 import type { CredentialKeyStore } from '../ports/key-store.ts';
 import type {
-  ModelEffort,
   ModelLane,
   ModelMethod,
   ModelChoice,
@@ -59,7 +57,6 @@ import { analyticsModel, snapshotAnalytics, type CaptureAnalytics } from './anal
 import type { SettingActor } from './analytics-settings.ts';
 import { logFailure } from './failure-log.ts';
 import { modelFailureReason } from '../shared/model-quota.ts';
-import { modelUnavailable } from '../shared/model-fallback.ts';
 import { createTextRedactor, redactSecretText } from './redaction.ts';
 import { afterCommit } from './transaction.ts';
 
@@ -111,32 +108,11 @@ function modelPricing(model: ModelDefinition): ModelChoice['pricing'] {
   };
 }
 
+const auxiliaryEffort = (efforts: ModelChoice['efforts']) =>
+  efforts.find((level) => ['off', 'low', 'medium'].includes(level)) ?? efforts[0];
+
 export const modelRouteInput = z.union([modelSelectionInput, z.literal('light'), z.null()]);
 export const modelBackupsInput = z.array(modelSelectionInput).max(3);
-
-export type ModelCandidates = 'work' | 'lightest' | 'memory' | 'light' | 'small' | 'image';
-
-function cheaper(small: ModelDefinition, main: ModelDefinition) {
-  const price = modelPricing(small);
-  const mainPrice = modelPricing(main);
-  return Boolean(
-    price &&
-    price !== 'variable' &&
-    price.input + price.output > 0 &&
-    mainPrice &&
-    mainPrice !== 'variable' &&
-    mainPrice.input + mainPrice.output > 0 &&
-    price.input <= mainPrice.input &&
-    price.output <= mainPrice.output,
-  );
-}
-
-function memoryEffort(definition: ModelDefinition) {
-  return (
-    definition.choice.efforts.find((level) => ['off', 'low', 'medium'].includes(level)) ??
-    definition.choice.efforts[0]
-  );
-}
 
 export interface WorkOrigin {
   kind: WorkKind;
@@ -563,12 +539,10 @@ export function createModelService(options: {
             tag,
           ),
         ).get(modelId);
-        if (automatic && failure && Date.now() < failure.retryAt) {
-          const message = `${modelProviderNames[row.provider]} failed the last request to ${modelId} (${failure.reason}). Automatic requests to this model are paused until a request succeeds. Check this connection in ${appPages['/settings/models']} or ask again to make a new request.`;
-          throw failure.unavailable
-            ? new ModelUnavailableError(message, [`${row.provider}/${modelId} (${failure.reason})`])
-            : new ConnectionError(message);
-        }
+        if (automatic && failure && Date.now() < failure.retryAt)
+          throw new ConnectionError(
+            `${modelProviderNames[row.provider]} failed the last request to ${modelId} (${failure.reason}). Automatic requests to this model are paused until a request succeeds. Check this connection in ${appPages['/settings/models']} or ask again to make a new request.`,
+          );
         return async (error, status) => {
           if (!tag || closed) return;
           if (
@@ -608,7 +582,6 @@ export function createModelService(options: {
                 credentialTag: tag,
                 failures: count,
                 retryAt: Date.now() + failureWindow(count),
-                ...(modelUnavailable(error) ? { unavailable: modelUnavailable(error) } : {}),
                 reason: redactSecretText(modelFailureReason(error))
                   .replace(/\s*\[request phase: [^\]]*\]\s*$/, '')
                   .replace(/\s+/g, ' ')
@@ -654,117 +627,24 @@ export function createModelService(options: {
       if (definition) return { row, definition };
     }
   }
-  function access(
-    row: ModelRecord,
-    definition: ModelDefinition,
-    effort: ModelEffort,
-    textModel?: { definition: ModelDefinition; effort: ModelEffort },
-  ): ModelAccess {
-    return {
-      connectionId: row.id,
-      provider: row.provider,
-      method: row.method,
-      definition,
-      effort,
-      ...(textModel ? { textModel } : {}),
-      ...requestAccess(row),
-      needsReconnect: (credential) => needsReconnect(row.id, { models: row.models, credential }),
-    };
-  }
-  function first(kind: ModelCandidates, choice: ModelSelection | null) {
-    if (kind === 'light' || kind === 'small' || kind === 'image') {
-      const candidate = kind === 'image' ? imageModel() : classificationModel(kind === 'small');
-      if (!candidate && kind === 'image')
-        throw new ConnectionError('Connect a model that accepts images in Models.');
-      return (
-        candidate && {
-          row: candidate.row,
-          definition: candidate.definition,
-          effort: lightestEffort(candidate.definition.choice.efforts),
-          textModel: undefined,
-        }
-      );
-    }
-    const { selected, row, definition, companion } = chosen(kind === 'memory', choice);
-    return {
-      row,
-      definition,
-      effort:
-        kind === 'memory'
-          ? memoryEffort(definition)
-          : kind === 'lightest'
-            ? lightestEffort(definition.choice.efforts)
-            : selected.effort,
-      textModel: companion && {
-        definition: companion,
-        effort:
-          kind === 'work'
-            ? defaultEffort(row.provider, companion.choice)
-            : lightestEffort(companion.choice.efforts),
-      },
-    };
-  }
-  function backup(kind: ModelCandidates, choice: ModelSelection) {
-    const row = rows.find((item) => item.id === choice.connectionId);
-    if (row?.status !== 'connected') return;
-    const main = row.models.find(
-      (model) =>
-        model.choice.id === choice.modelId &&
-        !model.choice.audio &&
-        model.choice.efforts.length > 0,
-    );
-    if (!main) return;
-    const small = row.models.find(
-      (model) => model.choice.id === memoryModels[row.provider] && !model.choice.audio,
-    );
-    const definition =
-      kind === 'memory'
-        ? (small ?? main)
-        : kind === 'small'
-          ? small
-          : kind === 'light'
-            ? small && cheaper(small, main)
-              ? small
-              : undefined
-            : kind === 'image'
-              ? main.choice.images
-                ? main
-                : undefined
-              : main;
-    if (!definition) return;
-    return {
-      row,
-      definition,
-      effort:
-        kind === 'work'
-          ? definition.choice.efforts.includes(choice.effort)
-            ? choice.effort
-            : defaultEffort(row.provider, definition.choice)
-          : kind === 'memory'
-            ? memoryEffort(definition)
-            : lightestEffort(definition.choice.efforts),
-    };
-  }
-  function candidates(kind: ModelCandidates, choice: ModelSelection | null = selection) {
-    const primary = first(kind, choice);
-    if (!primary) return [];
-    const seen = new Set([`${primary.row.id}:${primary.definition.choice.id}`]);
-    const list = [access(primary.row, primary.definition, primary.effort, primary.textModel)];
-    for (const item of backups) {
-      const next = backup(kind, item);
-      const key = next && `${next.row.id}:${next.definition.choice.id}`;
-      if (!next || !key || seen.has(key)) continue;
+  function usableBackups(connectionId: string | undefined, modelId: string) {
+    const seen = new Set([`${connectionId}:${modelId}`]);
+    return backups.flatMap((item) => {
+      const row = rows.find((candidate) => candidate.id === item.connectionId);
+      const definition =
+        row?.status === 'connected'
+          ? row.models.find(
+              (model) =>
+                model.choice.id === item.modelId &&
+                !model.choice.audio &&
+                model.choice.efforts.length > 0,
+            )
+          : undefined;
+      const key = `${item.connectionId}:${item.modelId}`;
+      if (!row || !definition || seen.has(key)) return [];
       seen.add(key);
-      list.push(access(next.row, next.definition, next.effort));
-    }
-    return list;
-  }
-  function choicePaused(choice: ModelSelection) {
-    const row = rows.find((item) => item.id === choice.connectionId);
-    return (
-      row?.status !== 'connected' ||
-      requested(row, choice.modelId).some((id) => (row.retry?.[id] ?? 0) > Date.now())
-    );
+      return [{ row, definition, item }];
+    });
   }
   function classificationModel(otherConnections = false) {
     const selected = selection && { ...selection };
@@ -1360,17 +1240,21 @@ export function createModelService(options: {
     paused(origin: WorkOrigin) {
       try {
         const { selection: work } = service.workModel(origin);
-        const row = rows.find((item) => item.id === work.connectionId);
+        const paused = (choice: ModelSelection) => {
+          const row = rows.find((item) => item.id === choice.connectionId);
+          return requested(row, choice.modelId).some((id) => (row?.retry?.[id] ?? 0) > Date.now());
+        };
+        const usable = (choice: ModelSelection) => {
+          try {
+            return Boolean(chosen(false, choice));
+          } catch {
+            return false;
+          }
+        };
         return (
-          requested(row, work.modelId).some((id) => (row?.retry?.[id] ?? 0) > Date.now()) &&
-          backups
-            .filter(
-              (choice) =>
-                backup('work', choice) &&
-                `${choice.connectionId}:${choice.modelId}` !==
-                  `${work.connectionId}:${work.modelId}`,
-            )
-            .every(choicePaused)
+          paused(work) &&
+          (!usable(work) ||
+            usableBackups(work.connectionId, work.modelId).every(({ item }) => paused(item)))
         );
       } catch {
         return false;
@@ -1379,56 +1263,23 @@ export function createModelService(options: {
     async automaticRequestsAllowed(origin: WorkOrigin, auxiliary = false) {
       try {
         const work = service.workModel(origin);
-        for (const group of [
-          candidates('work', work.selection),
-          ...(auxiliary ? [candidates('memory')] : []),
-        ]) {
-          let allowed = false;
-          for (const access of group) {
-            allowed = await Promise.resolve(
-              access.prepareRequest?.(
-                access.textModel?.definition.choice.id ?? access.definition.choice.id,
-                true,
-              ),
-            ).then(
-              () => true,
-              () => false,
+        const takes = async (access: ModelAccess) => {
+          try {
+            await access.prepareRequest?.(
+              access.textModel?.definition.choice.id ?? access.definition.choice.id,
+              true,
             );
-            if (allowed) break;
+            return true;
+          } catch {
+            return false;
           }
-          if (!allowed) return false;
-        }
-        return true;
+        };
+        for (const access of await service.candidates(work.selection))
+          if (await takes(access)) return !auxiliary || (await takes(await service.resolve(true)));
+        return false;
       } catch {
         return false;
       }
-    },
-    async candidates(kind: ModelCandidates, choice?: ModelSelection | null) {
-      return candidates(kind, choice === undefined ? selection : choice);
-    },
-    async setBackups(value: ModelSelection[], client?: PoolClient) {
-      const list = modelBackupsInput.parse(value);
-      const saved = await store.change(
-        (state) => {
-          const key = (choice: ModelSelection) =>
-            `${choice.connectionId}:${choice.modelId}:${choice.effort}`;
-          const saved = new Set(state.backups.map(key));
-          const seen = new Set<string>();
-          state.backups = list.filter((choice) => {
-            if (!saved.has(key(choice))) textChoice(state.connections, choice);
-            const model = `${choice.connectionId}:${choice.modelId}`;
-            if (seen.has(model)) return false;
-            seen.add(model);
-            return true;
-          });
-          return state.backups;
-        },
-        undefined,
-        client,
-      );
-      await settle(client, () => {
-        backups = saved;
-      });
     },
     light: lightModel,
     unpricedPreparationModel,
@@ -1497,6 +1348,48 @@ export function createModelService(options: {
         ...work,
         selection: { ...work.selection, effort: defaultEffort(row.provider, definition.choice) },
       };
+    },
+    async candidates(
+      choice: ModelSelection | null = selection,
+      auxiliary = false,
+    ): Promise<ModelAccess[]> {
+      const primary = await service.resolve(auxiliary, choice);
+      return [
+        primary,
+        ...usableBackups(primary.connectionId, primary.definition.choice.id).map(
+          ({ row, definition, item }): ModelAccess => ({
+            connectionId: row.id,
+            provider: row.provider,
+            method: row.method,
+            definition,
+            effort: auxiliary
+              ? auxiliaryEffort(definition.choice.efforts)
+              : definition.choice.efforts.includes(item.effort)
+                ? item.effort
+                : defaultEffort(row.provider, definition.choice),
+            ...requestAccess(row),
+            needsReconnect: (credential) =>
+              needsReconnect(row.id, { models: row.models, credential }),
+          }),
+        ),
+      ];
+    },
+    async setBackups(value: ModelSelection[]) {
+      const list = modelBackupsInput.parse(value);
+      await store.change((state) => {
+        const key = (choice: ModelSelection) =>
+          `${choice.connectionId}:${choice.modelId}:${choice.effort}`;
+        const saved = new Set(state.backups.map(key));
+        const seen = new Set<string>();
+        state.backups = list.filter((choice) => {
+          if (!saved.has(key(choice))) textChoice(state.connections, choice);
+          const model = `${choice.connectionId}:${choice.modelId}`;
+          if (seen.has(model)) return false;
+          seen.add(model);
+          return true;
+        });
+      });
+      await reload();
     },
     async setRoute(
       lane: ModelLane,
@@ -1768,13 +1661,33 @@ export function createModelService(options: {
       return Boolean(imageModel());
     },
     async resolveImage(): Promise<ModelAccess> {
-      return candidates('image')[0]!;
+      const candidate = imageModel();
+      if (!candidate) throw new ConnectionError('Connect a model that accepts images in Models.');
+      const { row, definition } = candidate;
+      return {
+        provider: row.provider,
+        method: row.method,
+        definition,
+        effort: lightestEffort(definition.choice.efforts),
+        ...requestAccess(row),
+        needsReconnect: (credential) => needsReconnect(row.id, { models: row.models, credential }),
+      };
     },
     hasClassificationModel(otherConnections = false) {
       return Boolean(classificationModel(otherConnections));
     },
     async resolveClassification(otherConnections = false): Promise<ModelAccess | undefined> {
-      return candidates(otherConnections ? 'small' : 'light')[0];
+      const candidate = classificationModel(otherConnections);
+      if (!candidate) return undefined;
+      const { row, definition } = candidate;
+      return {
+        provider: row.provider,
+        method: row.method,
+        definition,
+        effort: lightestEffort(definition.choice.efforts),
+        ...requestAccess(row),
+        needsReconnect: (credential) => needsReconnect(row.id, { models: row.models, credential }),
+      };
     },
     reserve,
     setRequestBudget(reserve: NonNullable<ModelAccess['reserve']>) {
@@ -1791,8 +1704,26 @@ export function createModelService(options: {
       auxiliary = false,
       choice: ModelSelection | null = selection,
     ): Promise<ModelAccess> {
-      const primary = first(auxiliary ? 'memory' : 'work', choice)!;
-      return access(primary.row, primary.definition, primary.effort, primary.textModel);
+      const { selected, row, definition, companion } = chosen(auxiliary, choice);
+      return {
+        connectionId: row.id,
+        provider: row.provider,
+        method: row.method,
+        definition,
+        effort: auxiliary ? auxiliaryEffort(definition.choice.efforts) : selected.effort,
+        ...(companion
+          ? {
+              textModel: {
+                definition: companion,
+                effort: auxiliary
+                  ? lightestEffort(companion.choice.efforts)
+                  : defaultEffort(row.provider, companion.choice),
+              },
+            }
+          : {}),
+        ...requestAccess(row),
+        needsReconnect: (credential) => needsReconnect(row.id, { models: row.models, credential }),
+      };
     },
     start,
     cancel,

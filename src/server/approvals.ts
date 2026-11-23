@@ -239,6 +239,7 @@ async function workOf(
 
 export async function turnOrigin(turnId: string) {
   const client = await pool.connect();
+  let failed = false;
   try {
     const current = await turnRow(client, turnId);
     const chain = current && (await turnChain(client, current));
@@ -276,8 +277,11 @@ export async function turnOrigin(turnId: string) {
           }
         : {}),
     };
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
-    client.release();
+    client.release(failed);
   }
 }
 

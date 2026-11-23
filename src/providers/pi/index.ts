@@ -34,14 +34,14 @@ import {
   type ResourceLoader,
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
-import { createPiModelRuntime, localModelSilenceMs } from './models.ts';
+import { createPiModelRuntime } from './models.ts';
 import { createTurnFallback, modelKey } from './fallback.ts';
 import { modelContext } from './context.ts';
 import { createContextOutput, toolOutputReference } from './context-output.ts';
 import { audioContext, audioEntries, audioMessage, readsNativeAudio } from './audio.ts';
 import { piModelTrace } from './traces.ts';
 import type { ModelTraces } from '../../ports/traces.ts';
-import { ModelUnavailableError, type ModelAccess } from '../../ports/models.ts';
+import type { ModelAccess } from '../../ports/models.ts';
 import type { Agent, AgentEvent } from '../../ports/agent.ts';
 import {
   closeInterruptedCalls,
@@ -232,7 +232,7 @@ function stableRequestCache(
   return (pi: ExtensionAPI) => {
     pi.on('before_provider_request', ({ payload }) => {
       const request = payload as CachedRequest | null;
-      if (!request || !Array.isArray(request.messages)) return;
+      if (!request?.system || !Array.isArray(request.messages)) return;
       if (Array.isArray(request.system) && request.system.filter((b) => b.cache_control).length > 1)
         return;
       const prefixes = [...new Set(cached.stable ?? [])].sort((a, b) => a.length - b.length);
@@ -444,7 +444,6 @@ function completeAssistantMessages(pi: ExtensionAPI) {
 }
 
 const tokenRateLimit = /\b(?:tokens? per (?:minute|day)|[tr]p[md])\b/i;
-const piRetry = { baseDelayMs: 4000 };
 
 function planBilled(event: AgentEvent): AgentEvent {
   return event.type === 'model_usage'
@@ -486,13 +485,14 @@ export function createPiAgent(options: {
       const resolved = await options.resolve?.(input.model);
       const [access, ...backups] = resolved === undefined ? [] : [resolved].flat();
       const chain = access ? [access, ...backups] : [];
-      const shared = turnModels.get(input.turnId);
-      let start = Math.max(
-        0,
-        chain.findIndex((item) => modelKey(item) === shared),
-      );
+      const shared = () =>
+        Math.max(
+          0,
+          chain.findIndex((item) => modelKey(item) === turnModels.get(input.turnId)),
+        );
+      let start = shared();
       if (input.automatic && access) {
-        let paused: unknown;
+        let failure: unknown;
         for (; start < chain.length; start++) {
           const item = chain[start]!;
           try {
@@ -502,11 +502,10 @@ export function createPiAgent(options: {
             );
             break;
           } catch (error) {
-            paused ??= error;
-            if (!(error instanceof ModelUnavailableError)) throw error;
+            failure ??= error;
           }
         }
-        if (start >= chain.length) throw paused;
+        if (start === chain.length) throw failure;
       }
       if (!access && !options.apiKey)
         throw new Error('Configure the selected model provider to enable the assistant.');
@@ -698,19 +697,22 @@ export function createPiAgent(options: {
               start,
               automatic: Boolean(input.automatic),
               connect: (backup) => createPiModelRuntime(backup, runtimeOptions),
-              floor: () =>
-                Math.max(
-                  0,
-                  chain.findIndex((item) => modelKey(item) === turnModels.get(input.turnId)),
-                ),
+              shared,
               switched: (at) => turnModels.set(input.turnId, modelKey(chain[at]!)),
-              served: (at, reason, from) =>
+              retrying: () => {
+                const retry = settings.getRetrySettings();
+                return retry.enabled && session.retryAttempt < retry.maxRetries;
+              },
+              moved: (from, to) =>
                 input.onEvent({
                   type: 'fallback',
                   from: chain[from]!.definition.choice.name,
-                  to: chain[at]!.definition.choice.name,
-                  reason: reason === 'busy' ? 'busy' : 'unavailable',
+                  to: chain[to]!.definition.choice.name,
                 }),
+              failed: (message) => {
+                const usage = observeUsage(message);
+                if (usage) input.onEvent({ ...usage, pricingSignature: usagePricing(message) });
+              },
             })
           : undefined;
       if (fallback) {
@@ -824,8 +826,7 @@ export function createPiAgent(options: {
         transport: 'sse',
         steeringMode: 'all',
         cacheWarming: input.keepWarm ? 'idle' : 'streaming',
-        retry: fallback ? { ...piRetry, maxRetries: 2 * fallback.size + 1 } : piRetry,
-        ...(access?.provider === 'compatible' ? { httpIdleTimeoutMs: localModelSilenceMs } : {}),
+        retry: { baseDelayMs: 4000, ...(backups.length ? { maxRetries: 1 } : {}) },
       });
       const extensionLoader = new DefaultResourceLoader({
         cwd: input.workspace.path,
@@ -923,9 +924,7 @@ export function createPiAgent(options: {
                   clampThinkingLevel(selected, 'off'),
                   session.agent.streamFunction,
                   undefined,
-                  fallback
-                    ? { enabled: true, maxRetries: 3, maxAgentDelayMs: 60_000, ...piRetry }
-                    : settings.getRetrySettings(),
+                  settings.getRetrySettings(),
                 );
                 return { compaction: result };
               } catch (error) {
@@ -1166,21 +1165,6 @@ export function createPiAgent(options: {
         session.dispose();
         throw new Error('The agent service has stopped.');
       }
-      const retrying = session as unknown as {
-        _isRetryableError?: (message: AssistantMessage) => boolean;
-      };
-      const retryable = retrying._isRetryableError?.bind(session);
-      if (fallback && retryable)
-        retrying._isRetryableError = (message) => {
-          const planned = fallback.retries(message);
-          settings.applyOverrides({
-            retry:
-              planned === undefined
-                ? { maxAgentDelayMs: 60_000, ...piRetry }
-                : { baseDelayMs: 1, maxAgentDelayMs: 1 },
-          });
-          return planned ?? (retryable(message) && session.retryAttempt < 3);
-        };
 
       const prepare = session.agent.prepareRequest;
       session.agent.prepareRequest = async (request, signal) => {
@@ -1329,7 +1313,7 @@ export function createPiAgent(options: {
         if (event.type === 'auto_retry_start')
           input.onEvent({
             type: 'retry',
-            model: fallback?.failed() ?? (session.model ?? model).name,
+            model: fallback?.current() ?? (session.model ?? model).name,
             attempt: event.attempt,
             attempts: event.maxAttempts,
           });
@@ -1377,8 +1361,7 @@ export function createPiAgent(options: {
             settings.applyOverrides({ compaction: { keepRecentTokens: 0 } });
           }
           const usage = observeUsage(event.message);
-          if (usage && fallback?.sent(event.message) !== false)
-            input.onEvent({ ...usage, pricingSignature: usagePricing(event.message) });
+          if (usage) input.onEvent({ ...usage, pricingSignature: usagePricing(event.message) });
           if (event.message.stopReason === 'error')
             input.onEvent({
               type: 'error',
