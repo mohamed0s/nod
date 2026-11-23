@@ -11,7 +11,6 @@ import type {
 import {
   ModelAuthError,
   ModelCatalogError,
-  ModelPausedError,
   ModelWorkspaceSelectionError,
 } from '../ports/models.ts';
 import { ModelRequestError } from '../ports/agent.ts';
@@ -538,7 +537,7 @@ export function createModelService(options: {
           ),
         ).get(modelId);
         if (automatic && failure && Date.now() < failure.retryAt)
-          throw new ModelPausedError(
+          throw new ConnectionError(
             `${modelProviderNames[row.provider]} failed the last request to ${modelId} (${failure.reason}). Automatic requests to this model are paused until a request succeeds. Check this connection in ${appPages['/settings/models']} or ask again to make a new request.`,
           );
         return async (error, status) => {
@@ -1242,9 +1241,17 @@ export function createModelService(options: {
           const row = rows.find((item) => item.id === choice.connectionId);
           return requested(row, choice.modelId).some((id) => (row?.retry?.[id] ?? 0) > Date.now());
         };
+        const usable = (choice: ModelSelection) => {
+          try {
+            return Boolean(chosen(false, choice));
+          } catch {
+            return false;
+          }
+        };
         return (
           paused(work) &&
-          usableBackups(work.connectionId, work.modelId).every(({ item }) => paused(item))
+          (!usable(work) ||
+            usableBackups(work.connectionId, work.modelId).every(({ item }) => paused(item)))
         );
       } catch {
         return false;
@@ -1253,28 +1260,20 @@ export function createModelService(options: {
     async automaticRequestsAllowed(origin: WorkOrigin, auxiliary = false) {
       try {
         const work = service.workModel(origin);
-        for (const group of [
-          await service.candidates(work.selection),
-          ...(auxiliary ? [[await service.resolve(true)]] : []),
-        ]) {
-          let allowed = false;
-          for (const access of group) {
-            allowed = await Promise.resolve()
-              .then(() =>
-                access.prepareRequest?.(
-                  access.textModel?.definition.choice.id ?? access.definition.choice.id,
-                  true,
-                ),
-              )
-              .then(
-                () => true,
-                () => false,
-              );
-            if (allowed) break;
+        const takes = async (access: ModelAccess) => {
+          try {
+            await access.prepareRequest?.(
+              access.textModel?.definition.choice.id ?? access.definition.choice.id,
+              true,
+            );
+            return true;
+          } catch {
+            return false;
           }
-          if (!allowed) return false;
-        }
-        return true;
+        };
+        for (const access of await service.candidates(work.selection))
+          if (await takes(access)) return !auxiliary || (await takes(await service.resolve(true)));
+        return false;
       } catch {
         return false;
       }
@@ -1349,48 +1348,40 @@ export function createModelService(options: {
     },
     async candidates(choice: ModelSelection | null = selection): Promise<ModelAccess[]> {
       const primary = await service.resolve(false, choice);
-      const list = [primary];
-      for (const { row, definition, item } of usableBackups(
-        primary.connectionId,
-        primary.definition.choice.id,
-      ))
-        list.push({
-          connectionId: row.id,
-          provider: row.provider,
-          method: row.method,
-          definition,
-          effort: definition.choice.efforts.includes(item.effort)
-            ? item.effort
-            : defaultEffort(row.provider, definition.choice),
-          ...requestAccess(row),
-          needsReconnect: (credential) =>
-            needsReconnect(row.id, { models: row.models, credential }),
-        });
-      return list;
+      return [
+        primary,
+        ...usableBackups(primary.connectionId, primary.definition.choice.id).map(
+          ({ row, definition, item }): ModelAccess => ({
+            connectionId: row.id,
+            provider: row.provider,
+            method: row.method,
+            definition,
+            effort: definition.choice.efforts.includes(item.effort)
+              ? item.effort
+              : defaultEffort(row.provider, definition.choice),
+            ...requestAccess(row),
+            needsReconnect: (credential) =>
+              needsReconnect(row.id, { models: row.models, credential }),
+          }),
+        ),
+      ];
     },
-    async setBackups(value: ModelSelection[], client?: PoolClient) {
+    async setBackups(value: ModelSelection[]) {
       const list = modelBackupsInput.parse(value);
-      const saved = await store.change(
-        (state) => {
-          const key = (choice: ModelSelection) =>
-            `${choice.connectionId}:${choice.modelId}:${choice.effort}`;
-          const saved = new Set(state.backups.map(key));
-          const seen = new Set<string>();
-          state.backups = list.filter((choice) => {
-            if (!saved.has(key(choice))) textChoice(state.connections, choice);
-            const model = `${choice.connectionId}:${choice.modelId}`;
-            if (seen.has(model)) return false;
-            seen.add(model);
-            return true;
-          });
-          return state.backups;
-        },
-        undefined,
-        client,
-      );
-      await settle(client, () => {
-        backups = saved;
+      await store.change((state) => {
+        const key = (choice: ModelSelection) =>
+          `${choice.connectionId}:${choice.modelId}:${choice.effort}`;
+        const saved = new Set(state.backups.map(key));
+        const seen = new Set<string>();
+        state.backups = list.filter((choice) => {
+          if (!saved.has(key(choice))) textChoice(state.connections, choice);
+          const model = `${choice.connectionId}:${choice.modelId}`;
+          if (seen.has(model)) return false;
+          seen.add(model);
+          return true;
+        });
       });
+      await reload();
     },
     async setRoute(
       lane: ModelLane,

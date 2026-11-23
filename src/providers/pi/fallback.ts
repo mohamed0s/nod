@@ -11,32 +11,34 @@ import {
   type SimpleStreamOptions,
 } from '@earendil-works/pi-ai';
 import { estimateTokens } from '@earendil-works/pi-coding-agent';
-import { ModelPausedError, type ModelAccess } from '../../ports/models.ts';
+import type { ModelAccess } from '../../ports/models.ts';
 import type { createPiModelRuntime } from './models.ts';
 import { hasNativeAudio, readsNativeAudio } from './audio.ts';
 
 type Connection = Awaited<ReturnType<typeof createPiModelRuntime>>;
 type Stream = Connection['runtime']['streamSimple'];
 
-class SkippedModelError extends Error {}
-
 export function modelKey(access: ModelAccess) {
   return `${access.connectionId ?? access.provider}/${access.method}/${access.definition.choice.id}`;
 }
 
-function fits(model: Model<Api>, context: Context) {
+function fits(choice: ModelAccess['definition']['choice'], context: Context) {
   const images = context.messages.some(
     (message) =>
       Array.isArray(message.content) && message.content.some((part) => part.type === 'image'),
   );
-  if (images && !model.input.includes('image')) return false;
+  if (images && !choice.images) return false;
   const tokens =
     context.messages.reduce((total, message) => total + estimateTokens(message as never), 0) +
     (context.systemPrompt?.length ?? 0) / 4;
-  return !model.contextWindow || tokens < model.contextWindow * 0.9;
+  return !choice.contextWindow || tokens < choice.contextWindow * 0.9;
 }
 
-function failedRequest(model: Model<Api>, error: unknown, aborted: boolean): AssistantMessage {
+function failedRequest(
+  model: Pick<Model<Api>, 'api' | 'provider' | 'id'>,
+  error: unknown,
+  aborted: boolean,
+): AssistantMessage {
   return {
     role: 'assistant',
     content: [],
@@ -64,9 +66,8 @@ export function createTurnFallback(options: {
   automatic: boolean;
   connect(access: ModelAccess): Promise<Connection>;
   retrying(): boolean;
-  floor(): number;
   switched(at: number): void;
-  served(at: number, from: number): void;
+  moved(from: number, to: number): void;
   failed(message: AssistantMessage): void;
 }) {
   const candidates: Array<{ access: ModelAccess; connection?: Promise<Connection> }> = [
@@ -74,11 +75,10 @@ export function createTurnFallback(options: {
     ...options.backups.map((access) => ({ access })),
   ];
   const ready = new Map<number, Connection>([[0, options.primary.connection]]);
-  const served = new WeakMap<object, Model<Api>>();
+  const ranOn = new WeakMap<object, Model<Api>>();
   const tried: string[] = [];
   let at = Math.min(options.start, candidates.length - 1);
-  let from = 0;
-  let announced = 0;
+  let serving = 0;
 
   function move(next: number) {
     at = next;
@@ -92,35 +92,37 @@ export function createTurnFallback(options: {
     streamOptions: SimpleStreamOptions | undefined,
   ) {
     if (index === 0)
-      return { model: target, upstream: options.primary.stream(target, context, streamOptions) };
+      return {
+        connection: options.primary.connection,
+        model: target,
+        upstream: options.primary.stream(target, context, streamOptions),
+      };
     const candidate = candidates[index]!;
+    const { choice } = candidate.access.definition;
+    if (!fits(choice, context))
+      throw new Error(`${choice.name} can't take this conversation, so Nod didn't try it.`);
     candidate.connection ??= options.connect(candidate.access);
     const connection = await candidate.connection;
     ready.set(index, connection);
-    if (!fits(connection.model, context))
-      throw new SkippedModelError(
-        `${candidate.access.definition.choice.name} can't take this conversation, so Nod didn't try it.`,
-      );
     if (options.automatic) await candidate.access.prepareRequest?.(connection.model.id, true);
     const { apiKey: _, headers: __, env: ___, ...rest } = streamOptions ?? {};
     const level = clampThinkingLevel(connection.model, candidate.access.effort);
     return {
+      connection,
       model: connection.model,
       upstream: connection.runtime.streamSimple(connection.model, context, {
         ...rest,
-        ...(connection.model.api === target.api
-          ? {}
-          : { onPayload: undefined, cacheRetention: undefined }),
         reasoning: level === 'off' ? undefined : level,
       } as SimpleStreamOptions),
     };
   }
 
-  const givesUp = (message: AssistantMessage, model: Model<Api>) =>
+  const movesOn = (message: AssistantMessage, index: number, connection: Connection) =>
     message.stopReason === 'error' &&
-    !isContextOverflow(message, model.contextWindow ?? 0) &&
-    isRetryableAssistantError(message) &&
-    !options.retrying();
+    (index > 0 || !isContextOverflow(message, connection.model.contextWindow ?? 0)) &&
+    (isRetryableAssistantError(message)
+      ? !options.retrying()
+      : connection.requestFacts?.(message)?.requestPhase !== 'stream');
 
   return {
     stream(target: Model<Api>, context: Context, streamOptions?: SimpleStreamOptions) {
@@ -133,17 +135,16 @@ export function createTurnFallback(options: {
       const out = createAssistantMessageEventStream();
       const stopped = () => Boolean(streamOptions?.signal?.aborted);
       void (async () => {
-        if (options.floor() > at) move(Math.min(options.floor(), candidates.length - 1));
         for (;;) {
           const index = at;
+          const { access } = candidates[index]!;
           const last = index + 1 >= candidates.length;
-          let model = target;
+          let sent = false;
           let reason: string;
           try {
             const opened = await open(index, target, context, streamOptions);
-            model = opened.model;
+            const { model } = opened;
             const held: AssistantMessageEvent[] = [];
-            let sent = false;
             let failure: AssistantMessage | undefined;
             for await (const event of opened.upstream) {
               if (!sent && event.type === 'start') {
@@ -155,40 +156,39 @@ export function createTurnFallback(options: {
                 !last &&
                 event.type === 'error' &&
                 !stopped() &&
-                givesUp(event.error, model)
+                movesOn(event.error, index, opened.connection)
               ) {
                 failure = event.error;
                 break;
               }
-              if (!sent && event.type !== 'error' && index > 0 && index !== announced) {
-                announced = index;
-                options.served(index, from);
+              if (!sent && event.type !== 'error' && index !== serving) {
+                options.moved(serving, index);
+                serving = index;
               }
-              if (event.type === 'done') served.set(event.message, model);
-              if (event.type === 'error') served.set(event.error, model);
               if (!sent) for (const item of held.splice(0)) out.push(item);
               sent = true;
               out.push(event);
             }
             if (!failure) {
               const result = await opened.upstream.result();
-              served.set(result, model);
+              ranOn.set(result, model);
               if (result.stopReason !== 'error' && result.stopReason !== 'aborted')
                 tried.length = 0;
               out.end(result);
               return;
             }
-            served.set(failure, model);
+            ranOn.set(failure, model);
             options.failed(failure);
-            from = index;
             reason = failure.errorMessage?.trim() || 'The provider gave no reason.';
           } catch (error) {
-            if (
-              stopped() ||
-              last ||
-              !(error instanceof ModelPausedError || error instanceof SkippedModelError)
-            ) {
-              const result = failedRequest(model, error, stopped());
+            if (stopped() || last || sent) {
+              const result = failedRequest(
+                index
+                  ? { api: target.api, provider: access.provider, id: access.definition.choice.id }
+                  : target,
+                error,
+                stopped(),
+              );
               out.push({
                 type: 'error',
                 reason: result.stopReason === 'aborted' ? 'aborted' : 'error',
@@ -197,9 +197,8 @@ export function createTurnFallback(options: {
               out.end(result);
               return;
             }
-            reason = error.message;
+            reason = error instanceof Error ? error.message : String(error);
           }
-          const { access } = candidates[index]!;
           tried.push(`${access.provider} / ${access.definition.choice.id}: ${reason}`);
           move(index + 1);
         }
@@ -224,7 +223,7 @@ export function createTurnFallback(options: {
       return candidates[index ?? at]!.access.method;
     },
     model(usage: { provider: string; model: string }) {
-      const exact = served.get(usage);
+      const exact = ranOn.get(usage);
       if (exact) return exact;
       for (const connection of [ready.get(at), ...ready.values()]) {
         const found =

@@ -9,7 +9,7 @@ import {
 } from '@earendil-works/pi-ai';
 import { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { retryAssistantCall } from '@earendil-works/pi-ai/utils/retry';
-import { createPiModelRuntime, localModelSilenceMs } from './models.ts';
+import { createPiModelRuntime } from './models.ts';
 import type { ModelAccess } from '../../ports/models.ts';
 import { lightestEffort, modelPricingSignature } from '../../shared/models.ts';
 import type { MemoryCurator } from '../../ports/memory-curator.ts';
@@ -240,9 +240,6 @@ export function createPiMemoryCurator(options: {
             maxTokens: bounded ? 512 : task === 'ideas' ? 2048 : 8192,
             ...(sessionId ? { sessionId } : {}),
             ...(bounded ? { maxRetries: 0, timeoutMs: 10_000 } : {}),
-            ...(turnBound && model.provider === 'compatible'
-              ? { timeoutMs: localModelSilenceMs }
-              : {}),
             reasoning: effort === 'off' ? undefined : effort,
           });
         } finally {

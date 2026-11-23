@@ -1,5 +1,5 @@
 import { lightestEffort, type ModelSelection } from '../src/shared/models.ts';
-import type { Context } from '@earendil-works/pi-ai';
+import type { Context, UserMessage } from '@earendil-works/pi-ai';
 import type { ModelAccess } from '../src/ports/models.ts';
 import { createPiModelBackend, createPiModelRuntime } from '../src/providers/pi/models.ts';
 import type { Presentation } from '../src/shared/presentation.ts';
@@ -10502,10 +10502,16 @@ test('a busy work model gets Pi retries, then the same request continues on a ba
   assert.deepEqual(requests, ['fixture-backup']);
 });
 
-test('a turn fallback moves on only when Pi gives up, names each new model, keeps the caller timeout, skips a paused backup and never moves on a Stop', async () => {
+test('a turn fallback moves on after Pi gives up or at once on request errors, never after output, on a refusal, a Stop or the selected model overflowing, and sends a backup no primary credentials', async () => {
   const { createTurnFallback } = await import('../src/providers/pi/fallback.ts');
-  const { ModelPausedError } = await import('../src/ports/models.ts');
-  const busy = '503 Service Unavailable (HTTP 503)';
+  const errors: Record<string, string> = {
+    busy: '503 Service Unavailable (HTTP 503)',
+    quota: '429 insufficient_quota: You exceeded your current quota (HTTP 429)',
+    overflow: 'prompt is too long: 213462 tokens > 131072 maximum',
+    partial: '503 Service Unavailable (HTTP 503)',
+    stop: '503 Service Unavailable (HTTP 503)',
+    refusal: 'The model declined to answer.',
+  };
   const model = (id: string) =>
     ({
       provider: 'compatible',
@@ -10514,43 +10520,62 @@ test('a turn fallback moves on only when Pi gives up, names each new model, keep
       input: ['text'],
       contextWindow: 131_072,
     }) as never;
-  const choice = (id: string, paused = false): ModelAccess => ({
-    provider: 'compatible',
+  const choice = (id: string, provider: 'openai' | 'compatible', paused = false): ModelAccess => ({
+    provider,
     method: 'api_key',
     effort: 'off',
     read: async () => undefined,
     ...(paused
       ? {
           prepareRequest: async () => {
-            throw new ModelPausedError(`${id} is paused.`);
+            throw new Error(`${id} is paused.`);
           },
         }
       : {}),
     definition: {
-      choice: { id, name: id, efforts: ['off'], images: false, contextWindow: 131_072 },
+      choice: {
+        id,
+        name: id,
+        efforts: ['off'],
+        images: id === 'fixture-last',
+        contextWindow: 131_072,
+      },
       spec: {},
     },
   });
   const setup = (script: Record<string, Array<string | undefined>>, stop?: AbortController) => {
-    const calls: Array<[string, number | undefined]> = [];
+    const calls: Array<{ id: string; timeoutMs?: number; credentials: boolean }> = [];
     let retrying = false;
+    const phases = new WeakMap<object, { requestPhase: string }>();
     const connection = (id: string) => ({
       model: model(id),
+      requestFacts: (message: object) => phases.get(message),
       runtime: {
-        streamSimple: (target: never, _context: never, options?: { timeoutMs?: number }) => {
-          calls.push([id, options?.timeoutMs]);
-          const error = script[id]!.shift();
-          if (error === 'stop') stop?.abort();
+        streamSimple: (
+          _target: never,
+          _context: never,
+          options?: { timeoutMs?: number; apiKey?: string; headers?: object },
+        ) => {
+          calls.push({
+            id,
+            timeoutMs: options?.timeoutMs,
+            credentials: Boolean(options?.apiKey || options?.headers),
+          });
+          const outcome = script[id]!.shift();
+          if (outcome === 'stop') stop?.abort();
           const message = {
-            ...fauxAssistantMessage(error ? '' : `Answer from ${id}.`),
+            ...fauxAssistantMessage(outcome ? '' : `Answer from ${id}.`),
             provider: 'compatible',
             model: id,
             api: 'openai-completions',
-            ...(error ? { stopReason: 'error' as const, errorMessage: busy } : {}),
+            ...(outcome ? { stopReason: 'error' as const, errorMessage: errors[outcome] } : {}),
           } as AssistantMessage;
+          phases.set(message, { requestPhase: outcome === 'refusal' ? 'stream' : 'response' });
           const stream = createAssistantMessageEventStream();
+          if (outcome === 'partial')
+            stream.push({ type: 'text_delta', contentIndex: 0, delta: 'Part', partial: message });
           stream.push(
-            error
+            outcome
               ? { type: 'error', reason: 'error', error: message }
               : { type: 'done', reason: 'stop', message },
           );
@@ -10560,59 +10585,88 @@ test('a turn fallback moves on only when Pi gives up, names each new model, keep
       },
     });
     const work = connection('fixture-work');
-    const served: Array<[number, number]> = [];
+    const moved: Array<[number, number]> = [];
     const fallback = createTurnFallback({
       primary: {
-        access: choice('fixture-work'),
+        access: choice('fixture-work', 'openai'),
         connection: work as never,
         stream: work.runtime.streamSimple as never,
       },
-      backups: [choice('fixture-first'), choice('fixture-paused', true), choice('fixture-last')],
+      backups: [
+        choice('fixture-first', 'openai'),
+        choice('fixture-paused', 'openai', true),
+        choice('fixture-last', 'compatible'),
+      ],
       start: 0,
       automatic: true,
       connect: async (backup) => connection(backup.definition.choice.id) as never,
       retrying: () => retrying,
-      floor: () => 0,
       switched: () => {},
-      served: (at, from) => served.push([at, from]),
+      moved: (from, to) => moved.push([from, to]),
       failed: () => {},
     });
-    const send = (retry: boolean, signal?: AbortSignal) => {
+    const send = (retry: boolean, signal?: AbortSignal, content?: UserMessage['content']) => {
       retrying = retry;
-      return fallback.stream(work.model, { messages: [] }, { timeoutMs: 1234, signal }).result();
+      return fallback
+        .stream(
+          work.model,
+          { messages: content ? [{ role: 'user', content, timestamp: 1 }] : [] },
+          { timeoutMs: 1234, signal, apiKey: 'fixture-work-key', headers: { 'x-work': '1' } },
+        )
+        .result();
     };
-    return { calls, served, fallback, send };
+    return { calls, moved, fallback, send };
   };
 
   const moving = setup({
     'fixture-work': ['busy', 'busy'],
-    'fixture-first': [undefined, 'busy'],
+    'fixture-first': [undefined, 'quota'],
     'fixture-last': [undefined],
   });
   assert.equal((await moving.send(true)).stopReason, 'error');
   assert.equal((await moving.send(false)).stopReason, 'stop');
-  assert.equal((await moving.send(false)).stopReason, 'stop');
+  assert.equal((await moving.send(true)).stopReason, 'stop');
   assert.deepEqual(moving.calls, [
-    ['fixture-work', 1234],
-    ['fixture-work', 1234],
-    ['fixture-first', 1234],
-    ['fixture-first', 1234],
-    ['fixture-last', 1234],
+    { id: 'fixture-work', timeoutMs: 1234, credentials: true },
+    { id: 'fixture-work', timeoutMs: 1234, credentials: true },
+    { id: 'fixture-first', timeoutMs: 1234, credentials: false },
+    { id: 'fixture-first', timeoutMs: 1234, credentials: false },
+    { id: 'fixture-last', timeoutMs: 1234, credentials: false },
   ]);
-  assert.deepEqual(moving.served, [
-    [1, 0],
-    [3, 1],
+  assert.deepEqual(moving.moved, [
+    [0, 1],
+    [1, 3],
   ]);
 
-  const stop = new AbortController();
-  const stopped = setup({ 'fixture-work': ['stop', undefined] }, stop);
-  assert.equal((await stopped.send(false, stop.signal)).stopReason, 'error');
-  assert.equal(stopped.fallback.switched(), false);
-  await stopped.send(false);
+  const pictured = setup({ 'fixture-work': ['quota'], 'fixture-last': [undefined] });
+  const image = [{ type: 'image' as const, data: 'AA==', mimeType: 'image/png' }];
+  assert.equal((await pictured.send(true, undefined, image)).stopReason, 'stop');
   assert.deepEqual(
-    stopped.calls.map(([id]) => id),
-    ['fixture-work', 'fixture-work'],
+    pictured.calls.map(({ id }) => id),
+    ['fixture-work', 'fixture-last'],
   );
+
+  const crowded = setup({
+    'fixture-work': ['busy'],
+    'fixture-first': ['overflow'],
+    'fixture-last': [undefined],
+  });
+  assert.equal((await crowded.send(false)).stopReason, 'stop');
+  assert.deepEqual(
+    crowded.calls.map(({ id }) => id),
+    ['fixture-work', 'fixture-first', 'fixture-last'],
+  );
+
+  for (const outcome of ['overflow', 'partial', 'stop', 'refusal']) {
+    const stop = new AbortController();
+    const staying = setup({ 'fixture-work': [outcome] }, stop);
+    assert.equal((await staying.send(false, stop.signal)).stopReason, 'error');
+    assert.equal(staying.fallback.switched(), false, outcome);
+    assert.deepEqual(
+      staying.calls.map(({ id }) => id),
+      ['fixture-work'],
+    );
+  }
 });
 
 test('a turn fallback moves a text-only request off a native-audio model and prices each attempt with the model that served it', async () => {
@@ -10677,9 +10731,8 @@ test('a turn fallback moves a text-only request off a native-audio model and pri
       automatic: false,
       connect: async () => connection('compatible', 'fixture-shared', 5, false) as never,
       retrying: () => false,
-      floor: () => 0,
       switched: () => {},
-      served: () => {},
+      moved: () => {},
       failed: () => {},
     });
     const result = await fallback
@@ -10692,24 +10745,21 @@ test('a turn fallback moves a text-only request off a native-audio model and pri
   }
 });
 
-test('an automatic turn starts on a backup only when its work model is paused', async (t) => {
-  const { ModelPausedError } = await import('../src/ports/models.ts');
+test('an automatic turn starts on the first model that takes automatic requests, or fails with the first reason', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'nod-fallback-paused-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const { requests, access } = await fallbackServer(t, () => 200);
-  const turn = async (pause: Error) => {
+  const turn = async (refused: string[]) => {
+    const refusing = (id: string): ModelAccess => ({
+      ...access(id),
+      prepareRequest: async (_id, automatic) => {
+        if (automatic && refused.includes(id)) throw new Error(`Synthetic ${id} is paused.`);
+        return async () => {};
+      },
+    });
     const agent = createPiAgent({
       provider: 'compatible',
-      resolve: async () => [
-        {
-          ...access('fixture-primary'),
-          prepareRequest: async (_id, automatic) => {
-            if (automatic) throw pause;
-            return async () => {};
-          },
-        },
-        access('fixture-backup'),
-      ],
+      resolve: async () => [refusing('fixture-primary'), refusing('fixture-backup')],
       sessionRoot: directory,
     });
     t.after(() => agent.dispose());
@@ -10725,10 +10775,13 @@ test('an automatic turn starts on a backup only when its work model is paused', 
     await session.prompt('Synthetic question.', []);
     await session.dispose();
   };
-  await turn(new ModelPausedError('Synthetic failed the last request.'));
+  await turn(['fixture-primary']);
   assert.deepEqual(requests, ['fixture-backup']);
   requests.length = 0;
-  await assert.rejects(turn(new Error('Synthetic key was revoked.')), /revoked/);
+  await assert.rejects(
+    turn(['fixture-primary', 'fixture-backup']),
+    /Synthetic fixture-primary is paused/,
+  );
   assert.deepEqual(requests, []);
 });
 

@@ -34,14 +34,14 @@ import {
   type ResourceLoader,
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
-import { createPiModelRuntime, localModelSilenceMs } from './models.ts';
+import { createPiModelRuntime } from './models.ts';
 import { createTurnFallback, modelKey } from './fallback.ts';
 import { modelContext } from './context.ts';
 import { createContextOutput, toolOutputReference } from './context-output.ts';
 import { audioContext, audioEntries, audioMessage, readsNativeAudio } from './audio.ts';
 import { piModelTrace } from './traces.ts';
 import type { ModelTraces } from '../../ports/traces.ts';
-import { ModelPausedError, type ModelAccess } from '../../ports/models.ts';
+import type { ModelAccess } from '../../ports/models.ts';
 import type { Agent, AgentEvent } from '../../ports/agent.ts';
 import {
   closeInterruptedCalls,
@@ -232,7 +232,7 @@ function stableRequestCache(
   return (pi: ExtensionAPI) => {
     pi.on('before_provider_request', ({ payload }) => {
       const request = payload as CachedRequest | null;
-      if (!request || !Array.isArray(request.messages)) return;
+      if (!request?.system || !Array.isArray(request.messages)) return;
       if (Array.isArray(request.system) && request.system.filter((b) => b.cache_control).length > 1)
         return;
       const prefixes = [...new Set(cached.stable ?? [])].sort((a, b) => a.length - b.length);
@@ -491,7 +491,7 @@ export function createPiAgent(options: {
         chain.findIndex((item) => modelKey(item) === shared),
       );
       if (input.automatic && access) {
-        let paused: unknown;
+        let failure: unknown;
         for (; start < chain.length; start++) {
           const item = chain[start]!;
           try {
@@ -501,11 +501,10 @@ export function createPiAgent(options: {
             );
             break;
           } catch (error) {
-            paused ??= error;
-            if (!(error instanceof ModelPausedError)) throw error;
+            failure ??= error;
           }
         }
-        if (start >= chain.length) throw paused;
+        if (start === chain.length) throw failure;
       }
       if (!access && !options.apiKey)
         throw new Error('Configure the selected model provider to enable the assistant.');
@@ -697,21 +696,16 @@ export function createPiAgent(options: {
               start,
               automatic: Boolean(input.automatic),
               connect: (backup) => createPiModelRuntime(backup, runtimeOptions),
-              floor: () =>
-                Math.max(
-                  0,
-                  chain.findIndex((item) => modelKey(item) === turnModels.get(input.turnId)),
-                ),
               switched: (at) => turnModels.set(input.turnId, modelKey(chain[at]!)),
               retrying: () => {
                 const retry = settings.getRetrySettings();
                 return retry.enabled && session.retryAttempt < retry.maxRetries;
               },
-              served: (at, from) =>
+              moved: (from, to) =>
                 input.onEvent({
                   type: 'fallback',
                   from: chain[from]!.definition.choice.name,
-                  to: chain[at]!.definition.choice.name,
+                  to: chain[to]!.definition.choice.name,
                 }),
               failed: (message) => {
                 const usage = observeUsage(message);
@@ -831,7 +825,6 @@ export function createPiAgent(options: {
         steeringMode: 'all',
         cacheWarming: input.keepWarm ? 'idle' : 'streaming',
         retry: { baseDelayMs: 4000 },
-        ...(access?.provider === 'compatible' ? { httpIdleTimeoutMs: localModelSilenceMs } : {}),
       });
       const extensionLoader = new DefaultResourceLoader({
         cwd: input.workspace.path,

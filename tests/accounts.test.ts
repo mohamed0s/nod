@@ -4601,8 +4601,6 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
       false,
     );
     await assert.rejects(curator.curate(request), /Automatic requests to this model are paused/);
-    const { ModelPausedError } = await import('../src/ports/models.ts');
-    await assert.rejects(curator.curate(request), ModelPausedError);
     assert.equal(calls, 2);
     const ledger = createLedger({
       pool: { query: async () => ({ rows: [] }) } as never,
@@ -5926,6 +5924,28 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
       (await restarted.candidates()).map((access) => access.definition.choice.id),
       ['fixture-local', 'gpt-6-luna', 'gpt-6.1-sol'],
     );
+    const { createHash } = await import('node:crypto');
+    const [selected] = await restarted.candidates();
+    const credentialTag = createHash('sha256')
+      .update(JSON.stringify(await selected!.read()))
+      .digest('hex');
+    const failure = { credentialTag, reason: 'Synthetic key rejected.', failures: 1 };
+    const pause = (status: string) =>
+      f.database.query('UPDATE model_connections SET status=$2, request_failures=$3 WHERE id=$1', [
+        local,
+        status,
+        JSON.stringify({ 'fixture-local': { ...failure, retryAt: Date.now() + 60_000 } }),
+      ]);
+    const schedule = { kind: 'schedule' as const };
+    await pause('reconnect');
+    const broken = await f.create(ownerId, backend);
+    assert.equal(broken.paused(schedule), true);
+    await assert.rejects(broken.candidates(), /OpenAI-compatible connection/);
+    await pause('connected');
+    assert.equal((await f.create(ownerId, backend)).paused(schedule), false);
+    await f.database.query("UPDATE model_connections SET request_failures='{}' WHERE id=$1", [
+      local,
+    ]);
 
     await restarted.select({ connectionId: global.id, modelId: 'gpt-6.1-sol', effort: 'high' });
     await restarted.setBackups([
