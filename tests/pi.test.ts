@@ -10429,7 +10429,7 @@ async function fallbackServer(t: TestContext, answer: (model: string) => number)
   return { requests, access };
 }
 
-test('a busy work model gets Pi retries, then the same request continues on a backup, and helpers start there', async (t) => {
+test('a busy work model gets one retry, then the same request continues on a backup, and a running helper follows', async (t) => {
   const { modelPricingSignature } = await import('../src/shared/models.ts');
   const directory = await mkdtemp(join(tmpdir(), 'nod-fallback-turn-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -10459,14 +10459,12 @@ test('a busy work model gets Pi retries, then the same request continues on a ba
     });
   const events: AgentEvent[] = [];
   const main = await open({}, events);
+  const helper = await open(
+    { sessionId: randomUUID(), runId: randomUUID(), parentRunId: execution.runId },
+    [],
+  );
   await main.prompt('Synthetic question.', []);
-  assert.deepEqual(requests, [
-    'fixture-primary',
-    'fixture-primary',
-    'fixture-primary',
-    'fixture-primary',
-    'fixture-backup',
-  ]);
+  assert.deepEqual(requests, ['fixture-primary', 'fixture-primary', 'fixture-backup']);
   assert.deepEqual(
     events.filter((event) => event.type === 'fallback'),
     [{ type: 'fallback', from: 'fixture-primary', to: 'fixture-backup' }],
@@ -10475,8 +10473,6 @@ test('a busy work model gets Pi retries, then the same request continues on a ba
   assert.deepEqual(
     usage.map(({ model, status }) => [model, status]),
     [
-      ['fixture-primary', 'failed'],
-      ['fixture-primary', 'failed'],
       ['fixture-primary', 'failed'],
       ['fixture-primary', 'failed'],
       ['fixture-backup', 'succeeded'],
@@ -10492,10 +10488,6 @@ test('a busy work model gets Pi retries, then the same request continues on a ba
   assert.ok(events.some((event) => event.type === 'final' && /fixture-backup/.test(event.text)));
 
   requests.length = 0;
-  const helper = await open(
-    { sessionId: randomUUID(), runId: randomUUID(), parentRunId: execution.runId },
-    [],
-  );
   await helper.prompt('Synthetic helper question.', []);
   await helper.dispose();
   await main.dispose();
@@ -10601,6 +10593,7 @@ test('a turn fallback moves on after Pi gives up or at once on request errors, n
       automatic: true,
       connect: async (backup) => connection(backup.definition.choice.id) as never,
       retrying: () => retrying,
+      shared: () => 0,
       switched: () => {},
       moved: (from, to) => moved.push([from, to]),
       failed: () => {},
@@ -10731,6 +10724,7 @@ test('a turn fallback moves a text-only request off a native-audio model and pri
       automatic: false,
       connect: async () => connection('compatible', 'fixture-shared', 5, false) as never,
       retrying: () => false,
+      shared: () => 0,
       switched: () => {},
       moved: () => {},
       failed: () => {},
@@ -10783,6 +10777,33 @@ test('an automatic turn starts on the first model that takes automatic requests,
     /Synthetic fixture-primary is paused/,
   );
   assert.deepEqual(requests, []);
+});
+
+test('recall moves to the next backup after one failed request and reports every attempt', async (t) => {
+  const { requests, access } = await fallbackServer(t, (model) =>
+    model === 'fixture-backup' ? 200 : 503,
+  );
+  const usage: string[] = [];
+  const recall = (models: string[]) =>
+    createPiMemoryCurator({
+      provider: 'compatible',
+      resolve: async () => models.map((id) => access(id)),
+    }).curate(
+      { task: 'recall', instructions: 'Synthetic recall.', input: {} },
+      undefined,
+      (event) => usage.push(`${event.model}:${event.status}`),
+    );
+  assert.equal(await recall(['fixture-primary', 'fixture-backup']), null);
+  assert.deepEqual(requests, ['fixture-primary', 'fixture-backup']);
+  assert.deepEqual(usage, ['fixture-primary:failed', 'fixture-backup:succeeded']);
+  requests.length = 0;
+  await assert.rejects(recall(['fixture-primary', 'fixture-other']), /fixture-other/);
+  assert.deepEqual(requests, [
+    'fixture-primary',
+    'fixture-other',
+    'fixture-other',
+    'fixture-other',
+  ]);
 });
 
 test('action review failures identify the task, model, provider, and bounded provider reason', async (t) => {

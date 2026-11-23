@@ -485,11 +485,12 @@ export function createPiAgent(options: {
       const resolved = await options.resolve?.(input.model);
       const [access, ...backups] = resolved === undefined ? [] : [resolved].flat();
       const chain = access ? [access, ...backups] : [];
-      const shared = turnModels.get(input.turnId);
-      let start = Math.max(
-        0,
-        chain.findIndex((item) => modelKey(item) === shared),
-      );
+      const shared = () =>
+        Math.max(
+          0,
+          chain.findIndex((item) => modelKey(item) === turnModels.get(input.turnId)),
+        );
+      let start = shared();
       if (input.automatic && access) {
         let failure: unknown;
         for (; start < chain.length; start++) {
@@ -696,6 +697,7 @@ export function createPiAgent(options: {
               start,
               automatic: Boolean(input.automatic),
               connect: (backup) => createPiModelRuntime(backup, runtimeOptions),
+              shared,
               switched: (at) => turnModels.set(input.turnId, modelKey(chain[at]!)),
               retrying: () => {
                 const retry = settings.getRetrySettings();
@@ -824,7 +826,7 @@ export function createPiAgent(options: {
         transport: 'sse',
         steeringMode: 'all',
         cacheWarming: input.keepWarm ? 'idle' : 'streaming',
-        retry: { baseDelayMs: 4000 },
+        retry: { baseDelayMs: 4000, ...(backups.length ? { maxRetries: 1 } : {}) },
       });
       const extensionLoader = new DefaultResourceLoader({
         cwd: input.workspace.path,

@@ -59,6 +59,12 @@ function failedRequest(
   };
 }
 
+export function failedBeforeAnswer(message: AssistantMessage, phase: string | undefined) {
+  return (
+    message.stopReason === 'error' && (isRetryableAssistantError(message) || phase !== 'stream')
+  );
+}
+
 export function createTurnFallback(options: {
   primary: { access: ModelAccess; connection: Connection; stream: Stream };
   backups: ModelAccess[];
@@ -66,6 +72,7 @@ export function createTurnFallback(options: {
   automatic: boolean;
   connect(access: ModelAccess): Promise<Connection>;
   retrying(): boolean;
+  shared(): number;
   switched(at: number): void;
   moved(from: number, to: number): void;
   failed(message: AssistantMessage): void;
@@ -118,11 +125,9 @@ export function createTurnFallback(options: {
   }
 
   const movesOn = (message: AssistantMessage, index: number, connection: Connection) =>
-    message.stopReason === 'error' &&
+    failedBeforeAnswer(message, connection.requestFacts?.(message)?.requestPhase) &&
     (index > 0 || !isContextOverflow(message, connection.model.contextWindow ?? 0)) &&
-    (isRetryableAssistantError(message)
-      ? !options.retrying()
-      : connection.requestFacts?.(message)?.requestPhase !== 'stream');
+    (!isRetryableAssistantError(message) || !options.retrying());
 
   return {
     stream(target: Model<Api>, context: Context, streamOptions?: SimpleStreamOptions) {
@@ -135,6 +140,7 @@ export function createTurnFallback(options: {
       const out = createAssistantMessageEventStream();
       const stopped = () => Boolean(streamOptions?.signal?.aborted);
       void (async () => {
+        at = Math.max(at, Math.min(options.shared(), candidates.length - 1));
         for (;;) {
           const index = at;
           const { access } = candidates[index]!;

@@ -1346,8 +1346,11 @@ export function createModelService(options: {
         selection: { ...work.selection, effort: defaultEffort(row.provider, definition.choice) },
       };
     },
-    async candidates(choice: ModelSelection | null = selection): Promise<ModelAccess[]> {
-      const primary = await service.resolve(false, choice);
+    async candidates(
+      choice: ModelSelection | null = selection,
+      auxiliary = false,
+    ): Promise<ModelAccess[]> {
+      const primary = await service.resolve(auxiliary, choice);
       return [
         primary,
         ...usableBackups(primary.connectionId, primary.definition.choice.id).map(
@@ -1356,9 +1359,11 @@ export function createModelService(options: {
             provider: row.provider,
             method: row.method,
             definition,
-            effort: definition.choice.efforts.includes(item.effort)
-              ? item.effort
-              : defaultEffort(row.provider, definition.choice),
+            effort: auxiliary
+              ? lightestEffort(definition.choice.efforts)
+              : definition.choice.efforts.includes(item.effort)
+                ? item.effort
+                : defaultEffort(row.provider, definition.choice),
             ...requestAccess(row),
             needsReconnect: (credential) =>
               needsReconnect(row.id, { models: row.models, credential }),
