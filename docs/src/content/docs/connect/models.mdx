@@ -289,7 +289,7 @@ When a request fails before the model starts answering, it continues on the next
 
 The rest of the turn continues on the backup, and helpers it starts after the switch begin there. The next turn starts on your model again. The status line names the backup that took over, such as "Gemini 3.8 Flash failed, so this used GPT-6 Luna". Usage shows each attempt with the model that ran and its cost, and backups count toward the same check-in and monthly limit. A backup billed through a plan counts at its API price estimate. When every model fails, the error names each one and the provider's reason. Audio requests that include a recording stay on the audio model. Checks, such as the action checker, and memory upkeep keep their own model.
 
-A backup that is the model a kind of work already uses is skipped for that work. **Settings > Models** marks a backup that is your chat model.
+A backup that is the model a kind of work already uses is skipped for that work. **Settings > Models** marks a backup that is your chat model; it can still stand in for schedules or work Nod starts on its own when they use another model.
 
 ## Models with a small context window
 
