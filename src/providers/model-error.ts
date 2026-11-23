@@ -60,7 +60,7 @@ export async function modelServiceError(
       try {
         body = JSON.parse(text);
       } catch {
-        const literal = /"(?:message|detail|msg)"\s*:\s*("(?:[^"\\]|\\.)*")/.exec(text)?.[1];
+        const literal = /"(?:error|message|detail|msg)"\s*:\s*("(?:[^"\\]|\\.)*")/.exec(text)?.[1];
         if (literal) body = { message: JSON.parse(literal) };
       }
       const item = Array.isArray(body) ? body[0] : body;

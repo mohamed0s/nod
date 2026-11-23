@@ -157,6 +157,11 @@ test('channel verification keeps service failures specific and removes submitted
       400,
       'Synthetic context too long',
     ],
+    [
+      { error: 'Synthetic service overloaded', padding: 'x'.repeat(20_000) },
+      503,
+      'Synthetic service overloaded',
+    ],
   ] as const) {
     const failure = await modelServiceError(Response.json(body, { status }), 'Synthetic service');
     assert.equal(failure.reason, reason);
