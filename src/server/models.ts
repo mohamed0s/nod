@@ -108,6 +108,9 @@ function modelPricing(model: ModelDefinition): ModelChoice['pricing'] {
   };
 }
 
+const auxiliaryEffort = (efforts: ModelChoice['efforts']) =>
+  efforts.find((level) => ['off', 'low', 'medium'].includes(level)) ?? efforts[0];
+
 export const modelRouteInput = z.union([modelSelectionInput, z.literal('light'), z.null()]);
 export const modelBackupsInput = z.array(modelSelectionInput).max(3);
 
@@ -1360,7 +1363,7 @@ export function createModelService(options: {
             method: row.method,
             definition,
             effort: auxiliary
-              ? lightestEffort(definition.choice.efforts)
+              ? auxiliaryEffort(definition.choice.efforts)
               : definition.choice.efforts.includes(item.effort)
                 ? item.effort
                 : defaultEffort(row.provider, definition.choice),
@@ -1707,10 +1710,7 @@ export function createModelService(options: {
         provider: row.provider,
         method: row.method,
         definition,
-        effort: auxiliary
-          ? (definition.choice.efforts.find((level) => ['off', 'low', 'medium'].includes(level)) ??
-            definition.choice.efforts[0])
-          : selected.effort,
+        effort: auxiliary ? auxiliaryEffort(definition.choice.efforts) : selected.effort,
         ...(companion
           ? {
               textModel: {

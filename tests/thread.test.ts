@@ -11477,7 +11477,7 @@ test(
                   )
                   .join('; then compatible / fixture-backup: '),
               reason: /Primary credits used up\..*Backup credits used up\./,
-              code: /fixture-backup: (?!\{)/,
+              code: /fixture-backup: HTTP 402; Backup credits used up\./,
             },
             {
               prompt: 'model-plain-quota-fixture',
