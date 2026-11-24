@@ -82,6 +82,7 @@ export function createMailCheck({
           resolve(result);
         } catch (error) {
           reject(error);
+          if (!stop.aborted) await new Promise((resume) => setImmediate(resume));
         } finally {
           stop.removeEventListener('abort', cancel);
           limit.removeEventListener('abort', expire);
@@ -97,6 +98,7 @@ export function createMailCheck({
     const decision = decisions?.configured === false ? undefined : decisions;
     const read = new AbortController();
     let timeouts = 0;
+    let halted: string | undefined;
     const stop = signal ? AbortSignal.any([signal, read.signal]) : read.signal;
     return Promise.all(
       emails.map(async (email) => {
@@ -133,7 +135,7 @@ export function createMailCheck({
             if (++timeouts === slots) read.abort();
             return 'the check model did not answer within 15 seconds';
           }
-          if (read.signal.aborted) return stopped;
+          if (read.signal.aborted) return halted ?? stopped;
           if (error instanceof Error && error.message === spendingLimitReached)
             return spendingLimitReached;
           const status =
@@ -148,6 +150,10 @@ export function createMailCheck({
             typeof supplied === 'string' && Object.hasOwn(decisionFailures, supplied)
               ? supplied
               : 'mail_check_request';
+          if (httpStatus === 429) {
+            halted = 'the check model hit its rate limit (HTTP 429)';
+            read.abort();
+          }
           logFailure(
             'mail_check_failed',
             Object.assign(new Error('The mail safety check failed.'), {
