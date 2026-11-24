@@ -132,7 +132,9 @@ export function trustSources(words: BasisWords) {
 export function trustBasisProblem(answer: unknown, words: BasisWords) {
   const cited = citedSource(answer);
   if (!cited) return 'no_source';
-  return trustSources(words).includes(cited) ? 'bad_terms' : 'unlisted_source';
+  if (!trustSources(words).includes(cited)) return 'unlisted_source';
+  const { terms } = answer as { terms?: unknown };
+  return terms === undefined || terms === null ? 'missing_terms' : 'bad_terms';
 }
 
 export function trustBasis(answer: unknown, words: BasisWords): TrustBasis | undefined {

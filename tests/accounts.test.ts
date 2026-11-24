@@ -1461,7 +1461,16 @@ test('trust decisions select only owner evidence and keep reply evidence separat
     [{ run: true, source: 'schedule:2', terms: [] }, 'unlisted_source'],
     [{ run: true, source: 'schedule:4', terms: [] }, 'unlisted_source'],
     [{ run: true, source: 'scheduledInstructions[1]', terms: [] }, 'unlisted_source'],
-    [{ run: true, source: 'schedule:1' }, 'bad_terms'],
+    [{ run: true, source: 'schedule:1' }, 'missing_terms'],
+    [{ run: true, source: 'schedule:1', terms: null }, 'missing_terms'],
+    [
+      { run: true, source: 'schedule:1', terms: { user: 'today', action: 'week', same: false } },
+      'bad_terms',
+    ],
+    [
+      { run: true, source: 'schedule:1', terms: [{ user: 'today', action: 'week', same: false }] },
+      'bad_terms',
+    ],
     [
       { run: true, source: 'schedule:1', terms: [{ user: 'today', action: '', same: true }] },
       'bad_terms',

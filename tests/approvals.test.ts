@@ -2464,7 +2464,7 @@ test(
       });
 
       await t.test(
-        'only incomplete terms on an accepted source are asked again, once, for that same source',
+        'only an answer without terms on an accepted source is asked again, once, for that same source',
         async () => {
           const { withFailureLog } = await import('../src/server/failure-log.ts');
           const logged: Array<{ event: string; error: unknown }> = [];
@@ -2496,12 +2496,31 @@ test(
           const read = () => ({ run: true, source: 'read' });
           const background = () => ({ run: true, source: 'schedule:0', terms: [] });
           const cronEdit = () => ({ run: true, source: 'schedule:2', terms: [] });
-          const instructed = () => ({ run: true, source: 'schedule:1' });
-          const invented = () => ({
+          const mismatched = (input: Record<string, any>) => ({
             run: true,
-            source: 'schedule:1',
-            terms: [{ user: 'my synthetic inbox', action: 'ana@example.test', same: true }],
+            source: cite(input),
+            terms: [{ user: 'Ana', action: 'bob@example.test', same: false }],
           });
+          const malformed = (input: Record<string, any>) => ({
+            run: true,
+            source: cite(input),
+            terms: [{ user: 'Ana', action: '', same: true }],
+          });
+          const loose = (input: Record<string, any>) => ({
+            run: true,
+            source: cite(input),
+            terms: { user: 'Ana', action: 'bob@example.test', same: false },
+          });
+          const instructed = () => ({ run: true, source: 'schedule:1' });
+          const instruction = 'Every evening, email Ana the synthetic report.';
+          const listed =
+            (same: boolean, action = 'ana@example.test') =>
+            () => ({
+              run: true,
+              source: 'schedule:1',
+              terms: [{ user: 'Ana', action, same }],
+            });
+          const invented = listed(true);
           const check = async (
             turn: Awaited<ReturnType<typeof begin>>,
             action: string,
@@ -2529,7 +2548,7 @@ test(
                 {
                   messages: [
                     { id: null, at, text: 'Synthetic earlier context.', canAuthorize: false },
-                    { id: null, at, text: 'Every evening, rank my synthetic inbox.' },
+                    { id: null, at, text: instruction },
                     { id: null, at, text: '', fields: { cron: '0 20 * * *' } },
                   ],
                 },
@@ -2560,18 +2579,23 @@ test(
               message.canAuthorize === false ? [] : [`message:${index}`],
             ),
           ]);
-          assert.deepEqual(reasked(), [{ name: 'TrustCheckReask', code: 'bad_terms:accepted' }]);
+          assert.deepEqual(reasked(), [
+            { name: 'TrustCheckReask', code: 'missing_terms:accepted' },
+          ]);
           await finish(chat.turnId, 'cancelled');
 
           for (const [answers, asked, code] of [
             [[unlisted, read], 1, 'unlisted_source:skipped'],
             [[unlisted, sourced], 1, 'unlisted_source:skipped'],
             [[unsourced, sourced], 1, 'no_source:skipped'],
-            [[untermed, read], 2, 'bad_terms:source_changed'],
-            [[untermed, unlisted], 2, 'bad_terms:basis_rejected'],
-            [[untermed, untermed], 2, 'bad_terms:basis_rejected'],
-            [[untermed, declined], 2, 'bad_terms:declined'],
-            [[untermed, failure], 2, 'bad_terms:failed'],
+            [[mismatched, sourced], 1, 'bad_terms:skipped'],
+            [[malformed, sourced], 1, 'bad_terms:skipped'],
+            [[loose, sourced], 1, 'bad_terms:skipped'],
+            [[untermed, read], 2, 'missing_terms:source_changed'],
+            [[untermed, unlisted], 2, 'missing_terms:basis_rejected'],
+            [[untermed, untermed], 2, 'missing_terms:basis_rejected'],
+            [[untermed, declined], 2, 'missing_terms:declined'],
+            [[untermed, failure], 2, 'missing_terms:failed'],
             [[declined], 1, undefined],
             [[failure], 1, undefined],
           ] as const) {
@@ -2592,14 +2616,18 @@ test(
           const accepted = await check(nightly, 'GMAIL_SEND_EMAIL', send());
           compareVerdict(accepted.verdict as Awaited<ReturnType<typeof trust.check>>, {
             confirm: false,
-            basis: { kind: 'schedule', quote: 'Every evening, rank my synthetic inbox.' },
+            basis: { kind: 'schedule', quote: instruction },
           });
           assert.equal(accepted.asked.length, 2);
           assert.deepEqual(accepted.asked[0]!.validSources, ['read', 'schedule:1']);
-          assert.deepEqual(reasked(), [{ name: 'TrustCheckReask', code: 'bad_terms:accepted' }]);
+          assert.deepEqual(reasked(), [
+            { name: 'TrustCheckReask', code: 'missing_terms:accepted' },
+          ]);
           await finish(nightly.turnId, 'cancelled');
           for (const [answers, asked] of [
             [[background, invented], 1],
+            [[listed(false, 'bob@example.test'), invented], 1],
+            [[listed(true, ''), invented], 1],
             [[background, read], 1],
             [[cronEdit, read], 1],
             [[instructed, read], 2],
