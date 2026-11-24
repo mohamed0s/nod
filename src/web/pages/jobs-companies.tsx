@@ -7,9 +7,12 @@ import {
   type JobCompanyFilter,
   type JobCompanyView,
   type JobNoLuckResult,
+  type JobDraft,
   type JobPerson,
   type JobPersonStatus,
+  type JobWaves,
 } from '../../shared/job-companies';
+import type { JobTemplatesView } from '../../shared/jobs';
 import { ArrowLeft } from '../components/icons';
 import { Tabs } from '../components/tabs';
 import { Button, Checkbox, Loading, Notice } from '../components/ui';
@@ -18,6 +21,7 @@ import { api, errorMessage } from '../lib/api';
 import { copyContent } from '../lib/clipboard';
 import { formatDateTime, useDateFormat } from '../lib/date-format';
 import { pageDataCache } from '../lib/page-data-cache';
+import { languageName, textDirection } from './jobs-language';
 import { PostingCard } from './jobs-postings';
 
 type Message = { kind: 'info' | 'success' | 'error'; text: string } | null;
@@ -36,6 +40,7 @@ const filterLabels: Record<JobCompanyFilter, string> = {
   waiting: 'Waiting for an accept',
   to_ask: 'Accepted, not asked yet',
   asked: 'Asked, no reply',
+  next_wave: 'Next wave',
   no_luck: 'No luck',
 };
 const emptyText: Record<JobCompanyFilter, string> = {
@@ -43,6 +48,7 @@ const emptyText: Record<JobCompanyFilter, string> = {
   waiting: 'Nobody you invited is waiting to accept.',
   to_ask: 'Nobody who accepted is waiting for your referral request.',
   asked: 'Nobody you asked is waiting to reply.',
+  next_wave: 'No company is ready for its next wave of invites.',
   no_luck: 'No company counts as no luck.',
 };
 const statusLabels: Record<JobPersonStatus, string> = {
@@ -54,8 +60,43 @@ const statusLabels: Record<JobPersonStatus, string> = {
   declined: 'Declined',
 };
 
+const draftStateLabels: Record<JobDraft['state'], string> = {
+  filled: 'Template filled in',
+  tailoring: 'Tailoring…',
+  tailored: 'Tailored',
+  failed: 'Not tailored',
+  edited: 'Edited',
+  missing: 'Needs details',
+};
+
 const plural = (count: number, one: string, many = `${one}s`) =>
   `${count} ${count === 1 ? one : many}`;
+
+function waveText(waves: JobWaves, format: ReturnType<typeof useDateFormat>) {
+  const limit = waves.today >= waves.daily ? "today's" : "this week's";
+  const invite = (wave: string) =>
+    waves.more
+      ? `${wave}: invite ${plural(waves.more, 'more person', 'more people')} today`
+      : `${wave}: ${plural(waves.left, 'more person', 'more people')} to invite once ${limit} invite limit frees up`;
+  if (waves.state === 'open') return invite(`Wave ${waves.wave}`);
+  if (waves.state === 'next') return invite(`Wave ${waves.wave} can start`);
+  if (waves.state === 'stopped') return 'Someone referred you here, so the waves stop.';
+  if (waves.state === 'done') return `All ${waves.max} invited, and everyone had their chance.`;
+  return `Wave ${waves.wave} is full. ${
+    waves.until
+      ? `The next one opens on ${formatDateTime(waves.until, format)} if nobody helps by then.`
+      : waves.owed
+        ? `It waits for you: ${plural(waves.owed, 'person', 'people')} accepted or replied.`
+        : 'It waits for the people you invited.'
+  }`;
+}
+
+function invitesText(invites: { today: number; week: number; daily: number; weekly: number }) {
+  const counts = `Invites today: ${invites.today} of ${invites.daily}. This week: ${invites.week} of ${invites.weekly}.`;
+  if (invites.today > invites.daily || invites.week > invites.weekly)
+    return `${counts} That's past your ${invites.today > invites.daily ? 'daily' : 'weekly'} limit. Nod still logs every invite you send, but LinkedIn may restrict your account.`;
+  return counts;
+}
 
 function peopleText(counts: JobCompany['counts']) {
   if (!counts.invited) return 'Nobody invited yet';
@@ -82,6 +123,7 @@ function NoLuckBadge({ company }: { company: JobCompany }) {
 }
 
 function CompanyCard({ company, onOpen }: { company: JobCompany; onOpen(id: string): void }) {
+  const format = useDateFormat();
   return (
     <article className="saved-plan jobs-company">
       <div className="saved-plan-title">
@@ -100,6 +142,7 @@ function CompanyCard({ company, onOpen }: { company: JobCompany; onOpen(id: stri
       <p className="jobs-meta">
         {postingsText(company)} · {peopleText(company.counts)}
       </p>
+      {!company.noLuck.value && <p className="jobs-meta">{waveText(company.waves, format)}</p>}
     </article>
   );
 }
@@ -145,6 +188,7 @@ function CompanyList({
         />
       </div>
       <div id={`${tabsId}-list`} role="tabpanel" aria-labelledby={`${tabsId}-${filter}`}>
+        {data.data && <p className="jobs-meta jobs-invites">{invitesText(data.data.invites)}</p>}
         {data.error ? (
           <Notice>Could not load companies. {data.error}</Notice>
         ) : !data.data ? (
@@ -168,11 +212,175 @@ function CompanyList({
   );
 }
 
-function PersonCard({ person, onChanged }: { person: JobPerson; onChanged(): void }) {
-  const format = useDateFormat();
+function DraftBox({
+  person,
+  languages,
+  onChanged,
+}: {
+  person: JobPerson;
+  languages: string[];
+  onChanged(): void;
+}) {
+  const draft = person.draftInfo;
+  const [editing, setEditing] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
+  const languageId = useId();
+  const run = async (work: () => Promise<void>) => {
+    setBusy(true);
+    setError('');
+    try {
+      await work();
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+      onChanged();
+    }
+  };
+  const remake = () =>
+    run(async () => {
+      const result = await api<{ person: JobPerson; missing: string[] }>(
+        `/api/jobs/people/${person.id}/draft`,
+        { method: 'POST', body: JSON.stringify({ draftRevision: person.draftRevision }) },
+      );
+      if (result.missing.length) setError(missingText(result.missing));
+    });
+  const switchLanguage = (language: string) =>
+    run(async () => {
+      await api(`/api/jobs/people/${person.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ language, revision: person.revision }),
+      });
+    });
+  const save = (text: string) =>
+    run(async () => {
+      await api(`/api/jobs/people/${person.id}/draft`, {
+        method: 'PUT',
+        body: JSON.stringify({ text, draftRevision: person.draftRevision }),
+      });
+      setEditing(null);
+    });
+  const choices = [...new Set([...languages, ...(person.language ? [person.language] : [])])];
+  return (
+    <div className="jobs-draft">
+      <div className="jobs-draft-head">
+        <h4>Prepared message</h4>
+        {draft && <span className="jobs-badge">{draftStateLabels[draft.state]}</span>}
+        {draft?.language && <span className="jobs-meta">{languageName(draft.language)}</span>}
+      </div>
+      {editing !== null ? (
+        <>
+          <textarea
+            className="input jobs-message"
+            dir={textDirection(draft?.language ?? '')}
+            value={editing}
+            aria-label="Message"
+            onChange={(event) => setEditing(event.target.value)}
+          />
+          <p className="field-hint">
+            {'{greeting}'} becomes the greeting for the time of day when Nod shows the message.
+          </p>
+          <div className="jobs-actions">
+            <Button size="sm" disabled={busy || !editing.trim()} onClick={() => void save(editing)}>
+              {busy ? 'Saving…' : 'Save message'}
+            </Button>
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(null)}>
+              Cancel
+            </Button>
+          </div>
+        </>
+      ) : draft?.text ? (
+        <p className="jobs-draft-text" dir={textDirection(draft.language)}>
+          {draft.text}
+        </p>
+      ) : (
+        <p className="muted">
+          {draft?.state === 'missing'
+            ? missingText(draft.missing)
+            : 'Nod puts the referral message here once it has prepared it.'}
+        </p>
+      )}
+      {draft?.note && editing === null && (
+        <p className="jobs-meta" dir="auto">
+          What Nod changed and why: {draft.note}
+        </p>
+      )}
+      {draft?.reason && editing === null && <p className="jobs-meta">{draft.reason}</p>}
+      {editing === null && (
+        <div className="jobs-actions">
+          {draft?.text && (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={async () => {
+                try {
+                  await copyContent(draft.text);
+                  setCopied(true);
+                } catch (cause) {
+                  setError(`Could not copy the message. ${errorMessage(cause)}`);
+                }
+              }}
+            >
+              {copied ? 'Copied' : 'Copy'}
+            </Button>
+          )}
+          {draft?.raw && (
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(draft.raw)}>
+              Edit
+            </Button>
+          )}
+          <Button size="sm" variant="ghost" disabled={busy} onClick={() => void remake()}>
+            {draft?.text ? 'Remake' : 'Make it'}
+          </Button>
+          {choices.length > 0 && (
+            <label className="jobs-inline-field" htmlFor={languageId}>
+              <span>Language</span>
+              <select
+                id={languageId}
+                className="input"
+                value={person.language}
+                disabled={busy}
+                onChange={(event) => void switchLanguage(event.target.value)}
+              >
+                <option value="">Automatic</option>
+                {choices.map((tag) => (
+                  <option key={tag} value={tag}>
+                    {languageName(tag)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+      )}
+      {draft?.state === 'edited' && editing === null && (
+        <p className="field-hint">Remake or a language switch replaces your edits.</p>
+      )}
+      {error && <Notice>{error}</Notice>}
+    </div>
+  );
+}
+
+function missingText(missing: string[]) {
+  return missing.includes('template')
+    ? 'Save a message template on the Templates tab, then select Make it.'
+    : `Nod needs ${missing.map((name) => `{${name}}`).join(', ')} to fill your template. Add it to your profile or the posting, or tell Nod in chat, then select Make it.`;
+}
+
+function PersonCard({
+  person,
+  languages,
+  onChanged,
+}: {
+  person: JobPerson;
+  languages: string[];
+  onChanged(): void;
+}) {
+  const format = useDateFormat();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
   const statusId = useId();
   const move = async (status: JobPersonStatus) => {
     setBusy(true);
@@ -236,35 +444,8 @@ function PersonCard({ person, onChanged }: { person: JobPerson; onChanged(): voi
           </select>
         </label>
       </div>
-      {(person.draft || person.status === 'accepted') && (
-        <div className="jobs-draft">
-          <h4>Prepared message</h4>
-          {person.draft ? (
-            <>
-              <p className="jobs-draft-text" dir="auto">
-                {person.draft}
-              </p>
-              <div className="jobs-actions">
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={async () => {
-                    try {
-                      await copyContent(person.draft);
-                      setCopied(true);
-                    } catch (cause) {
-                      setError(`Could not copy the message. ${errorMessage(cause)}`);
-                    }
-                  }}
-                >
-                  {copied ? 'Copied' : 'Copy'}
-                </Button>
-              </div>
-            </>
-          ) : (
-            <p className="muted">Nod puts the referral message here once it has prepared it.</p>
-          )}
-        </div>
+      {(person.draftInfo || person.status === 'accepted') && (
+        <DraftBox person={person} languages={languages} onChanged={onChanged} />
       )}
       {error && <Notice>{error}</Notice>}
     </article>
@@ -273,7 +454,7 @@ function PersonCard({ person, onChanged }: { person: JobPerson; onChanged(): voi
 
 function noLuckText(company: JobCompany, limits: Limits, format: ReturnType<typeof useDateFormat>) {
   const since = company.noLuck.since ? formatDateTime(company.noLuck.since, format) : '';
-  const rule = `nobody accepted within ${plural(limits.noAcceptDays, 'day')}, or replied within ${plural(limits.noReplyDays, 'day')} of being asked`;
+  const rule = `you invited ${plural(limits.waves.max, 'person', 'people')} there and none of them helped: nobody accepted within ${plural(limits.noAcceptDays, 'day')}, or replied within ${plural(limits.noReplyDays, 'day')} of being asked`;
   const marked = `You marked it no luck${since ? ` on ${since}` : ''}`;
   if (company.noLuck.choice === 'no_luck')
     return company.applyChat?.state === 'open'
@@ -298,6 +479,10 @@ function CompanyDetail({ id, onBack }: { id: string; onBack(): void }) {
     };
   }, [path]);
   const data = usePageData<JobCompanyView>(path);
+  const templates = usePageData<JobTemplatesView>('/api/jobs/templates');
+  const languages = templates.data?.examples
+    ? []
+    : (templates.data?.templates.map((entry) => entry.language) ?? []);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<Message>(null);
   const refresh = () => {
@@ -383,6 +568,8 @@ function CompanyDetail({ id, onBack }: { id: string; onBack(): void }) {
             </>
           )}
         </p>
+        {!company.noLuck.value && <p className="jobs-meta">{waveText(company.waves, format)}</p>}
+        <p className="jobs-meta">{invitesText(company.waves)}</p>
         <label className="jobs-tick">
           <Checkbox
             checked={ticked}
@@ -429,7 +616,12 @@ function CompanyDetail({ id, onBack }: { id: string; onBack(): void }) {
         {company.people.length ? (
           <div className="saved-plan-list">
             {company.people.map((person) => (
-              <PersonCard key={person.id} person={person} onChanged={refresh} />
+              <PersonCard
+                key={person.id}
+                person={person}
+                languages={languages}
+                onChanged={refresh}
+              />
             ))}
           </div>
         ) : (
