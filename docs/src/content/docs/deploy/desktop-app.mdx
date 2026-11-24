@@ -142,6 +142,8 @@ If a download isn't available, you can import the matching `nod-Runtime-darwin-<
 
 The server listens on a loopback port that needs a token, created again at every launch. Only the app's own windows receive it, so a website in your normal browser can't reach Nod. The app sends the token only after the server it started reports that port, so another program that takes the port first never gets it.
 
+In this fork, the app uses port `4310` when it's free, so the job search's [Edge panel](/use/job-search/#the-edge-panel-beside-linkedin) finds Nod again after a restart. When `4310` is busy, it uses another free port, and the panel asks you to pair it again.
+
 Electron `safeStorage` encrypts the Vault key. It uses the macOS key store on a Mac, DPAPI on Windows and the desktop's Secret Service, such as GNOME Keyring or KWallet, on Linux. Model connections and saved logins are encrypted with the Vault key. The key and model credentials stay in the server. A saved website login reaches the browser only through the private sign-in flow.
 
 App connections use Nod's connection service. The private installation identity is encrypted with the Vault key and retained in your profile. Notion and Linear connect directly to their hosted MCP servers, and n8n to your instance's MCP server. See [Apps](/connect/apps/).
