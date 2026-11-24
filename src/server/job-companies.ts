@@ -865,15 +865,31 @@ export function createJobCompanies(options: {
     });
   }
 
-  async function knownPerson(client: Query, key: string, urn: string | null) {
-    return (
-      await client.query<PersonRow>(
-        `SELECT * FROM job_people WHERE owner_id=$1
-           AND (profile_key=$2 OR ($3::text IS NOT NULL AND (member_urn=$3 OR profile_key=$3)))
-         ORDER BY created_at,id LIMIT 1`,
-        [ownerId, key, urn],
-      )
-    ).rows[0];
+  async function seenPerson(client: Query, key: string, urn: string | null, label: string) {
+    const { rows } = await client.query<PersonRow>(
+      `SELECT * FROM job_people WHERE owner_id=$1
+         AND (profile_key=$2 OR ($3::text IS NOT NULL AND (member_urn=$3 OR profile_key=$3)))
+       ORDER BY created_at,id FOR UPDATE`,
+      [ownerId, key, urn],
+    );
+    if (rows.length > 1)
+      throw failure(
+        `${label}: the profile ${key} and the member id ${urn} belong to different people in the job search, so Nod changed neither.`,
+        409,
+      );
+    const person = rows[0];
+    if (!person) return undefined;
+    if (urn && person.member_urn && person.member_urn !== urn)
+      throw failure(
+        `${label}: ${person.profile_key} already has another member id, so Nod kept it.`,
+        409,
+      );
+    if (!memberId.test(key) && !memberId.test(person.profile_key) && person.profile_key !== key)
+      throw failure(
+        `${label}: the member id ${urn} belongs to ${person.profile_key}, not ${key}, so Nod changed neither.`,
+        409,
+      );
+    return person;
   }
 
   async function onLinkedIn(client: Query, page: LinkedInCompany) {
@@ -925,11 +941,12 @@ export function createJobCompanies(options: {
       const profile = linkedInPerson(person.profileUrl);
       if (!profile) throw failure(`people.${index}: profileUrl isn't a LinkedIn profile link.`);
       const urn = person.memberUrn ?? profile.urn;
-      const known = await knownPerson(client, profile.key, urn);
+      const known = await seenPerson(client, profile.key, urn, `people.${index}`);
       const { created, row } = await savePerson(
         client,
         known
           ? {
+              id: known.id,
               profileUrl: person.profileUrl,
               ...(urn ? { memberUrn: urn } : {}),
               ...(known.name ? {} : { name: person.name }),
@@ -977,12 +994,17 @@ export function createJobCompanies(options: {
       throw failure(
         'profileUrl needs the readable profile link, such as https://www.linkedin.com/in/example-name.',
       );
-    return Boolean(await knownPerson(client, profile.key, urn));
+    return seenPerson(client, profile.key, urn, 'The profile');
   }
 
   async function pairProfile(client: Query, profileUrl: string, urn: string) {
-    if (!(await profileTracked(client, profileUrl, urn))) return null;
-    const { row } = await savePerson(client, { profileUrl, memberUrn: urn }, 'The profile');
+    const known = await profileTracked(client, profileUrl, urn);
+    if (!known) return null;
+    const { row } = await savePerson(
+      client,
+      { id: known.id, profileUrl, memberUrn: urn },
+      'The profile',
+    );
     return row.id;
   }
 
@@ -1101,6 +1123,7 @@ export function createJobCompanies(options: {
     execute,
     registerRoutes,
     helper: {
+      find: onLinkedIn,
       company: pageCompany,
       invites: logInvites,
       accepted: acceptedPeople,
