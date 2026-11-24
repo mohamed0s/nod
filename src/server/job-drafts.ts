@@ -407,7 +407,16 @@ export function createJobDrafts(options: {
     const event = claimed.rows[0]?.id;
     if (!event) return;
     const show = await viewer(client);
-    const outcome = await notice(client, pingText(row, show(row)));
+    await client.query('SAVEPOINT job_draft_ping');
+    let outcome: string;
+    try {
+      outcome = await notice(client, pingText(row, show(row)));
+      await client.query('RELEASE SAVEPOINT job_draft_ping');
+    } catch (error) {
+      await client.query('ROLLBACK TO SAVEPOINT job_draft_ping');
+      logFailure('job_draft_ping_failed', error);
+      outcome = 'failed';
+    }
     await client.query('UPDATE job_events SET detail=$3 WHERE owner_id=$1 AND id=$2', [
       ownerId,
       event,
@@ -440,6 +449,13 @@ export function createJobDrafts(options: {
         ([, value]) => value !== undefined && value !== '',
       ),
     ) as DraftInputs;
+    if (inputs.postingId && !request.inputs?.postingId) {
+      const kept = await client.query(
+        'SELECT 1 FROM job_postings WHERE owner_id=$1 AND id=$2 AND company_id=$3',
+        [ownerId, inputs.postingId, row.company_id],
+      );
+      if (!kept.rowCount) delete inputs.postingId;
+    }
     const template = templateFor(
       templates,
       row.language || profile.languageRule.default,
@@ -601,6 +617,7 @@ export function createJobDrafts(options: {
                 revision: offered.find((entry) => entry.language === checked.language)!.revision,
               };
       } catch (error) {
+        if (options.signal?.aborted) return;
         logFailure('job_draft_tailoring_failed', error);
         const detail = redactSecretText(error instanceof Error ? error.message : String(error))
           .replace(/\s+/g, ' ')
@@ -667,7 +684,16 @@ export function createJobDrafts(options: {
     save,
     languages: async (client: Query) =>
       (await options.templates(client)).map((template) => template.language),
-    accepted: (client: Query, id: string) => make(client, id, { automatic: true }),
+    async accepted(client: Query, id: string) {
+      await client.query('SAVEPOINT job_draft');
+      try {
+        await make(client, id, { automatic: true });
+        await client.query('RELEASE SAVEPOINT job_draft');
+      } catch (error) {
+        await client.query('ROLLBACK TO SAVEPOINT job_draft');
+        logFailure('job_draft_failed', error);
+      }
+    },
     async initialize() {
       const { rows } = await pool.query<{ id: string }>(
         "SELECT id FROM job_people WHERE owner_id=$1 AND draft_state='tailoring' ORDER BY draft_at,id",

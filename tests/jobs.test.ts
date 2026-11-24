@@ -2424,6 +2424,20 @@ test(
           }),
           /isn't one of this person's company's postings/,
         );
+        const fifth = await invite(g, 'pat-example', 'Lambda Example');
+        assert.deepEqual((await prepare(g, { personId: fifth.id, postingId: named })).missing, [
+          'track',
+        ]);
+        await db.pool.query('DELETE FROM job_postings WHERE id=$1', [named]);
+        const accepted = await request(g, 'PATCH', `/api/jobs/people/${fifth.id}`, {
+          status: 'accepted',
+          revision: (await personOf(g, fifth.companyId, fifth.id)).revision,
+        });
+        assert.equal(accepted.statusCode, 200, accepted.body);
+        assert.match(
+          accepted.json().draftInfo.raw,
+          /Posting Role at Lambda Example through Posting Programme \(Posting Track\)/,
+        );
       });
 
       await t.test('the owner’s language wins, then the guess, then the default', async () => {
