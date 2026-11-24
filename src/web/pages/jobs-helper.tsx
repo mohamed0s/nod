@@ -48,31 +48,27 @@ export function Helper() {
   const revoke = (id: string) =>
     run(async () => {
       await post(`${helperPath}/${id}/revoke`);
-      setMessage({ kind: 'success', text: 'Unpaired. That panel can no longer reach Nod.' });
+      setMessage({ kind: 'success', text: 'Unpaired. That helper can no longer reach Nod.' });
     });
   return (
     <div className="jobs-panel">
       <section className="saved-plan" aria-labelledby="jobs-helper-title">
-        <h2 id="jobs-helper-title">Edge panel beside LinkedIn</h2>
+        <h2 id="jobs-helper-title">Browser helper</h2>
         <p className="jobs-meta">
-          A panel in your own Edge logs each invite you send from a company&apos;s People tab and
-          shows who accepted, with their profile, a Message link, the prepared message and your main
-          CV. It only reads LinkedIn pages you open: it never clicks, types, scrolls, opens pages or
-          loads anything on LinkedIn by itself.
+          A browser helper is a companion you install separately; it isn&apos;t part of Nod. Once
+          paired, it can log the invites you send, show who accepted with the prepared message and
+          your main CV, mark people asked and tick <strong>No luck, apply here</strong>. Its key
+          reaches only its own requests to Nod on this computer, never the rest of Nod.
         </p>
         <ol className="jobs-steps">
+          <li>Install the helper as its own instructions say.</li>
           <li>
-            In Edge, open <code>edge://extensions</code>, turn on <strong>Developer mode</strong>,
-            select <strong>Load unpacked</strong> and choose the{' '}
-            <code>extensions\linkedin-helper</code> folder of your Nod checkout. You do this once.
+            Select <strong>Pair a helper</strong> below. Nod copies a one-time code.
           </li>
           <li>
-            Select <strong>Pair the Edge panel</strong> below. Nod copies a one-time code.
-          </li>
-          <li>
-            Run <code>scripts\windows\pair-helper.ps1</code>. It checks that it&apos;s talking to
-            this Nod app, proves it has the code without sending it, and saves the panel&apos;s key
-            in the extension folder. The key never appears on screen.
+            Run the helper&apos;s pairing script. It proves it has the code without sending it, and
+            Nod sends the helper&apos;s key back encrypted under the code. The key never appears on
+            screen.
           </li>
         </ol>
         {waiting ? (
@@ -94,24 +90,24 @@ export function Helper() {
         ) : (
           <div className="jobs-actions">
             <Button size="sm" disabled={busy} onClick={() => void pair()}>
-              Pair the Edge panel
+              Pair a helper
             </Button>
           </div>
         )}
         {message && <Notice kind={message.kind}>{message.text}</Notice>}
       </section>
       <section className="jobs-company-section" aria-labelledby="jobs-helpers-title">
-        <h2 id="jobs-helpers-title">Paired panels</h2>
+        <h2 id="jobs-helpers-title">Paired helpers</h2>
         {data.error ? (
-          <Notice>Could not load the paired panels. {data.error}</Notice>
+          <Notice>Could not load the paired helpers. {data.error}</Notice>
         ) : !data.data ? (
-          <Loading label="Loading paired panels…" />
+          <Loading label="Loading paired helpers…" />
         ) : data.data.helpers.length ? (
           <div className="saved-plan-list">
             {data.data.helpers.map((helper) => (
               <article key={helper.id} className="saved-plan">
                 <div className="saved-plan-title">
-                  <h3>Edge panel</h3>
+                  <h3>Browser helper</h3>
                   <span className="jobs-badge" title="Extension id">
                     {helper.extensionId.slice(0, 8)}
                   </span>
@@ -145,7 +141,7 @@ export function Helper() {
             ))}
           </div>
         ) : (
-          <p className="muted">No panel is paired.</p>
+          <p className="muted">No helper is paired.</p>
         )}
       </section>
     </div>
