@@ -8,6 +8,7 @@ import {
   type JobCompanyView,
   type JobNoLuckResult,
   type JobDraft,
+  type JobOutcomeLabel,
   type JobPerson,
   type JobPersonStatus,
   type JobWaves,
@@ -40,6 +41,7 @@ const filterLabels: Record<JobCompanyFilter, string> = {
   waiting: 'Waiting for an accept',
   to_ask: 'Accepted, not asked yet',
   asked: 'Asked, no reply',
+  replied: 'Replied',
   next_wave: 'Next wave',
   no_luck: 'No luck',
 };
@@ -48,6 +50,7 @@ const emptyText: Record<JobCompanyFilter, string> = {
   waiting: 'Nobody you invited is waiting to accept.',
   to_ask: 'Nobody who accepted is waiting for your referral request.',
   asked: 'Nobody you asked is waiting to reply.',
+  replied: 'No replies yet, from people you asked or from companies by email.',
   next_wave: 'No company is ready for its next wave of invites.',
   no_luck: 'No company counts as no luck.',
 };
@@ -113,6 +116,37 @@ function postingsText(company: JobCompany) {
   return company.openPostings ? plural(company.openPostings, 'open posting') : 'No open postings';
 }
 
+const outcomeLabels: Record<JobOutcomeLabel, string> = {
+  interview: 'Interview',
+  rejection: 'Rejected',
+  other: 'Email reply',
+};
+const outcomeWords: Record<JobOutcomeLabel, string> = {
+  interview: 'an interview invite',
+  rejection: 'a rejection',
+  other: 'a reply',
+};
+
+function ReplyBadges({ company }: { company: JobCompany }) {
+  return (
+    <>
+      {company.outcome && (
+        <span
+          className={`jobs-badge${company.outcome.label === 'interview' ? ' jobs-badge-main' : company.outcome.label === 'rejection' ? ' jobs-badge-warning' : ''}`}
+          title="The last email this company sent you"
+        >
+          {outcomeLabels[company.outcome.label]}
+        </span>
+      )}
+      {company.followUps > 0 && (
+        <span className="jobs-badge jobs-badge-warning">
+          {company.followUps === 1 ? 'Follow-up due' : `${company.followUps} follow-ups due`}
+        </span>
+      )}
+    </>
+  );
+}
+
 function NoLuckBadge({ company }: { company: JobCompany }) {
   if (!company.noLuck.value) return null;
   return (
@@ -138,6 +172,7 @@ function CompanyCard({ company, onOpen }: { company: JobCompany; onOpen(id: stri
           </span>
         )}
         <NoLuckBadge company={company} />
+        <ReplyBadges company={company} />
       </div>
       <p className="jobs-meta">
         {postingsText(company)} · {peopleText(company.counts)}
@@ -382,14 +417,11 @@ function PersonCard({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const statusId = useId();
-  const move = async (status: JobPersonStatus) => {
+  const send = async (path: string, method: 'PATCH' | 'PUT', body: unknown) => {
     setBusy(true);
     setError('');
     try {
-      await api(`/api/jobs/people/${person.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ status, revision: person.revision }),
-      });
+      await api(path, { method, body: JSON.stringify(body) });
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {
@@ -397,6 +429,10 @@ function PersonCard({
       onChanged();
     }
   };
+  const move = (status: JobPersonStatus) =>
+    send(`/api/jobs/people/${person.id}`, 'PATCH', { status, revision: person.revision });
+  const follow = (state: 'done' | 'dismissed') =>
+    send(`/api/jobs/people/${person.id}/follow-up`, 'PUT', { state });
   return (
     <article className="saved-plan jobs-person">
       <div className="saved-plan-title">
@@ -444,6 +480,40 @@ function PersonCard({
           </select>
         </label>
       </div>
+      {person.followUp && (
+        <div className="jobs-follow-up">
+          {person.followUp.state === 'due' && (
+            <span className="jobs-badge jobs-badge-warning">Follow-up due</span>
+          )}
+          <span className="jobs-meta">
+            {person.followUp.state === 'waiting'
+              ? `Follow up on ${formatDateTime(person.followUp.at, format)} if they haven't replied.`
+              : person.followUp.state === 'due'
+                ? 'No reply since you asked. Follow up on LinkedIn in your own words, or ask Nod for a draft in chat.'
+                : `Follow-up ${person.followUp.state === 'done' ? 'done' : 'dismissed'} on ${formatDateTime(person.followUp.at, format)}.`}
+          </span>
+          {(person.followUp.state === 'due' || person.followUp.state === 'waiting') && (
+            <div className="jobs-actions">
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={busy}
+                onClick={() => void follow('done')}
+              >
+                Followed up
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={busy}
+                onClick={() => void follow('dismissed')}
+              >
+                Dismiss
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
       {(person.draftInfo || person.status === 'accepted') && (
         <DraftBox person={person} languages={languages} onChanged={onChanged} />
       )}
@@ -548,7 +618,14 @@ function CompanyDetail({ id, onBack }: { id: string; onBack(): void }) {
             {company.name}
           </h2>
           <NoLuckBadge company={company} />
+          <ReplyBadges company={company} />
         </div>
+        {company.outcome && (
+          <p className="jobs-meta">
+            Its last email, on {formatDateTime(company.outcome.at, format)}, was{' '}
+            {outcomeWords[company.outcome.label]}. Read it in your mail app.
+          </p>
+        )}
         <p className="jobs-meta">
           {postingsText(company)} · {peopleText(company.counts)}
           {company.careersUrl && /^https?:\/\//i.test(company.careersUrl) && (
