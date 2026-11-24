@@ -214,7 +214,9 @@ Only that schedule's runs, and work that started from your message, can apply jo
 - **A reply on LinkedIn** moves the person who wrote to **Replied**. A message from someone who isn't in your job search is left alone.
 - **A reply from a company** is matched by the sender's domain to the company's careers site, when the email also names the company, one of its jobs or links to its posting, or, from a hiring system, by a link to your application or the company's name. Gmail's sender check must show the sender's domain passing DMARC or DKIM. Sign-in emails are skipped. Nod's small model labels it **interview**, **rejection**, **other** or **unrelated**: an unrelated email, such as a calendar notice, is dropped without a message to you, and any other answer counts as other. The label shows on the company, and on the posting when Nod can tell which one.
 
-Each email is read once. An email Nod's safety check couldn't clear, or that the small model couldn't label, isn't counted as read, so the next run reads it again.
+Nod applies only emails sent to the linked account itself, in their To or Cc, so a copy someone else received and forwarded to you doesn't count. Mail that reaches that account only through forwarding from another address is skipped too; the **Sources** tab counts it as sent to another address.
+
+Each email is read once. An email Nod's safety check couldn't clear, or that the small model couldn't label, isn't counted as read, so the next run reads it again. Each run checks and labels at most 20 emails from companies; the rest wait for the next run. An email Gmail returns that Nod can't read, such as one too large, is skipped and counted on the **Sources** tab.
 
 ### Replies and pings
 
