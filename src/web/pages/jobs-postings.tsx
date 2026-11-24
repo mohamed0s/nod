@@ -84,6 +84,7 @@ export function PostingCard({ posting, onChanged }: { posting: JobPosting; onCha
     }
   };
   const place = [posting.company, posting.location].filter(Boolean).join(' · ');
+  const programme = [posting.programme, posting.track].filter(Boolean).join(' · ');
   const note = posting.summary || posting.excerpt;
   return (
     <article className="saved-plan jobs-posting">
@@ -113,6 +114,11 @@ export function PostingCard({ posting, onChanged }: { posting: JobPosting; onCha
       {place && (
         <p className="jobs-posting-place" dir="auto">
           {place}
+        </p>
+      )}
+      {programme && (
+        <p className="jobs-meta" dir="auto">
+          {programme}
         </p>
       )}
       {note && (
