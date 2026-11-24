@@ -465,7 +465,8 @@ export function createJobPostings(options: {
     try {
       return JSON.parse(text) as unknown;
     } catch (error) {
-      throw failure(`${what} isn't valid JSON: ${message(error)}`);
+      const position = /position (\d+)/.exec(message(error))?.[1];
+      throw failure(`${what} isn't valid JSON${position ? ` (from character ${position})` : ''}.`);
     }
   }
 
@@ -521,13 +522,25 @@ export function createJobPostings(options: {
     signal?: AbortSignal,
   ) {
     if (!options.read) throw failure('The workspace is unavailable.', 503);
-    await writer(pool, turn, 'import job postings');
+    const lineage = await writer(pool, turn, 'import job postings');
+    if (lineage === 'schedule') {
+      const on = new Map((await sources(pool)).switches.map((entry) => [entry.key, entry.enabled]));
+      const off =
+        request.source === 'email'
+          ? !on.get('email')
+          : request.source === 'career-ops' && !on.get('scan') && !on.get('scan:full');
+      if (off)
+        throw failure(
+          `The owner turned ${request.source === 'email' ? 'job-alert emails' : 'the career-ops scanners'} off on the Sources tab, so scheduled work doesn't import from them.`,
+          403,
+        );
+    }
     let bytes: Uint8Array;
     try {
       bytes = await options.read(turn.threadId, request.workspaceFile, importBytes);
     } catch (error) {
       throw failure(
-        `Nod couldn't read ${request.workspaceFile}: ${message(error)} An import reads one file of this workspace, up to ${importBytes / 1024 / 1024} MB.`,
+        `Nod couldn't read ${request.workspaceFile}: ${message(error)} The file is missing, outside this workspace or larger than ${importBytes / 1024 / 1024} MB, the most one import reads.${request.source === 'career-ops' ? ' For career-ops, import data/scan-new.tsv, which career-ops scan writes with only the recent rows it added.' : ''}`,
       );
     }
     const { rows, extra } = candidates(request.source, Buffer.from(bytes).toString('utf8'));
@@ -588,7 +601,10 @@ export function createJobPostings(options: {
           await client.query(
             `UPDATE job_postings SET score=COALESCE($3,score),score_kind=CASE WHEN $3::real IS NULL THEN score_kind ELSE $4 END,
                summary=COALESCE($5,summary),status=COALESCE($6,status),revision=revision+1,updated_at=now()
-             WHERE owner_id=$1 AND id=$2`,
+             WHERE owner_id=$1 AND id=$2 AND (
+               ($3::real IS NOT NULL AND (score IS DISTINCT FROM $3::real OR score_kind IS DISTINCT FROM $4::text))
+               OR ($5::text IS NOT NULL AND summary IS DISTINCT FROM $5::text)
+               OR ($6::text IS NOT NULL AND status IS DISTINCT FROM $6::text))`,
             [
               ownerId,
               change.id,
@@ -725,11 +741,15 @@ export function createJobPostings(options: {
       for (const post of page) posts.set(post.id, post);
     }
     const cutoff = Date.now() - firstReadDays * 86_400_000;
-    return [...posts.values()]
-      .filter((post) =>
-        last !== null ? post.id > last : !post.date || Date.parse(post.date) >= cutoff,
-      )
-      .sort((a, b) => a.id - b.id);
+    const ids = [...posts.keys()];
+    return {
+      top: ids.length ? Math.max(...ids) : null,
+      posts: [...posts.values()]
+        .filter((post) =>
+          last !== null ? post.id > last : !post.date || Date.parse(post.date) >= cutoff,
+        )
+        .sort((a, b) => a.id - b.id),
+    };
   }
 
   async function readTelegram(turn: TurnRef, name: string | undefined, signal?: AbortSignal) {
@@ -744,12 +764,16 @@ export function createJobPostings(options: {
         404,
       );
     const operation = signal ?? new AbortController().signal;
-    const reads: Array<{ channel: JobChannel; posts?: TelegramPost[]; error?: string }> = [];
+    const reads: Array<{
+      channel: JobChannel;
+      read?: { posts: TelegramPost[]; top: number | null };
+      error?: string;
+    }> = [];
     for (const channel of channels) {
       try {
         reads.push({
           channel,
-          posts: await channelPosts(
+          read: await channelPosts(
             channel,
             AbortSignal.any([operation, AbortSignal.timeout(30_000)]),
           ),
@@ -765,8 +789,8 @@ export function createJobPostings(options: {
         await writer(client, turn, 'read job channels');
         const summary: Array<Record<string, unknown>> = [];
         const created: Created[] = [];
-        for (const { channel, posts, error } of reads) {
-          if (!posts) {
+        for (const { channel, read, error } of reads) {
+          if (!read) {
             await client.query(
               `UPDATE job_sources SET last_error=$3,last_read_at=now()
                WHERE owner_id=$1 AND kind='telegram' AND lower(name)=lower($2)`,
@@ -775,13 +799,12 @@ export function createJobPostings(options: {
             summary.push({ channel: channel.name, error });
             continue;
           }
-          const rows = posts
-            .map((post) => telegramPostings(channel.name, post))
-            .filter((row): row is JobCandidate => Boolean(row));
+          const { posts, top } = read;
+          const rows = posts.flatMap((post) => telegramPostings(channel.name, post));
           const result = await importRows(client, 'telegram', rows);
-          const top = posts.length ? Math.max(...posts.map((post) => post.id)) : null;
           await client.query(
-            `UPDATE job_sources SET last_post_id=GREATEST(COALESCE(last_post_id,0),COALESCE($3::bigint,0)),
+            `UPDATE job_sources SET last_post_id=CASE WHEN $3::bigint IS NULL THEN last_post_id
+                 ELSE GREATEST(COALESCE(last_post_id,0),$3::bigint) END,
                last_read_at=now(),last_error=NULL WHERE owner_id=$1 AND kind='telegram' AND lower(name)=lower($2)`,
             [ownerId, channel.name, top],
           );

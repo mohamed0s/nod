@@ -80,7 +80,7 @@ function cleaned(url: URL, key: boolean) {
   const fragment = /^#\/jobs?\/[^/?#]+/i.exec(url.hash)?.[0];
   url.search = '';
   for (const [name, value] of kept) url.searchParams.append(name, value);
-  if (key && fragment) url.searchParams.append('_fragment', fragment.toLowerCase());
+  if (key && fragment) url.searchParams.append('_fragment', fragment);
   url.hash = !key && fragment ? fragment : '';
   if (url.pathname.length > 1) url.pathname = url.pathname.replace(/\/+$/, '') || '/';
   return url;
@@ -104,7 +104,7 @@ export function jobUrlKey(raw: string) {
   if (greenhouse) return `greenhouse:${greenhouse}`;
   const clean = cleaned(url, true);
   const host = clean.hostname.replace(/^www\./, '');
-  const path = clean.pathname.length > 1 ? clean.pathname.toLowerCase() : '';
+  const path = clean.pathname.length > 1 ? clean.pathname : '';
   return `${host}${path}${clean.search}`;
 }
 

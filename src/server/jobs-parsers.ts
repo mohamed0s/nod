@@ -68,6 +68,9 @@ const knownJob = [
   /(?:^|\.)linkedin\.com$/i,
   /(?:^|\.)indeed\.[a-z.]+$/i,
   /(?:^|\.)glassdoor\.[a-z.]+$/i,
+  /(?:^|\.)naukri\.com$/i,
+  /(?:^|\.)stepstone\.[a-z.]+$/i,
+  /(?:^|\.)seek\.(?:com\.au|co\.nz)$/i,
   /(?:^|\.)wuzzuf\.net$/i,
   /(?:^|\.)bayt\.com$/i,
 ];
@@ -169,7 +172,12 @@ function fields(lines: string[], title?: string) {
       line.length <= 200 &&
       line.toLowerCase() !== title?.toLowerCase(),
   );
-  const name = title ?? useful.shift() ?? '';
+  let name = title ?? useful.shift() ?? '';
+  const single = !title && !useful.length && splitPair(name);
+  if (single) {
+    name = single[0];
+    useful.push(single[1]);
+  }
   let company = '';
   let location = '';
   for (const line of useful) {
@@ -225,15 +233,14 @@ function fromHtml(html: string, extra: Partial<JobCandidate>) {
     for (const child of node.childNodes ?? []) visit(child);
   };
   visit(document);
+  const keyOf = new Map(anchors.map((anchor) => [anchor.node, anchor.key]));
   const keys = new WeakMap<Node, Set<string>>();
   const keysIn = (node: Node): Set<string> => {
     const known = keys.get(node);
     if (known) return known;
     const found = new Set<string>();
-    if (node.nodeName === 'a') {
-      const entry = anchors.find((anchor) => anchor.node === node);
-      if (entry) found.add(entry.key);
-    }
+    const own = keyOf.get(node);
+    if (own) found.add(own);
     for (const child of node.childNodes ?? []) for (const key of keysIn(child)) found.add(key);
     keys.set(node, found);
     return found;
@@ -254,14 +261,25 @@ function fromHtml(html: string, extra: Partial<JobCandidate>) {
       card.parentNode &&
       card.parentNode.nodeName !== 'body' &&
       card.parentNode.nodeName !== '#document' &&
-      keysIn(card.parentNode).size === 1
+      keysIn(card.parentNode).size === 1 &&
+      textLines(card.parentNode).length <= cardLines
     )
       card = card.parentNode;
-    const found = candidate(url, fields(textLines(card), title), extra);
+    const lines = textLines(card);
+    const at = title ? lines.findIndex((line) => line.toLowerCase() === title.toLowerCase()) : -1;
+    const found = candidate(
+      url,
+      fields(at >= 0 ? lines.slice(at + 1, at + cardLines) : lines, title),
+      extra,
+    );
     if (found) results.push(found);
   }
   return results;
 }
+
+const cardLines = 8;
+const trailing = /[\s(:\-–—|·•]+$/u;
+const meaningful = (line: string) => Boolean(line) && !boilerplate.test(line);
 
 function fromText(text: string, extra: Partial<JobCandidate>) {
   const lines = text.replaceAll('&amp;', '&').split(/\r?\n/);
@@ -273,9 +291,17 @@ function fromText(text: string, extra: Partial<JobCandidate>) {
       const key = url && jobLink(url) && jobUrlKey(url);
       if (!url || !key || seen.has(key)) continue;
       seen.add(key);
-      const before = clean(line.slice(0, line.indexOf(match)).replace(/[:\-–—|]\s*$/, ''), 300);
+      const before = clean(
+        line
+          .slice(0, line.indexOf(match))
+          .replace(trailing, '')
+          .replace(/\b(?:apply(?: here| now)?|link|here|details)$/i, '')
+          .replace(trailing, '')
+          .replace(/^[^\p{L}\p{N}]*(?:\d{1,2}[.)]\s*)?/u, ''),
+        300,
+      );
       const above: string[] = [];
-      for (let at = index - 1; at >= 0 && above.length < 4; at--) {
+      for (let at = index - 1; at >= 0 && above.length < 4 && !meaningful(before); at--) {
         const value = clean(lines[at]!, 300);
         if (!value) {
           if (above.length) break;
@@ -286,7 +312,7 @@ function fromText(text: string, extra: Partial<JobCandidate>) {
         if (boilerplate.test(value)) continue;
         above.unshift(value);
       }
-      if (before && !boilerplate.test(before)) above.push(before);
+      if (meaningful(before)) above.push(before);
       if (!above.length) continue;
       const found = candidate(url, fields(above), extra);
       if (found) results.push(found);
@@ -321,12 +347,23 @@ const leading = /^[^\p{L}\p{N}]+/u;
 const stripped = (line: string) =>
   line.replace(leading, '').replace(hiringPrefix, '').replace(leading, '');
 
-export function telegramPostings(channel: string, post: TelegramPost): JobCandidate | null {
+export function telegramPostings(channel: string, post: TelegramPost): JobCandidate[] {
   const lines = post.text
     .split('\n')
     .map((line) => clean(line, 300))
     .filter((line) => line && !/^(?:#\S+\s*)+$/u.test(line));
-  if (!lines.length || !/\p{L}{3}/u.test(post.text)) return null;
+  if (!lines.length || !/\p{L}{3}/u.test(post.text)) return [];
+  const excerpt = clean(post.text, 600);
+  const vacancies = new Map<string, string>();
+  for (const value of post.links) {
+    const url = unwrap(value);
+    const key = url && jobLink(url) && jobUrlKey(url);
+    if (url && key && !vacancies.has(key)) vacancies.set(key, url);
+  }
+  if (vacancies.size > 1) {
+    const rows = fromText(post.text, { postedAt: post.date, excerpt });
+    if (rows.length > 1) return rows.map((row) => ({ ...row, detail: channel }));
+  }
   const labelled = (pattern: RegExp) => {
     for (const line of lines) {
       const match = pattern.exec(line);
@@ -355,20 +392,20 @@ export function telegramPostings(channel: string, post: TelegramPost): JobCandid
     if (at) [title, company] = [at[1]!, at[2]!];
     else if (is) [company, title] = [is[1]!, is[2]!];
   }
-  const link = post.links
-    .map((value) => unwrap(value))
-    .find((value): value is string => Boolean(value) && !notJobs.test(new URL(value!).hostname));
+  const link = [...vacancies.values()][0];
   const url = (link && jobUrl(link)) || `https://t.me/${channel}/${post.id}`;
-  if (!clean(title, 200)) return null;
-  return {
-    url,
-    title: clean(title.replace(/[\s:\-–—|]+$/, ''), 200),
-    company: clean(company, 160),
-    location,
-    postedAt: post.date,
-    excerpt: clean(post.text, 600),
-    detail: channel,
-  };
+  if (!clean(title, 200)) return [];
+  return [
+    {
+      url,
+      title: clean(title.replace(/[\s:\-–—|]+$/, ''), 200),
+      company: clean(company, 160),
+      location,
+      postedAt: post.date,
+      excerpt,
+      detail: channel,
+    },
+  ];
 }
 
 const historyColumns = [

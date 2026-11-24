@@ -18,6 +18,9 @@ export const telegramChannel = z
   .string()
   .trim()
   .max(200)
+  .refine((value) => !/(?:^|\/)(?:joinchat\b|\+)/i.test(value), {
+    message: "That's an invite link. Nod reads public channels only, by their name.",
+  })
   .transform((value) =>
     value
       .replace(/^(?:https?:\/\/)?(?:www\.)?(?:t\.me|telegram\.me)\/(?:s\/)?/i, '')
@@ -28,7 +31,7 @@ export const telegramChannel = z
     z
       .string()
       .regex(
-        /^[A-Za-z][A-Za-z0-9_]{3,31}$/,
+        /^[A-Za-z][A-Za-z0-9_]{4,31}$/,
         'Use a public channel name such as example_jobs, @example_jobs or https://t.me/example_jobs.',
       ),
   );

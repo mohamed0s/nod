@@ -240,29 +240,142 @@ test('alert emails and channel posts become postings without a model', async () 
     ],
   );
   assert.equal(posts[1]!.text, 'Junior Reporting Analyst at Sample Labs\n\nSend your CV by email.');
+  assert.deepEqual(fields(posts.flatMap((post) => telegramPostings('example_jobs', post))), [
+    {
+      url: 'https://careers.example.test/jobs/12345',
+      title: 'Data Analyst',
+      company: 'Example Co',
+      location: 'Example City',
+    },
+    {
+      url: 'https://t.me/example_jobs/102',
+      title: 'Junior Reporting Analyst',
+      company: 'Sample Labs',
+      location: '',
+    },
+  ]);
+  const footer = 'https://www.example-jobs.test/';
+  const channelPost = (id: number, text: string, links: string[]) =>
+    telegramPostings('example_jobs', { id, date: at, text, links });
   assert.deepEqual(
-    posts.map((post) => {
-      const row = telegramPostings('example_jobs', post);
-      return (
-        row && { url: row.url, title: row.title, company: row.company, location: row.location }
-      );
-    }),
     [
-      {
-        url: 'https://careers.example.test/jobs/12345',
-        title: 'Data Analyst',
-        company: 'Example Co',
-        location: 'Example City',
-      },
-      {
-        url: 'https://t.me/example_jobs/102',
-        title: 'Junior Reporting Analyst',
-        company: 'Sample Labs',
-        location: '',
-      },
-      null,
+      ...channelPost(201, `Data Analyst\nCompany: Example Co\nMore jobs: ${footer}`, [footer]),
+      ...channelPost(202, `Data Engineer\nCompany: Sample Labs\nMore jobs: ${footer}`, [footer]),
+      ...channelPost(203, 'QA Tester at Example Co\nCV: https://forms.gle/Synthetic', [
+        'https://forms.gle/Synthetic',
+        'https://careers.example.test/jobs/55555',
+      ]),
+    ].map((row) => row.url),
+    [
+      'https://t.me/example_jobs/201',
+      'https://t.me/example_jobs/202',
+      'https://careers.example.test/jobs/55555',
     ],
   );
+  const digest = [
+    'Jobs this week:',
+    '1) Data Analyst at Example Co https://careers.example.test/jobs/11111',
+    '2) Data Engineer - Sample Labs - Remote https://jobs.example-board.test/jobs/p/22222-data-engineer',
+  ].join('\n');
+  assert.deepEqual(
+    fields(
+      channelPost(204, digest, [
+        'https://careers.example.test/jobs/11111',
+        'https://jobs.example-board.test/jobs/p/22222-data-engineer',
+      ]),
+    ),
+    [
+      {
+        url: 'https://careers.example.test/jobs/11111',
+        title: 'Data Analyst',
+        company: 'Example Co',
+        location: '',
+      },
+      {
+        url: 'https://jobs.example-board.test/jobs/p/22222-data-engineer',
+        title: 'Data Engineer',
+        company: 'Sample Labs',
+        location: 'Remote',
+      },
+    ],
+  );
+  const oneJob = `<html><body><table>
+<tr><td><h2>Your job alert for analyst</h2><p>1 new job matches your preferences.</p></td></tr>
+<tr><td><a href="https://www.linkedin.com/comm/jobs/view/4000000009/?trk=synthetic">Data Analyst</a><p>Example Co</p><p>Example City, Zedland</p></td></tr>
+<tr><td><a href="https://www.linkedin.com/comm/jobs/search?keywords=analyst">See all jobs</a></td></tr>
+</table></body></html>`;
+  assert.deepEqual(fields(alertPostings({ html: oneJob })), [
+    {
+      url: 'https://www.linkedin.com/jobs/view/4000000009',
+      title: 'Data Analyst',
+      company: 'Example Co',
+      location: 'Example City, Zedland',
+    },
+  ]);
+});
+
+test('the Telegram reader reads only public channel pages', async () => {
+  const { createTelegramChannels } =
+    await import('../src/providers/public-web/telegram-channel.ts');
+  const signal = new AbortController().signal;
+  const requests: string[] = [];
+  const reader = (
+    response: { status: number; type?: string; body?: string },
+    address = '1.1.1.1',
+  ) =>
+    createTelegramChannels({
+      resolver: async () => [{ address, family: 4 }],
+      request: async ({ url, maxBytes }) => {
+        requests.push(url.href);
+        assert.equal(maxBytes, 1024 * 1024);
+        return {
+          status: response.status,
+          headers: { 'content-type': response.type },
+          body: Buffer.from(response.body ?? ''),
+        };
+      },
+    });
+  const page = telegramPage(channelPosts(new Date().toISOString()));
+  assert.equal(
+    (
+      await reader({ status: 200, type: 'text/html; charset=utf-8', body: page }).read(
+        'example_jobs',
+        { before: 120, signal },
+      )
+    ).length,
+    3,
+  );
+  assert.deepEqual(requests, ['https://t.me/s/example_jobs?before=120']);
+  await assert.rejects(
+    reader({ status: 200, type: 'text/html', body: page }, '10.0.0.5').read('example_jobs', {
+      signal,
+    }),
+    /Private network destinations are blocked/,
+  );
+  await assert.rejects(
+    reader({ status: 302 }).read('example_jobs', { signal }),
+    /no public web preview for example_jobs/,
+  );
+  await assert.rejects(
+    reader({ status: 200, type: 'application/json', body: '{}' }).read('example_jobs', { signal }),
+    /not a web page/,
+  );
+  await assert.rejects(
+    reader({ status: 200, type: 'text/html', body: 'x'.repeat(1024 * 1024 + 1) }).read(
+      'example_jobs',
+      {
+        signal,
+      },
+    ),
+    /larger than 1 MB/,
+  );
+  const before = requests.length;
+  for (const name of ['jobs', 'example_jobs/../x', '1example_jobs'])
+    await assert.rejects(
+      reader({ status: 200 }).read(name, { signal }),
+      /isn't a valid public channel name/,
+    );
+  assert.equal(requests.length, before);
 });
 
 test(
@@ -278,6 +391,9 @@ test(
       ['scan', '--company', '--verify'],
       ['scan:full', '--liveness'],
       ['scan:full', '--seeds', 'yc'],
+      ['scan:full', '--ats', 'workday'],
+      ['scan:full', '--ats=greenhouse,icims'],
+      ['scan', '--dry-run --json'],
       ['liveness'],
       ['scan:seek'],
       ['scan:hn'],
@@ -1019,6 +1135,13 @@ test(
         );
         assert.equal(checked.kept[0].id, first!.id);
         assert.equal(checked.missing.length, 1);
+        const unchanged = records(
+          await a.jobs.execute(schedule, {
+            action: 'posting_update',
+            postings: [{ id: second!.id, score: 4.5, check: 'full', status: 'skipped' }],
+          }),
+        );
+        assert.equal(unchanged.updated[0].revision, checked.updated[1].revision);
         assert.equal(
           (
             await request(a, 'PATCH', `/api/jobs/postings/${first!.id}`, {
@@ -1038,6 +1161,51 @@ test(
         assert.equal(
           (await request(a, 'GET', '/api/jobs/postings?status=skipped')).json().counts.skipped,
           2,
+        );
+        put(schedule.threadId, 'shared/career-ops/alerts/today.json', [{ text: alertText }]);
+        const switches = (await request(a, 'GET', '/api/jobs/sources')).json().switches as Array<{
+          key: string;
+          revision: number;
+        }>;
+        for (const entry of switches)
+          assert.equal(
+            (
+              await request(
+                a,
+                'PUT',
+                `/api/jobs/sources/switches/${encodeURIComponent(entry.key)}`,
+                {
+                  enabled: false,
+                  revision: entry.revision,
+                },
+              )
+            ).statusCode,
+            200,
+          );
+        for (const input of [
+          { action: 'import', workspaceFile: historyFile, source: 'career-ops' },
+          {
+            action: 'import',
+            workspaceFile: 'shared/career-ops/alerts/today.json',
+            source: 'email',
+          },
+        ])
+          await assert.rejects(a.jobs.execute(schedule, input), /turned .* off on the Sources tab/);
+        assert.equal(
+          records(
+            await a.jobs.execute(owner, {
+              action: 'import',
+              workspaceFile: historyFile,
+              source: 'career-ops',
+            }),
+          ).known,
+          3,
+        );
+        records(
+          await a.jobs.execute(owner, {
+            action: 'source_update',
+            switches: { scan: true, email: true },
+          }),
         );
       });
 
@@ -1081,6 +1249,29 @@ test(
         );
         const again = records(await a.jobs.execute(schedule, { action: 'telegram' }));
         assert.equal(again.channels[0].posts, 0);
+        channels.set(
+          'quiet_jobs',
+          Array.from({ length: 30 }, (_, index) => ({
+            id: 300 + index,
+            date: old,
+            text: `Old Role ${index} at Example Co`,
+            links: [],
+          })),
+        );
+        records(
+          await a.jobs.execute(owner, {
+            action: 'source_update',
+            telegram: { add: ['quiet_jobs'] },
+          }),
+        );
+        for (let read = 0; read < 2; read++)
+          assert.deepEqual(
+            (
+              records(await a.jobs.execute(schedule, { action: 'telegram', channel: 'quiet_jobs' }))
+                .channels as Array<Record<string, unknown>>
+            ).map((entry) => [entry.posts, entry.new]),
+            [[0, 0]],
+          );
         channels.get('example_jobs')!.push({
           id: 104,
           date: at,
@@ -1104,6 +1295,7 @@ test(
           [
             ['example_jobs', 104, false],
             ['private_jobs', null, true],
+            ['quiet_jobs', 329, false],
           ],
         );
         assert.deepEqual((await request(b, 'GET', '/api/jobs/sources')).json().channels, []);

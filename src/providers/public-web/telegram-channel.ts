@@ -29,7 +29,20 @@ function text(node: Node) {
   const visit = (current: Node) => {
     if (current.nodeName === '#text') parts.push(current.value ?? '');
     else if (current.nodeName === 'br') parts.push('\n');
-    else for (const child of current.childNodes ?? []) visit(child);
+    else {
+      const start = parts.length;
+      for (const child of current.childNodes ?? []) visit(child);
+      const href = current.nodeName === 'a' ? (attribute(current, 'href') ?? '') : '';
+      const shown = parts.slice(start).join('').trim();
+      const bare = href.replace(/^https?:\/\//i, '').replace(/\/$/, '');
+      if (
+        /^https?:\/\//i.test(href) &&
+        !/^https?:\/\/(?:t\.me|telegram\.me)\//i.test(href) &&
+        shown !== href &&
+        shown.replace(/^https?:\/\//i, '').replace(/\/$/, '') !== bare
+      )
+        parts.push(` ${href}`);
+    }
   };
   visit(node);
   return parts
@@ -79,7 +92,7 @@ export function createTelegramChannels(
   const request = options.request ?? requestPublicPreview;
   return {
     async read(channel, { before, signal }) {
-      if (!/^[A-Za-z][A-Za-z0-9_]{3,31}$/.test(channel))
+      if (!/^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(channel))
         throw new Error(`${channel} isn't a valid public channel name.`);
       const address = `https://t.me/s/${channel}${before ? `?before=${before}` : ''}`;
       signal.throwIfAborted();
@@ -96,6 +109,10 @@ export function createTelegramChannels(
         );
       if (response.status !== 200)
         throw new Error(`t.me answered HTTP ${response.status} for the channel ${channel}.`);
+      if (response.body.byteLength > pageBytes)
+        throw new Error(
+          `The t.me page for ${channel} is larger than ${pageBytes / 1024 / 1024} MB, so Nod didn't read it.`,
+        );
       if (!/^text\/html/i.test(response.headers['content-type'] ?? ''))
         throw new Error(
           `t.me sent ${response.headers['content-type'] || 'no content type'} for the channel ${channel}, not a web page.`,
