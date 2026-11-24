@@ -32,6 +32,7 @@ const untraced = new Set([
   'ideas',
   'classify',
   'title',
+  'referral',
   'check',
 ]);
 
@@ -263,7 +264,7 @@ export function createPiMemoryCurator(options: {
                   AbortSignal.timeout(bounded ? 10_000 : 45_000),
                   ...(signal ? [signal] : []),
                 ]),
-            maxTokens: bounded ? 512 : task === 'ideas' ? 2048 : 8192,
+            maxTokens: bounded ? 512 : task === 'ideas' || task === 'referral' ? 2048 : 8192,
             ...(sessionId ? { sessionId } : {}),
             ...(bounded ? { maxRetries: 0, timeoutMs: 10_000 } : {}),
             reasoning: effort === 'off' ? undefined : effort,
@@ -340,7 +341,9 @@ export function createPiMemoryCurator(options: {
                   ? 'The selected model is unavailable.'
                   : task === 'title'
                     ? 'The chat title model is unavailable.'
-                    : 'The memory model is unavailable.';
+                    : task === 'referral'
+                      ? 'The referral message model is unavailable.'
+                      : 'The memory model is unavailable.';
         const detail =
           reply.stopReason === 'error' && reply.errorMessage
             ? ` The provider said: ${reply.errorMessage.trim().slice(0, 300)}`

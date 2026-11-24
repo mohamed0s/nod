@@ -140,3 +140,9 @@ export function jobFingerprint(company: string, title: string, location: string)
     .digest('hex')
     .slice(0, 32);
 }
+
+export const linkedInProfileUrl = (key: string) =>
+  `https://www.linkedin.com/in/${encodeURIComponent(key)}/`;
+
+export const linkedInMessageUrl = (urn: string) =>
+  `https://www.linkedin.com/messaging/compose/?recipient=${encodeURIComponent(urn)}`;

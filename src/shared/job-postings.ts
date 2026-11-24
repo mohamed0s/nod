@@ -49,6 +49,8 @@ export type JobPosting = {
   summary: string;
   excerpt: string;
   status: JobPostingStatus;
+  programme: string;
+  track: string;
   revision: number;
   firstSeenAt: string;
   lastSeenAt: string;

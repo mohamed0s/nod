@@ -627,6 +627,7 @@ export function createLedger({
                       ? 'review'
                       : request.task === 'plan' ||
                           request.task === 'title' ||
+                          request.task === 'referral' ||
                           request.task === 'ideas'
                         ? 'tasks'
                         : 'memory',

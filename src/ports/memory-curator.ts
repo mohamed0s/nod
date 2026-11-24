@@ -22,6 +22,7 @@ export interface MemoryCurator {
         | 'activity'
         | 'attention'
         | 'title'
+        | 'referral'
         | 'check';
       instructions: string;
       input: object;

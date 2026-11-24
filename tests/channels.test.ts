@@ -7347,3 +7347,140 @@ test(
     assert.equal(codes.at(-1), threadId);
   },
 );
+
+test(
+  'a reply to a notice Nod sent outside the chat starts a new message and never holds up the inbox',
+  { skip: !process.env.TEST_DATABASE_URL },
+  async () => {
+    const schema = `test_channel_notice_${randomUUID().replaceAll('-', '')}`;
+    const admin = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL });
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = new pg.Pool({
+      connectionString: process.env.TEST_DATABASE_URL,
+      options: `-c search_path=${schema}`,
+    });
+    const owner = 'local-development';
+    const threadId = await createFixtureTables(pool, owner);
+    const inbound: InboundMessage[] = [];
+    const sent: string[] = [];
+    const replies: Array<string | undefined> = [];
+    let literalFits = true;
+    let count = 0;
+    const say = (text: string, replyToMessageId?: string) =>
+      inbound.push({
+        channelId: 'telegram',
+        accountId: '42',
+        senderId: '123',
+        messageId: String(++count),
+        threadId: 'telegram:123',
+        text,
+        sentAt: new Date(),
+        ...(replyToMessageId ? { replyToMessageId } : {}),
+      } as InboundMessage);
+    const channels = await createChannels(pool, {
+      ownerId: owner,
+      transport: {
+        channels: [
+          {
+            id: 'telegram',
+            status: 'configured',
+            missing: [],
+            accountId: '42',
+            allowedSenderIds: ['123'],
+          },
+        ],
+        canDeliverLiteral: ({ text, literal }: { text: string; literal: string }) =>
+          literalFits && text.includes(literal),
+        poll: async (accept: (message: InboundMessage) => Promise<void>) => {
+          for (const message of inbound.splice(0)) await accept(message);
+        },
+        receive: async () => ({ status: 200, body: {} }),
+        post: async (message: { text: string }) => {
+          sent.push(message.text);
+          return { id: `fixture-sent-${sent.length}` };
+        },
+        close: async () => {},
+      } as unknown as MessagingTransport,
+      subscribe: () => () => {},
+      intervalMs: 600000,
+      submit: async (text, sourceId, client, channel, _messageId, _answer, replyToMessageId) => {
+        if (
+          replyToMessageId &&
+          !(
+            await client.query(
+              'SELECT 1 FROM messages WHERE id=$1 AND owner_id=$2 AND thread_id=$3',
+              [replyToMessageId, owner, threadId],
+            )
+          ).rowCount
+        )
+          throw Object.assign(new Error('The reply is unavailable in this conversation.'), {
+            statusCode: 404,
+          });
+        replies.push(replyToMessageId);
+        const turnId = await fixtureTurn(client, threadId, owner, channel, sourceId);
+        await client.query(
+          "INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id,reply_to_message_id) VALUES($1,$2,'user',$3,$4,$5,$6)",
+          [randomUUID(), owner, text, threadId, turnId, replyToMessageId ?? null],
+        );
+        return turnId;
+      },
+    });
+    const notice = async (literal: string) => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const queued = await channels.notice(client, {
+          text: ['Synthetic notice', '', '```', literal, '```'].join('\n'),
+          literal,
+          fallback: 'Synthetic notice without its message',
+        });
+        await client.query('COMMIT');
+        return queued;
+      } finally {
+        client.release();
+      }
+    };
+    try {
+      assert.equal(await notice('Nobody wrote to Nod here yet'), false);
+      say('first synthetic message');
+      await channels.drain();
+      assert.equal(await notice('Synthetic text to paste'), true);
+      await channels.drain();
+      assert.match(sent.at(-1)!, /Synthetic text to paste/);
+      const delivered = (
+        await pool.query(
+          `SELECT o.provider_message_ids,m.thread_id FROM channel_outbox o JOIN messages m ON m.id=o.message_id
+           WHERE m.text LIKE 'Synthetic notice%' AND o.state='sent'`,
+        )
+      ).rows;
+      assert.equal(delivered.length, 1);
+      assert.equal(delivered[0].thread_id, null);
+      say('make it shorter', delivered[0].provider_message_ids[0]);
+      await channels.drain();
+      say('an unrelated later message');
+      await channels.drain();
+      await channels.drain();
+      const inbox = (
+        await pool.query('SELECT text,state FROM channel_inbox ORDER BY received_at,source_id')
+      ).rows;
+      assert.deepEqual(
+        inbox.map((row) => [row.text, row.state]),
+        [
+          ['first synthetic message', 'submitted'],
+          ['make it shorter', 'submitted'],
+          ['an unrelated later message', 'submitted'],
+        ],
+      );
+      assert.deepEqual(replies, [undefined, undefined, undefined]);
+      literalFits = false;
+      assert.equal(await notice('Too long to arrive whole'), true);
+      await channels.drain();
+      assert.equal(sent.at(-1), 'Synthetic notice without its message');
+    } finally {
+      await channels.close();
+      await pool.end();
+      await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+      await admin.end();
+    }
+  },
+);

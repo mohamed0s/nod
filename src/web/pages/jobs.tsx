@@ -21,6 +21,7 @@ import { subscribeAppEvents } from '../lib/app-events';
 import { pageDataCache } from '../lib/page-data-cache';
 import { formatDateTime, useDateFormat } from '../lib/date-format';
 import { Companies, refreshCompanies } from './jobs-companies';
+import { languageOptions, languageSelect, textDirection } from './jobs-language';
 import { Helper, helperPath } from './jobs-helper';
 import { Postings, refreshPostings, Sources } from './jobs-postings';
 import './jobs.css';
@@ -56,62 +57,6 @@ const lines = (value: string) =>
     .map((line) => line.trim())
     .filter(Boolean);
 
-const languageOptions = [
-  'en',
-  'ar',
-  'ar-EG',
-  'fr',
-  'de',
-  'es',
-  'pt',
-  'it',
-  'nl',
-  'tr',
-  'ru',
-  'hi',
-  'ur',
-  'zh',
-  'ja',
-];
-const languageNames = new Intl.DisplayNames(['en'], { type: 'language' });
-const languageName = (tag: string) => {
-  try {
-    return languageNames.of(tag) ?? tag;
-  } catch {
-    return tag;
-  }
-};
-const rtlLanguages = new Set(['ar', 'ckb', 'dv', 'fa', 'he', 'ps', 'sd', 'ug', 'ur', 'yi']);
-const textDirection = (tag: string) =>
-  !tag.trim() ? 'auto' : rtlLanguages.has(tag.trim().split('-')[0]!.toLowerCase()) ? 'rtl' : 'ltr';
-
-function languageSelect(
-  value: string,
-  custom: boolean,
-  taken: string[],
-  onPick: (tag: string | null) => void,
-) {
-  return (
-    <select
-      className="input"
-      value={custom ? 'other' : value}
-      onChange={(event) => onPick(event.target.value === 'other' ? null : event.target.value)}
-    >
-      {!custom && !languageOptions.includes(value) && (
-        <option value={value} disabled>
-          {value ? languageName(value) : 'Choose a language'}
-        </option>
-      )}
-      {languageOptions.map((tag) => (
-        <option key={tag} value={tag} disabled={taken.includes(tag)}>
-          {languageName(tag)}
-        </option>
-      ))}
-      <option value="other">Other language…</option>
-    </select>
-  );
-}
-
 const placeholderLabels: Record<(typeof jobPlaceholders)[number], string> = {
   greeting: 'Greeting',
   first_name: 'First name',
@@ -125,6 +70,7 @@ const placeholderLabels: Record<(typeof jobPlaceholders)[number], string> = {
 
 const greetingFields = [
   { key: 'morning', label: 'Morning greeting' },
+  { key: 'afternoon', label: 'Afternoon greeting' },
   { key: 'evening', label: 'Evening greeting' },
   { key: 'default', label: 'Any time' },
 ] as const;
@@ -486,7 +432,9 @@ type ProfileForm = Record<
   | 'daily'
   | 'weekly'
   | 'noAcceptDays'
-  | 'noReplyDays',
+  | 'noReplyDays'
+  | 'waveSize'
+  | 'waveMax',
   string
 >;
 
@@ -513,6 +461,8 @@ function toForm(profile: JobProfile): ProfileForm {
     weekly: String(profile.inviteLimits.weekly),
     noAcceptDays: String(profile.noLuck.noAcceptDays),
     noReplyDays: String(profile.noLuck.noReplyDays),
+    waveSize: String(profile.waves.size),
+    waveMax: String(profile.waves.max),
   };
 }
 
@@ -558,6 +508,7 @@ function fromForm(form: ProfileForm): JobProfile {
     }),
     inviteLimits: { daily: Number(form.daily), weekly: Number(form.weekly) },
     noLuck: { noAcceptDays: Number(form.noAcceptDays), noReplyDays: Number(form.noReplyDays) },
+    waves: { size: Number(form.waveSize), max: Number(form.waveMax) },
   };
 }
 
@@ -681,7 +632,14 @@ function Profile() {
         {field('weekly', 'Invites a week', { type: 'number' })}
         {field('noAcceptDays', 'No luck after days without an accept', { type: 'number' })}
         {field('noReplyDays', 'No luck after days without a reply', { type: 'number' })}
+        {field('waveSize', 'People in a wave', { type: 'number' })}
+        {field('waveMax', 'People a company, at most', { type: 'number' })}
       </div>
+      <p className="field-hint">
+        Nod suggests inviting a company's people in waves. The next wave opens once everyone in the
+        earlier ones had their chance; it stops at the first referral, and a company counts as no
+        luck only once the most people were invited and none of them helped.
+      </p>
       {message && <Notice kind={message.kind}>{message.text}</Notice>}
       <div className="jobs-actions">
         <Button type="submit" size="sm" disabled={saving}>
@@ -840,8 +798,9 @@ function Templates() {
               ))}
             </div>
             <p className="field-hint">
-              Nod uses the morning greeting before noon and the evening one after, in your time
-              zone, and Any time when that one is empty.
+              In your time zone, Nod uses the morning greeting from 5:00 to 11:59, the afternoon one
+              from 12:00 to 16:59 and the evening one from 17:00 to 4:59, and Any time when that one
+              is empty.
             </p>
             <Field label="Message">
               <textarea

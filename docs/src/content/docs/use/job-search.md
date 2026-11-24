@@ -1,6 +1,6 @@
 ---
 title: Job search
-description: Keep your CVs and job profile in Nod, find and score jobs from scans, Telegram channels and alert emails, follow the companies and the people you invited, pair a browser helper, mark a company no luck, and see what stays private. This page describes a fork of Nod.
+description: Keep your CVs and job profile in Nod, find and score jobs from scans, Telegram channels and alert emails, follow the companies and the people you invited, get a referral message for each accept, pace invites in waves, pair a browser helper, mark a company no luck, and see what stays private. This page describes a fork of Nod.
 sidebar:
   order: 10
 ---
@@ -47,7 +47,7 @@ Nod tailors a CV only when it applies on a company's own application form, and a
 
 ## The profile
 
-The **Profile** tab shows what Nod drafted from your main CV: the name and one-line introduction it uses in messages, your location, target roles, regions, languages, programmes and tracks, work authorization and links. It also holds how many invites a day and a week to send, and after how many days without an accepted invite or a reply a company counts as no luck.
+The **Profile** tab shows what Nod drafted from your main CV: the name and one-line introduction it uses in messages, your location, target roles, regions, languages, programmes and tracks, work authorization and links. It also holds how many invites a day and a week to send, after how many days without an accepted invite or a reply someone has had their chance, and the [waves](#waves-and-limits): how many people to invite at a company at a time, and at most.
 
 Nothing here is required. Change a field and select **Save profile**, or tell Nod in chat. If the profile changed since you opened it, Nod doesn't save your version and asks you to reload it.
 
@@ -57,7 +57,7 @@ The **Templates** tab has one referral message per language. Pick the language f
 
 Nod fills these placeholders for each person: `{greeting}`, `{first_name}`, `{company}`, `{programme}`, `{track}`, `{role}`, `{my_name}` and `{my_intro}`. Select a field under the message to insert it where the cursor is. A template with any other placeholder isn't saved.
 
-`{greeting}` comes from the template's greetings: the morning one before noon and the evening one after, in your time zone, or **Any time** when that one is empty.
+`{greeting}` comes from the template's greetings, by the time in your time zone when the message is shown: **Morning** from 5:00 to 11:59, **Afternoon** from 12:00 to 16:59 and **Evening** from 17:00 to 4:59, or **Any time** when that one is empty.
 
 The examples are used until you save your own.
 
@@ -104,23 +104,49 @@ Filter the list:
 | Waiting for an accept   | someone you invited hasn't accepted yet                         |
 | Accepted, not asked yet | someone accepted and you haven't asked them yet                 |
 | Asked, no reply         | someone you asked hasn't replied yet                            |
+| Next wave               | its next [wave](#waves-and-limits) of invites can start         |
 | No luck                 | you ticked **No luck, apply here**, or Nod counts it as no luck |
 
-Select a company to see its people and postings. Each person shows their status and when it changed, **Open profile** and, once Nod knows their LinkedIn member ID, **Message**. Both open LinkedIn in a new tab for you; Nod itself never opens them. Change a person's status from the list next to them, for example to **Asked** after you send your request. The prepared referral message appears under a person who accepted, with **Copy**, once Nod has prepared it.
+Select a company to see its people and postings. Each person shows their status and when it changed, **Open profile** and, once Nod knows their LinkedIn member ID, **Message**. Both open LinkedIn in a new tab for you; Nod itself never opens them. Change a person's status from the list next to them, for example to **Asked** after you send your request. Under a person who accepted is their [referral message](#referral-messages). Each company also shows its [wave](#waves-and-limits), and the list shows today's and this week's invites against your limits.
 
 ### Tell Nod who you invited
 
 You invite people on LinkedIn yourself. A [paired browser helper](#a-paired-browser-helper) can log them as you go. Without one, tell Nod in chat or Telegram, for example "I invited Sam Example at Example Co" with their profile link, or share a profile from the LinkedIn app to Nod on Telegram and add "Sent". Nod saves them as invited under that company. Say when someone accepts, when you ask them, and when they reply or refer you, and Nod updates them.
 
+### Referral messages
+
+When someone you invited accepts, Nod prepares the message you send them, by itself:
+
+1. **It fills your template without a model.** `{first_name}` is the first word of their name, `{company}` the company, `{my_name}` and `{my_intro}` come from your profile. `{programme}`, `{track}` and `{role}` come, in this order, from what you told Nod in chat, the posting you named, the company's best-scored open posting that has them (its title is the role), and your profile when it has exactly one programme (with exactly one track) or one target role. `{greeting}` stays as it is and is filled in for the time of day whenever the message is shown. When something the template uses has no value, Nod saves no message and says what it needs; tell Nod in chat, or add it and select **Make it**.
+2. **The language** is the one you chose for that person, otherwise the one Nod guesses from their profile through **Language by country** on the **Profile** tab, otherwise your default message language. Nod uses the template for that exact language, then its base language (`ar` for `ar-EG`), then your default language's template.
+3. **Nod's small model tailors it once.** It gets your filled-in message, in each language you have a template for when you haven't chosen one, and the person's name, headline and company as data, never as instructions; their first name and company inside your message count as data too. It may change only what fits this person, such as Arabic gender agreement, the form of their name or the spacing around the greeting. It keeps your words, facts, order and length, invents nothing about you or them, and adds no claim, flattery or request. It also writes one or two sentences on what it changed and why. Nod sets its version aside, and keeps your template filled in, when it picks a language you have no template for, leaves a field such as `{company}` in, drops the greeting, adds anything your message didn't have that looks like a link, a web or email address, a handle or a phone number (including formatted links), or makes the message much longer or shorter; the message says why. The same happens when the model fails or none is set up. This runs in the background, a few at a time, and each request shows in **Usage** like Nod's other small model requests.
+4. **Nod tells you once** on Telegram or WhatsApp, in the chat where you last wrote to Nod (the main chat, not a task's topic): who accepted at which company, **Open profile** and, when Nod knows their member ID, **Message**, and the message ready to paste. The message comes as a code block, exactly as saved, so tapping it copies it on Telegram; when it can't arrive in one piece, Nod asks you to copy it from the **Companies** tab instead. For your first 10 messages it adds what it changed and why. You get one message per accept, even when a helper, the connections list and a chat message report the same accept at once. When Nod couldn't fill the message at first, it says what it needs, and sends the message itself once more when it's made. It reaches you only after you've written to Nod there at least once, and on WhatsApp only within 24 hours of your last WhatsApp message to Nod. It sends nothing to the person: you paste the message on LinkedIn yourself and attach your main CV.
+
+Replying to that message on Telegram or WhatsApp starts a new message to Nod; it doesn't answer anything Nod asked before. A bare "yes" sent after it doesn't approve an earlier question either: answer that question by replying to it.
+
+On the **Companies** tab, each message shows its state (template filled in, tailoring, tailored, not tailored, edited or needs details), with **Copy**, **Edit**, **Remake** and the **Language** list. **Edit** saves your own version; Nod never replaces it by itself, and a tailoring that finishes after your edit is dropped. **Remake** and choosing another language there make the message again, and replace your edits. Nod in chat, the helper's language buttons and a language set in chat keep your edits, unless you ask Nod to replace them. If the message changed since you opened it, Nod doesn't save your change and asks you to reload.
+
+You can also ask Nod in chat for a message, or to change one. In chat, Nod changes only what you ask, under the same rules, and for your first 10 messages it says what it changed and why.
+
+### Waves and limits
+
+Nod suggests inviting a company's people in waves: 5 at a time, up to 10 a company, by default. Each company shows where it is:
+
+| Wave line                   | Means                                                                                                          |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Wave 2: invite 3 more today | the wave has room; the number also stays within today's and this week's invite limits                          |
+| Wave 1 is full              | someone you invited is still within their chance; the line says when the next wave opens, or who waits for you |
+| Wave 2 can start            | everyone invited so far had their chance and fewer than the most were invited                                  |
+| Someone referred you here   | the waves stop at the first referral                                                                           |
+| All 10 invited              | the most were invited and everyone had their chance                                                            |
+
+Someone had their chance when they didn't accept within 7 days of your invite, didn't reply within 5 days of your referral request, or declined. Someone who accepted and waits for your request, or who replied, is still within their chance. Today and this week follow your time zone: this week is today and the six days before it. Change the sizes and days on the **Profile** tab.
+
+Nod can't stop an invite you send. Invites past your limits are still logged, and the counts say plainly that you're over.
+
 ### No luck
 
-Nod counts a company as **no luck** when nobody there referred you and each person you invited:
-
-- didn't accept within 7 days of your invite,
-- didn't reply within 5 days of your referral request, or
-- declined.
-
-While someone there has replied, or accepted and is waiting for your request, the company doesn't count as no luck. The days are the no-luck days on the **Profile** tab. Nod only shows that a company counts as no luck; it doesn't apply anywhere until you tick the box. Select **Keep trying** to keep a company open, and **Let Nod decide** to go back to the days.
+Nod counts a company as **no luck** only when its waves are done: you invited the most people there (10 by default), each had their chance, and nobody referred you. Your tick overrides it both ways. Nod only shows that a company counts as no luck; it doesn't apply anywhere until you tick the box. Select **Keep trying** to keep a company open, and **Let Nod decide** to go back to the waves.
 
 ### No luck, apply here
 
@@ -136,7 +162,9 @@ A browser helper is a companion you install separately; it isn't part of Nod or 
 - add the LinkedIn member ID of someone you invited who has none yet, so **Message** can open a chat;
 - mark people you invited as accepted, from a list of their profile links;
 - show a company's people, and the invites you sent in the last day and the last 7 days against the invite limits on the **Profile** tab;
-- show who accepted and is waiting for your message, with the prepared message once Nod has written it;
+- show who accepted and is waiting for your message, with the prepared message, its language, what Nod changed and why, and the company's wave;
+- switch the language of a person's message, which makes it again, unless you edited it;
+- make the message for someone who accepted before Nod prepared messages;
 - download your main CV;
 - change a person's status, and tick **No luck, apply here**, which works like the box on the **Companies** tab.
 
@@ -164,13 +192,14 @@ Each paired helper can start at most 5 apply chats and add at most 30 new compan
 | Anything on the Jobs page                          | You. Your own edits need no check                                                                     |
 | A CV's text, the profile, adding a CV, the main CV | Nod, only in work that started from your message, such as the conversion chat or a task you asked for |
 | The PDF of a Word CV                               | Nod, in work you started or in a schedule                                                             |
-| Invite limits and no-luck days                     | Nod, only when your words ask for exactly that change; otherwise it asks you to approve it            |
+| Invite limits, no-luck days and waves              | Nod, only when your words ask for exactly that change; otherwise it asks you to approve it            |
 | Adding postings, their scores and their status     | Nod, in work you started or in a schedule. A schedule changes the status of new postings only         |
 | Telegram channels and scanner switches             | Nod, only in work that started from your message                                                      |
 | People you invited and their status                | Nod, only in work that started from your message. A browser helper you paired                         |
+| Referral messages                                  | Nod makes one when someone accepts. Nod in chat, only in work that started from your message          |
 | No luck, apply here                                | You, on the Jobs page or through a browser helper you paired                                          |
 
-These records are your own private data, so most changes skip the [trust check](/trust/). Invite limits and no-luck days go through it like Nod's other settings, because they decide how much Nod does on its own later.
+These records are your own private data, so most changes skip the [trust check](/trust/). Invite limits, no-luck days and waves go through it like Nod's other settings, because they decide how much Nod does on its own later.
 
 ## What stays private
 
@@ -179,5 +208,6 @@ These records are your own private data, so most changes skip the [trust check](
 - career-ops runs only scripts that don't call a model. Nod's model keys never enter the workspace. Its scans run without the options that open posting pages in a browser.
 - Your postings, channels and switches are saved in Nod's database too. Nod's server reads Telegram channels and parses alert emails itself; the links in alerts are saved, never opened to import them.
 - People you invited are saved in Nod's database with their name, headline, company, status and profile link. Their profile and message links are only shown for you to open; nothing Nod runs opens or fetches them, or contacts LinkedIn.
+- To tailor a referral message, Nod sends your small model your filled-in message, your language-by-country rule when you haven't chosen the person's language, and the person's name, headline and company, and nothing else. The message Nod sends you about an accept goes only to you.
 - A paired browser helper's key works only for its own requests to Nod on this computer, never for the rest of Nod.
 - The job search doesn't need LinkedIn: jobs come from scans, Telegram channels, alert emails, links you share and company career pages. To make sure Nod never opens a website, add a rule in chat, such as "Never open linkedin.com, in the browser or with workspace scripts."

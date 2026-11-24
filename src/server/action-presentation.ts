@@ -553,6 +553,7 @@ export function actionTarget(
     if (action === 'NOD_jobs_limits_update') {
       const invites = (args.inviteLimits ?? {}) as { daily?: unknown; weekly?: unknown };
       const luck = (args.noLuck ?? {}) as { noAcceptDays?: unknown; noReplyDays?: unknown };
+      const waves = (args.waves ?? {}) as { size?: unknown; max?: unknown };
       return [
         invites.daily !== undefined && `daily invites ${String(invites.daily)}`,
         invites.weekly !== undefined && `weekly invites ${String(invites.weekly)}`,
@@ -560,6 +561,8 @@ export function actionTarget(
           `no luck after ${String(luck.noAcceptDays)} days without an accept`,
         luck.noReplyDays !== undefined &&
           `no luck after ${String(luck.noReplyDays)} days without a reply`,
+        waves.size !== undefined && `waves of ${String(waves.size)} people`,
+        waves.max !== undefined && `up to ${String(waves.max)} people a company`,
       ]
         .filter(Boolean)
         .join(', ');

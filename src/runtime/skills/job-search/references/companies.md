@@ -15,9 +15,9 @@ Save only what the owner gave you. Never look for people, profiles or companies 
 
 ## Read the dashboard
 
-`jobs companies` lists the companies with people or open postings, the people counts and whether each counts as no luck. Its filters match the Jobs page: `waiting` (an invite not accepted yet), `to_ask` (accepted, not asked yet), `asked` (asked, no reply yet) and `no_luck`. `jobs company {id}` reads one company with its people and postings.
+`jobs companies` lists the companies with people or open postings, the people counts and whether each counts as no luck. Its filters match the Jobs page: `waiting` (an invite not accepted yet), `to_ask` (accepted, not asked yet), `asked` (asked, no reply yet), `next_wave` (its next wave of invites can start) and `no_luck`. Each company's `waves` says how many more people to invite there; see [referral.md](referral.md). `jobs company {id}` reads one company with its people and postings.
 
-A company counts as no luck when everyone invited there has had their chance: an invite not accepted within `noAcceptDays`, or a request with no reply within `noReplyDays` after asking, or a decline, and nobody referred the owner. While someone has replied, or accepted and waits to be asked, it doesn't count as no luck. The owner's tick on the Jobs page overrides it either way. Counting a company as no luck starts nothing by itself.
+A company counts as no luck only when its waves are done: `waves.max` people were invited there and each had their chance, an invite not accepted within `noAcceptDays`, a request with no reply within `noReplyDays` after asking, or a decline, and nobody referred the owner. While someone has replied, or accepted and waits to be asked, it doesn't count as no luck. The owner's tick on the Jobs page overrides it either way. Counting a company as no luck starts nothing by itself.
 
 ## The apply chat
 

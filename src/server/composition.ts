@@ -1248,6 +1248,10 @@ async function initializeApplication(
     withTurnLock: (turnId, operation, signal) =>
       withTurnLock(signal ? { turnId, signal } : turnId, operation),
     telegram: createTelegramChannels(),
+    curator,
+    notify: async (client, notice) => (channels ? channels.notice(client, notice) : false),
+    timeZone: async () => (await getPreferences()).timeZone,
+    signal: closing.signal,
     changed: () => jobsChanged(ownerId),
   });
   await jobs.initialize();
@@ -3747,6 +3751,7 @@ async function initializeApplication(
       () => activity.close(),
       () => stopThreadWorkers(),
       finishWork,
+      () => jobs.drafts.idle(),
       () => runtime.dispose(),
       () => ledger.flush(),
       () => artifacts.close(),

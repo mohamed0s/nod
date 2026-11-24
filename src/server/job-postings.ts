@@ -60,6 +60,8 @@ export const jobPostingTables = `
     created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
   );
   CREATE UNIQUE INDEX IF NOT EXISTS job_sources_name ON job_sources(owner_id,kind,lower(name));
+  ALTER TABLE job_postings ADD COLUMN IF NOT EXISTS programme text NOT NULL DEFAULT '';
+  ALTER TABLE job_postings ADD COLUMN IF NOT EXISTS track text NOT NULL DEFAULT '';
 `;
 
 export const postingActions = new Set([
@@ -177,14 +179,21 @@ const toolInput = z.discriminatedUnion('action', [
               check: z.enum(['short', 'full']).optional(),
               summary: z.string().trim().max(1000).optional(),
               status: z.enum(jobPostingStatuses).optional(),
+              programme: z.string().trim().max(160).optional(),
+              track: z.string().trim().max(160).optional(),
             })
             .strict()
             .refine(
               (entry) =>
                 entry.score !== undefined ||
                 entry.summary !== undefined ||
-                entry.status !== undefined,
-              { message: 'Each change needs score, summary, status or more than one of them.' },
+                entry.status !== undefined ||
+                entry.programme !== undefined ||
+                entry.track !== undefined,
+              {
+                message:
+                  'Each change needs score, summary, status, programme, track or more than one of them.',
+              },
             ),
         )
         .min(1)
@@ -231,6 +240,8 @@ type PostingRow = {
   score_kind: 'short' | 'full' | null;
   summary: string;
   status: JobPosting['status'];
+  programme: string;
+  track: string;
   revision: number;
   first_seen_at: Date;
   last_seen_at: Date;
@@ -271,6 +282,8 @@ function view(row: PostingRow): JobPosting {
     summary: row.summary,
     excerpt: row.excerpt,
     status: row.status,
+    programme: row.programme,
+    track: row.track,
     revision: row.revision,
     firstSeenAt: row.first_seen_at.toISOString(),
     lastSeenAt: row.last_seen_at.toISOString(),
@@ -567,6 +580,8 @@ export function createJobPostings(options: {
       check?: 'short' | 'full';
       summary?: string;
       status?: JobPosting['status'];
+      programme?: string;
+      track?: string;
     }>,
     signal?: AbortSignal,
   ) {
@@ -605,11 +620,14 @@ export function createJobPostings(options: {
           }
           await client.query(
             `UPDATE job_postings SET score=COALESCE($3,score),score_kind=CASE WHEN $3::real IS NULL THEN score_kind ELSE $4 END,
-               summary=COALESCE($5,summary),status=COALESCE($6,status),revision=revision+1,updated_at=now()
+               summary=COALESCE($5,summary),status=COALESCE($6,status),
+               programme=COALESCE($7,programme),track=COALESCE($8,track),revision=revision+1,updated_at=now()
              WHERE owner_id=$1 AND id=$2 AND (
                ($3::real IS NOT NULL AND (score IS DISTINCT FROM $3::real OR score_kind IS DISTINCT FROM $4::text))
                OR ($5::text IS NOT NULL AND summary IS DISTINCT FROM $5::text)
-               OR ($6::text IS NOT NULL AND status IS DISTINCT FROM $6::text))`,
+               OR ($6::text IS NOT NULL AND status IS DISTINCT FROM $6::text)
+               OR ($7::text IS NOT NULL AND programme IS DISTINCT FROM $7::text)
+               OR ($8::text IS NOT NULL AND track IS DISTINCT FROM $8::text))`,
             [
               ownerId,
               change.id,
@@ -617,6 +635,8 @@ export function createJobPostings(options: {
               change.check ?? 'short',
               change.summary ?? null,
               status ?? null,
+              change.programme ?? null,
+              change.track ?? null,
             ],
           );
           updated.push(await onePosting(client, change.id));

@@ -13,11 +13,17 @@ import {
 } from 'node:crypto';
 import { promisify } from 'node:util';
 import { z } from 'zod';
-import { jobPersonStatuses, type JobNoLuckResult } from '../shared/job-companies.ts';
+import {
+  jobPersonStatuses,
+  type JobNoLuckResult,
+  type JobPerson,
+} from '../shared/job-companies.ts';
+import { languageTag } from '../shared/jobs.ts';
 import type {
   JobHelperAccepted,
   JobHelperCompany,
   JobHelperPairing,
+  JobHelperPerson,
   JobHelperView,
 } from '../shared/job-helper.ts';
 import { linkedInPerson, type JobCompaniesHelper } from './job-companies.ts';
@@ -117,6 +123,12 @@ const nonce = z.string().regex(/^[A-Za-z0-9_-]{43}$/, 'needs 32 random bytes in 
 const extensionId = z
   .string()
   .regex(/^[a-p]{32}$/, 'needs the browser extension id, 32 letters from a to p');
+
+function lean<T extends JobPerson>({ draftInfo, ...person }: T) {
+  if (!draftInfo) return { ...person, draftInfo: null };
+  const { raw: _raw, templateRevision: _revision, languageBy: _by, at: _at, ...kept } = draftInfo;
+  return { ...person, draftInfo: kept } satisfies JobHelperPerson;
+}
 
 async function pairingKeys(code: string, clientNonce: string, serverNonce: string) {
   const root = await derive(
@@ -623,7 +635,10 @@ export function createJobHelper(options: {
           companies.inviteCounts(pool),
           options.inviteLimits(pool),
         ]);
-        return { company, invites: { ...counts, ...limits } };
+        return {
+          company: company ? { ...company, people: company.people.map(lean) } : null,
+          invites: { ...counts, ...limits },
+        };
       });
       scope.post('/api/helper/invites', helperRoute, async (request, reply) => {
         const token = helperOf(request);
@@ -658,7 +673,10 @@ export function createJobHelper(options: {
         async (request): Promise<JobHelperAccepted> => {
           helperOf(request);
           parse(empty, request.body ?? {}, 'The request');
-          return { people: await companies.accepted(pool) };
+          return {
+            people: (await companies.accepted(pool)).map(lean),
+            languages: await companies.languages(pool),
+          };
         },
       );
       scope.post<{ Params: { id: string } }>(
@@ -666,15 +684,26 @@ export function createJobHelper(options: {
         helperRoute,
         async (request) => {
           helperOf(request);
-          const input = parse(
-            z.object({ status: z.enum(jobPersonStatuses), revision: z.int().min(0) }).strict(),
+          const { revision, make, ...change } = parse(
+            z
+              .object({
+                status: z.enum(jobPersonStatuses).optional(),
+                language: z.union([languageTag, z.literal('')]).optional(),
+                make: z.literal(true).optional(),
+                revision: z.int().min(0),
+              })
+              .strict()
+              .refine(
+                (value) => value.status !== undefined || value.language !== undefined || value.make,
+                { message: 'Send a status, a language, make: true or more than one.' },
+              ),
             request.body,
             'The status change',
           );
-          return companies.updatePerson(
-            request.params.id,
-            { status: input.status },
-            input.revision,
+          return lean(
+            await companies.updatePerson(request.params.id, change, revision, {
+              make: Boolean(make),
+            }),
           );
         },
       );

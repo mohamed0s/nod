@@ -865,7 +865,7 @@ export async function createApprovals(
            AND (u.channel=$3${delivered ? ` OR ${deliveredSql('m.id', '$1', '$3')}` : ''})
            AND ($3<>'web' OR to_jsonb(u)->>'task_id' IS NULL)
            AND NOT EXISTS (SELECT 1 FROM messages s WHERE s.id=$4 AND s.owner_id=$1 AND s.thread_id=$2 AND date_trunc('milliseconds',s.created_at)<date_trunc('milliseconds',m.created_at))
-           AND NOT EXISTS (SELECT 1 FROM messages n WHERE n.owner_id=$1 AND n.thread_id=$2 AND n.role='assistant' AND n.turn_id IS NULL AND n.delivered_channel=$3 AND n.hidden_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM messages n WHERE n.owner_id=$1 AND (n.thread_id=$2 OR n.thread_id IS NULL) AND n.role='assistant' AND n.turn_id IS NULL AND n.delivered_channel=$3 AND n.hidden_at IS NULL
              AND (n.created_at,n.id)>(m.created_at,m.id)
              AND NOT EXISTS (SELECT 1 FROM messages s WHERE s.id=$4 AND s.owner_id=$1 AND s.thread_id=$2 AND date_trunc('milliseconds',s.created_at)<date_trunc('milliseconds',n.created_at)))
            ORDER BY m.created_at DESC,m.id DESC LIMIT 1`,

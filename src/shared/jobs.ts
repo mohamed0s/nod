@@ -50,6 +50,7 @@ export const jobProfileFields = {
   noLuck: z
     .object({ noAcceptDays: z.int().min(1).max(90), noReplyDays: z.int().min(1).max(90) })
     .strict(),
+  waves: z.object({ size: z.int().min(1).max(50), max: z.int().min(1).max(200) }).strict(),
 };
 
 export const defaultJobProfile: JobProfile = {
@@ -65,6 +66,7 @@ export const defaultJobProfile: JobProfile = {
   links: [],
   inviteLimits: { daily: 15, weekly: 80 },
   noLuck: { noAcceptDays: 7, noReplyDays: 5 },
+  waves: { size: 5, max: 10 },
 };
 
 export const jobProfileSchema = z.object(jobProfileFields).strict();
@@ -75,6 +77,7 @@ export const jobProfilePatch = z
     languageRule: jobProfileFields.languageRule.partial(),
     inviteLimits: jobProfileFields.inviteLimits.partial(),
     noLuck: jobProfileFields.noLuck.partial(),
+    waves: jobProfileFields.waves.partial(),
   })
   .partial()
   .strict();
@@ -101,7 +104,7 @@ export function unknownPlaceholders(body: string) {
   ];
 }
 
-export const jobLimitFields = ['inviteLimits', 'noLuck'] as const;
+export const jobLimitFields = ['inviteLimits', 'noLuck', 'waves'] as const;
 
 export type JobCv = {
   id: string;

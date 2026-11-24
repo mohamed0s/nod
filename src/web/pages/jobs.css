@@ -138,6 +138,14 @@
   display: grid;
   gap: 12px;
 }
+.jobs-filters .tabs {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.jobs-filters .tabs-underline .tabs-tab[aria-selected='true']::after {
+  bottom: 0;
+}
 .jobs-posting h2 {
   overflow-wrap: anywhere;
 }
@@ -288,6 +296,18 @@
   line-height: 1.6;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+.jobs-draft-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.jobs-draft .input.jobs-message {
+  min-height: 200px;
+}
+.jobs-invites {
+  margin-bottom: 12px;
 }
 @media (max-width: 640px) {
   .jobs-inline-field {
