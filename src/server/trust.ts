@@ -236,8 +236,8 @@ export function createTrust(options: {
       ...(words.scheduledInstructions || change ? [ownerInstructionPolicy] : []),
       ...(rules || 'currentRules' in args ? [rulesInstructions] : []),
     ].join('\n');
-    const ask = (request: Record<string, unknown>) =>
-      review(instructions, request, signal).then(
+    const ask = (prompt: string) =>
+      review(prompt, input, signal).then(
         (answer) => ({ answer, failed: false }),
         (error: unknown) => {
           if (!signal?.aborted) logFailure('trust_check_failed', error);
@@ -246,7 +246,7 @@ export function createTrust(options: {
       );
     const first = replacementNeedsApproval
       ? { answer: { run: false }, failed: false }
-      : await ask(input);
+      : await ask(instructions);
     signal?.throwIfAborted();
     unchanged();
     let { answer } = first;
@@ -262,7 +262,7 @@ export function createTrust(options: {
       const source = citedSource(answer);
       let outcome = 'skipped';
       if (problem === 'bad_terms' && source && !options.decisions) {
-        const retry = await ask({ ...input, correction: correction(source) });
+        const retry = await ask(`${instructions}\n${correction(source)}`);
         signal?.throwIfAborted();
         unchanged();
         const checked = trustBasis(retry.answer, basisWords);

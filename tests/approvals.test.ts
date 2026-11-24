@@ -2544,14 +2544,16 @@ test(
           const ran = calls.length;
           logged.length = 0;
           const before = reviews.length;
+          const prompted = prompts.length;
           await withFailureLog(sink, () => approvals.request(chat, 'GMAIL_SEND_EMAIL', send()));
           assert.equal(calls.length, ran + 1);
           assert.equal(reviews.length, before + 2);
           const [first, second] = reviews.slice(before);
-          const { correction, ...repeated } = second!;
-          assert.equal(first!.correction, undefined);
-          assert.equal(typeof correction, 'string');
-          assert.deepEqual(repeated, first);
+          assert.deepEqual(second, first);
+          assert.equal(JSON.stringify(second).includes('correction'), false);
+          const [plain, corrected] = prompts.slice(prompted);
+          assert.ok(corrected!.startsWith(`${plain}\n`));
+          assert.ok(corrected!.length > plain!.length + 1);
           assert.deepEqual(first!.validSources, [
             'read',
             ...first!.userMessages.flatMap((message: { canAuthorize?: boolean }, index: number) =>
