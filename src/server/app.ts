@@ -683,9 +683,9 @@ export async function createApp(dependencies: AppDependencies = {}) {
       'X-Accel-Buffering': 'no',
     });
     const send = (event: ServerEvent) => {
-      if (event.type === 'jobs') {
+      if (event.type === 'jobs' || event.type === 'pages') {
         if (event.ownerId === ownerId && !reply.raw.destroyed)
-          reply.raw.write(`data: ${JSON.stringify({ type: 'jobs' })}\n\n`);
+          reply.raw.write(`data: ${JSON.stringify({ type: event.type })}\n\n`);
         return;
       }
       const payload =
