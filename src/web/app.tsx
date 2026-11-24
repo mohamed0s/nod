@@ -128,9 +128,11 @@ function Workspace({
     media?.addEventListener('change', update);
     return () => media?.removeEventListener('change', update);
   }, []);
-  const [chat, setChat] = useState<{ id?: string; fresh?: true; focus?: string }>(() => ({
-    focus: initialFocusMessageId,
-  }));
+  const [chat, setChat] = useState<{ id?: string; fresh?: true; focus?: string; agent?: string }>(
+    () => ({
+      focus: initialFocusMessageId,
+    }),
+  );
   const mainChat = !chat.id && !chat.fresh;
   const { markTaskRead } = unread;
   const readTask = useMemo(
@@ -253,16 +255,18 @@ function Workspace({
                 <div className="chat-split">
                   <ChatList
                     tasks={state.tasks ?? []}
+                    agents={state.agents ?? []}
                     chat={chat.id}
-                    fresh={Boolean(chat.fresh)}
+                    fresh={Boolean(chat.fresh) && !chat.agent}
+                    freshAgent={chat.fresh ? chat.agent : undefined}
                     unread={unread.taskCounts}
                     onChat={(id) => setChat({ id })}
-                    onNewChat={() => setChat({ fresh: true })}
+                    onNewChat={(agent) => setChat({ fresh: true, ...(agent ? { agent } : {}) })}
                     refresh={refresh}
                   />
                   <div className="chat-main">
                     <Chat
-                      key={chat.fresh ? 'new' : (chat.id ?? 'main')}
+                      key={chat.fresh ? `new-${chat.agent ?? ''}` : (chat.id ?? 'main')}
                       ownerId={session.user!.id}
                       state={state}
                       streams={streams}
@@ -289,6 +293,7 @@ function Workspace({
                       }
                       chatId={chat.id}
                       startsChat={Boolean(chat.fresh)}
+                      chatAgent={chat.fresh ? chat.agent : undefined}
                       browserLink={session.capabilities.developer}
                       onOpenChat={(id, focus) => setChat({ id, focus })}
                     />

@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Task } from '../../shared/contracts';
+import type { Agent } from '../../shared/agents';
 import { taskLabels } from '../../shared/task-status';
 import { api, errorMessage } from '../lib/api';
 import { captureAnalytics } from '../lib/analytics';
 import { ActionMenu, ActionMenuItem } from './action-menu';
-import { Ellipsis, MessageCircle, Plus } from './icons';
+import { Bot, Ellipsis, MessageCircle, Plus } from './icons';
 import { Button, Input, Notice } from './ui';
 
 const groups = [
@@ -15,19 +16,23 @@ const groups = [
 
 export function ChatList({
   tasks,
+  agents,
   chat,
   fresh,
+  freshAgent,
   unread,
   onChat,
   onNewChat,
   refresh,
 }: {
   tasks: Task[];
+  agents: Agent[];
   chat?: string;
   fresh: boolean;
+  freshAgent?: string;
   unread: Record<string, number>;
   onChat(id?: string): void;
-  onNewChat(): void;
+  onNewChat(agent?: string): void;
   refresh(): Promise<void>;
 }) {
   const [closing, setClosing] = useState<string>();
@@ -39,7 +44,8 @@ export function ChatList({
   const renameNext = useRef<Task | undefined>(undefined);
   const items = useRef(new Map<string, HTMLButtonElement>());
   const renamed = useRef<string | undefined>(undefined);
-  const open = tasks.filter((task) => !task.archivedAt);
+  const agentChats = new Set(agents.map((agent) => agent.chatId));
+  const open = tasks.filter((task) => !task.archivedAt && !agentChats.has(task.id));
   useEffect(() => {
     if (renaming || !renamed.current) return;
     items.current.get(renamed.current)?.focus({ preventScroll: true });
@@ -101,7 +107,7 @@ export function ChatList({
         size="sm"
         className="chat-list-new"
         aria-pressed={fresh}
-        onClick={onNewChat}
+        onClick={() => onNewChat()}
       >
         <Plus size={16} aria-hidden="true" />
         New chat
@@ -116,6 +122,49 @@ export function ChatList({
         <span className="chat-list-title">Main</span>
       </button>
       {error && <Notice onDismiss={() => setError('')}>{error}</Notice>}
+      {agents.length > 0 && (
+        <section className="chat-list-group" aria-label="Agents">
+          <h2>Agents</h2>
+          <ul role="list">
+            {agents.map((agent) => {
+              const task = tasks.find((item) => item.id === agent.chatId);
+              return (
+                <li key={agent.id} className="chat-list-row">
+                  <button
+                    type="button"
+                    className="chat-list-item"
+                    aria-current={
+                      (agent.chatId ? chat === agent.chatId : freshAgent === agent.id)
+                        ? 'page'
+                        : undefined
+                    }
+                    title={agent.description || undefined}
+                    onClick={() => (agent.chatId ? onChat(agent.chatId) : onNewChat(agent.id))}
+                  >
+                    {task ? (
+                      <span
+                        className="chat-list-dot"
+                        data-status={task.status}
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <Bot size={16} aria-hidden="true" />
+                    )}
+                    <span className="chat-list-title">{agent.name}</span>
+                    {task && <span className="sr-only">, {taskLabels[task.status]}</span>}
+                    {task && Boolean(unread[task.id]) && chat !== task.id && (
+                      <span className="chat-list-unread">
+                        {unread[task.id]! > 99 ? '99+' : unread[task.id]}
+                        <span className="sr-only"> unread</span>
+                      </span>
+                    )}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      )}
       {groups.map((group) => {
         const shown = open.filter((task) =>
           (group.statuses as readonly string[]).includes(task.status),
