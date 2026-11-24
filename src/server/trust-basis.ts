@@ -103,6 +103,7 @@ const ownSettings = new Set([
 
 type BasisWords = TrustWords & {
   action?: { name: string; arguments?: Record<string, unknown> };
+  replacesInstruction?: boolean;
 };
 
 export function citedSource(answer: unknown) {
@@ -156,7 +157,8 @@ export function trustBasis(answer: unknown, words: BasisWords): TrustBasis | und
   if (
     run !== true ||
     !cited ||
-    (cited !== 'read' && cited !== 'scheduleApproval' && !Array.isArray(terms))
+    (cited !== 'read' && cited !== 'scheduleApproval' && !Array.isArray(terms)) ||
+    (words.replacesInstruction && !/^(message|schedule):/.test(cited))
   )
     return undefined;
   const name = words.action?.name ?? '';

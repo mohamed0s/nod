@@ -1412,6 +1412,29 @@ test('trust decisions select only owner evidence and keep reply evidence separat
       ['read', 'schedule:0', 'schedule:1', 'rules'],
     ],
     [{ ...mixed, ...act('NOD_schedule_pause') }, ['schedule:0', 'schedule:1']],
+    [
+      { ...mixed, ...rules, ...act('NOD_schedule_update'), replacesInstruction: true },
+      ['schedule:0', 'schedule:1'],
+    ],
+    [
+      {
+        ...owner,
+        ...rules,
+        standingInstruction: 'Create my schedules.',
+        ...act('NOD_schedule_create'),
+        replacesInstruction: true,
+      },
+      ['message:0'],
+    ],
+    [
+      {
+        ...owner,
+        ...rules,
+        standingInstruction: 'Create my schedules.',
+        ...act('NOD_schedule_create'),
+      },
+      ['message:0', 'rules'],
+    ],
     [{ ...owner, ...rules, ...act('NOD_bug_report_send') }, ['message:0']],
     [
       {

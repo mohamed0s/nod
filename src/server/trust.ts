@@ -173,7 +173,14 @@ export function createTrust(options: {
     }
     const rules = words.userRules;
     const encodedArgs = JSON.stringify(args);
-    const basisWords = { ...words, action: { name: action, arguments: args } };
+    const replacesInstruction = Boolean(
+      change && (action === 'NOD_schedule_create' || typeof change.changes.prompt === 'string'),
+    );
+    const basisWords = {
+      ...words,
+      action: { name: action, arguments: args },
+      ...(replacesInstruction ? { replacesInstruction } : {}),
+    };
     const validSources = trustSources(basisWords);
     const input = JSON.parse(
       JSON.stringify({
@@ -243,14 +250,14 @@ export function createTrust(options: {
     signal?.throwIfAborted();
     unchanged();
     let { answer } = first;
-    let cited = trustBasis(answer, basisWords);
+    let basis = trustBasis(answer, basisWords);
     const verdict = (answer as { run?: unknown } | undefined)?.run;
-    if (!cited && !first.failed && verdict !== false)
+    if (!basis && !first.failed && verdict !== false)
       logFailure('trust_check_unusable', {
         name: 'TrustCheckUnusable',
         code: verdict === true ? 'basis_rejected' : 'no_answer',
       });
-    if (!cited && verdict === true) {
+    if (!basis && verdict === true) {
       const problem = trustBasisProblem(answer, basisWords);
       const source = citedSource(answer);
       let outcome = 'skipped';
@@ -274,17 +281,11 @@ export function createTrust(options: {
                   : 'no_answer';
         if (same) {
           answer = retry.answer;
-          cited = checked;
+          basis = checked;
         }
       }
       logFailure('trust_check_reask', { name: 'TrustCheckReask', code: `${problem}:${outcome}` });
     }
-    const replacesInstruction =
-      change && (action === 'NOD_schedule_create' || typeof change.changes.prompt === 'string');
-    const basis =
-      replacesInstruction && cited?.kind !== 'message' && cited?.kind !== 'schedule'
-        ? undefined
-        : cited;
     const instructionChange = change
       ? {
           instructionChange: structuredClone({
