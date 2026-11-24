@@ -20,6 +20,7 @@ import { appConfirmation } from '../src/ports/agent.ts';
 import { registerLocalAccess } from '../src/server/access.ts';
 import { runJobsTool } from '../src/runtime/jobs-tool.ts';
 import type { TelegramPost } from '../src/ports/job-sources.ts';
+import type { Automatic } from '../src/server/job-apply.ts';
 import type { MemoryCurator } from '../src/ports/memory-curator.ts';
 import { telegramChannelPosts } from '../src/providers/public-web/telegram-channel.ts';
 import type { Turn } from '../src/runtime/turn.ts';
@@ -60,6 +61,7 @@ test('subagents can only read job search records', async () => {
     'person_update',
     'draft_prepare',
     'draft_save',
+    'cv_tailored',
   ])
     await assert.rejects(runJobsTool(turn('helper'), { action }), /subagent can only read/);
   const reads = ['setup_status', 'cv_get', 'cv_file', 'list', 'sources', 'companies', 'company'];
@@ -594,6 +596,8 @@ test(
       ['liveness'],
       ['scan:seek'],
       ['scan:hn'],
+      ['application', '--cover', 'cover.txt'],
+      ['application', '--url', '--pdf'],
     ]) {
       const result = run(...args);
       assert.equal(result.status, 2, args.join(' '));
@@ -602,6 +606,7 @@ test(
     for (const args of [
       ['scan', '--since', '7', '--json'],
       ['scan:full', '--since', '7', '--ats', 'greenhouse,lever,ashby'],
+      ['application', '--url', 'https://jobs.lever.co/example/1', '--pdf', 'output/cv.pdf'],
     ])
       assert.match(run(...args).stderr, /only inside a Nod workspace/, args.join(' '));
   },
@@ -684,6 +689,7 @@ test(
           client: Pick<pg.PoolClient, 'query'>,
           notice: { text: string; literal?: string; fallback: string },
         ) => Promise<boolean>;
+        automatic?: Automatic;
       } = {},
     ) => {
       const artifacts = createArtifactService({ database: db.pool, ownerId, localRoot: root });
@@ -774,6 +780,7 @@ test(
     const expires = async (id: string) =>
       (await db.pool.query('SELECT expires_at FROM artifacts WHERE id=$1', [id])).rows[0]
         ?.expires_at as Date | null;
+    let queueStarted = false;
     try {
       await db.initializeDatabase();
       await createTasks({ pool: db.pool, ownerId: 'synthetic-owner-a' }).initialize();
@@ -981,7 +988,16 @@ test(
           inviteLimits: before.inviteLimits,
           noLuck: before.noLuck,
           waves: before.waves,
+          applyLimits: before.applyLimits,
         };
+        assert.deepEqual(before.applyLimits, { daily: 3, perCompany: 2 });
+        await assert.rejects(
+          a.jobs.execute(started, {
+            action: 'profile_update',
+            profile: { applyLimits: { daily: 10 } },
+          }),
+          /approval/,
+        );
         assert.deepEqual(asked, [{ input: { noLuck: { noReplyDays: 2 } }, current }]);
         assert.deepEqual(
           (await request(a, 'GET', '/api/jobs/profile')).json().profile.noLuck,
@@ -1013,6 +1029,7 @@ test(
               inviteLimits: edited.inviteLimits,
               noLuck: edited.noLuck,
               waves: edited.waves,
+              applyLimits: edited.applyLimits,
             }),
           db.pool,
         );
@@ -1344,7 +1361,7 @@ test(
             { action: 'posting_update', postings: [{ id, score: 1 }] },
             { action: 'telegram' },
           ])
-            await assert.rejects(a.jobs.execute(other, input), /owner message, or a schedule/);
+            await assert.rejects(a.jobs.execute(other, input), /owner message,( or)? a schedule/);
           await assert.rejects(
             a.jobs.execute(other, { action: 'source_update', switches: { scan: false } }),
             /owner message/,
@@ -1858,6 +1875,7 @@ test(
           noAcceptDays: 7,
           noReplyDays: 5,
           waves: { size: 1, max: 2 },
+          apply: { daily: 3, perCompany: 2 },
         });
         const state = (name: string) =>
           view.companies.find((entry: { name: string }) => entry.name === name).waves.state;
@@ -1938,7 +1956,12 @@ test(
             marked.company.noLuck.choice,
             marked.company.applyChat,
           ],
-          [true, 'owner', 'no_luck', { id: chat.sessionId, state: 'starting' }],
+          [
+            true,
+            'owner',
+            'no_luck',
+            { id: chat.sessionId, state: 'starting', progress: null, by: 'owner' },
+          ],
         );
         const unticked = (
           await request(c, 'PUT', `/api/jobs/companies/${beta}/no-luck`, {
@@ -1961,7 +1984,10 @@ test(
         const back = (await tick()).json();
         assert.deepEqual(
           [back.apply, back.company.applyChat],
-          [{ state: 'reused' }, { id: chat.sessionId, state: 'open' }],
+          [
+            { state: 'reused' },
+            { id: chat.sessionId, state: 'open', progress: 'needs_you', by: 'owner' },
+          ],
         );
         assert.equal(chats.length, before + 1);
         await db.pool.query('DELETE FROM tasks WHERE id=$1', [chat.sessionId]);
@@ -2958,6 +2984,464 @@ test(
       });
       await Promise.allSettled([f.app.close(), g.app.close()]);
 
+      const queue = await import('../src/server/thread.ts');
+      const { turnOrigin } = await import('../src/server/approvals.ts');
+      const { rootedIn } = await import('../src/server/jobs-shared.ts');
+      const { automaticApplyRequest } = await import('../src/server/job-companies.ts');
+      await queue.initializeThreads();
+      queueStarted = true;
+      const automatic: Automatic = {
+        start: createTasks({ pool: db.pool, ownerId: a.ownerId }).startWork,
+        lock: (client) => queue.lockThread(client),
+      };
+      const first = owner(a.ownerId, true, { automatic, timeZone: async () => 'Asia/Tokyo' });
+      const second = owner(a.ownerId, true, { automatic, timeZone: async () => 'Asia/Tokyo' });
+      await Promise.all([first.app.ready(), second.app.ready()]);
+      const settle = async (side: Side, change: Record<string, unknown>) => {
+        const page = (await request(side, 'GET', '/api/jobs/profile')).json();
+        const saved = await request(side, 'PUT', '/api/jobs/profile', {
+          revision: page.revision,
+          profile: { ...page.profile, ...change },
+        });
+        assert.equal(saved.statusCode, 200, saved.body);
+      };
+      await settle(first, { waves: { size: 1, max: 1 }, applyLimits: { daily: 2, perCompany: 2 } });
+      await settle(b, { waves: { size: 1, max: 1 } });
+      const giveUp = async (
+        side: Side,
+        name: string,
+        options: { days?: number; referred?: boolean; postings?: number } = {},
+      ) => {
+        const id = randomUUID();
+        const slug = name.toLowerCase().replaceAll(' ', '-');
+        await db.pool.query('INSERT INTO job_companies(id,owner_id,name,key) VALUES($1,$2,$3,$4)', [
+          id,
+          side.ownerId,
+          name,
+          name.toLowerCase(),
+        ]);
+        await db.pool.query(
+          `INSERT INTO job_people(id,owner_id,company_id,profile_key,status,invited_at)
+           VALUES($1,$2,$3,$4,'invited',now()-make_interval(days=>$5))`,
+          [randomUUID(), side.ownerId, id, `${slug}-one`, options.days ?? 8],
+        );
+        if (options.referred)
+          await db.pool.query(
+            `INSERT INTO job_people(id,owner_id,company_id,profile_key,status,referred_at)
+             VALUES($1,$2,$3,$4,'referred',now())`,
+            [randomUUID(), side.ownerId, id, `${slug}-two`],
+          );
+        const postings: string[] = [];
+        for (let n = 0; n < (options.postings ?? 1); n++) {
+          const posting = randomUUID();
+          const key = `careers.example.test/${slug}/${n}`;
+          await db.pool.query(
+            `INSERT INTO job_postings(id,owner_id,url_key,url,title,company,company_id,score)
+             VALUES($1,$2,$3,$4,'Synthetic Analyst',$5,$6,4)`,
+            [posting, side.ownerId, key, `https://${key}`, name, id],
+          );
+          postings.push(posting);
+        }
+        return { id, postings };
+      };
+      const chatOf = async (companyId: string) =>
+        (
+          await db.pool.query<{ apply_session_id: string | null; apply_by: string | null }>(
+            'SELECT apply_session_id,apply_by FROM job_companies WHERE id=$1',
+            [companyId],
+          )
+        ).rows[0]!;
+      const pastStarts = () =>
+        db.pool.query(
+          `UPDATE job_events SET created_at=now()-interval '3 days' WHERE owner_id=$1 AND kind='apply_started'`,
+          [a.ownerId],
+        );
+      let kappa = { id: '', postings: [] as string[] };
+      let kappaChat = '';
+
+      await t.test('Nod opens an apply chat by itself, with no owner words', async () => {
+        const before = chats.length;
+        kappa = await giveUp(first, 'Kappa Example', { postings: 2 });
+        assert.deepEqual(await first.jobs.apply.detect(), [kappa.id]);
+        const started = await chatOf(kappa.id);
+        kappaChat = started.apply_session_id!;
+        assert.equal(started.apply_by, 'rule');
+        assert.equal(chats.length, before);
+        const brief = automaticApplyRequest(kappa.id);
+        assert.doesNotMatch(brief, /I marked/);
+        assert.deepEqual(
+          (
+            await db.pool.query(
+              'SELECT title,brief,source_message_id,message_id,state FROM tasks WHERE id=$1 AND owner_id=$2',
+              [kappaChat, a.ownerId],
+            )
+          ).rows,
+          [
+            {
+              title: 'Apply at Kappa Example',
+              brief,
+              source_message_id: null,
+              message_id: null,
+              state: 'open',
+            },
+          ],
+        );
+        const turns = (
+          await db.pool.query(
+            `SELECT id,thread_id,source,message_id,proactive,parent_turn_id,task_id,prompt FROM turns
+             WHERE owner_id=$1 AND session_id=$2`,
+            [a.ownerId, kappaChat],
+          )
+        ).rows;
+        assert.equal(turns.length, 1);
+        const [work] = turns;
+        assert.deepEqual(
+          [work.source, work.message_id, work.proactive, work.parent_turn_id, work.task_id],
+          ['event', null, false, null, kappaChat],
+        );
+        assert.equal(work.prompt, brief);
+        assert.equal(
+          (
+            await db.pool.query(
+              `SELECT count(*)::int AS n FROM messages WHERE owner_id=$1
+               AND (turn_id=$2 OR text LIKE '%counts as no luck%' OR text LIKE '%' || $3 || '%')`,
+              [a.ownerId, work.id, kappa.id],
+            )
+          ).rows[0].n,
+          0,
+        );
+        assert.equal(
+          await rootedIn(db.pool, a.ownerId, { threadId: work.thread_id, turnId: work.id }),
+          'other',
+        );
+        const origin = await turnOrigin(work.id);
+        assert.deepEqual(
+          [origin?.source, origin?.messageIds, origin?.taskId],
+          ['event', [], kappaChat],
+        );
+        const view = (await request(first, 'GET', `/api/jobs/companies/${kappa.id}`)).json();
+        assert.deepEqual(view.applyChat, {
+          id: kappaChat,
+          state: 'open',
+          progress: 'working',
+          by: 'rule',
+        });
+        assert.deepEqual(await first.jobs.apply.detect(), []);
+        await db.pool.query('UPDATE job_companies SET apply_session_id=NULL WHERE id=$1', [
+          kappa.id,
+        ]);
+        assert.deepEqual(await second.jobs.apply.detect(), []);
+        await db.pool.query('UPDATE job_companies SET apply_session_id=$2 WHERE id=$1', [
+          kappa.id,
+          kappaChat,
+        ]);
+      });
+
+      await t.test('one apply chat a company, when Nod and a tick start it at once', async () => {
+        const lambda = await giveUp(first, 'Lambda Example');
+        const before = chats.length;
+        const [one, two, ticked] = await Promise.all([
+          first.jobs.apply.detect(),
+          second.jobs.apply.detect(),
+          request(first, 'PUT', `/api/jobs/companies/${lambda.id}/no-luck`, { noLuck: true }),
+        ]);
+        assert.equal(ticked.statusCode, 200, ticked.body);
+        const { apply_session_id: session, apply_by: by } = await chatOf(lambda.id);
+        const tasks = (
+          await db.pool.query('SELECT count(*)::int AS n FROM tasks WHERE owner_id=$1 AND id=$2', [
+            a.ownerId,
+            session,
+          ])
+        ).rows[0].n;
+        const ownerChats = chats.slice(before).filter((chat) => chat.text.includes(lambda.id));
+        assert.equal(tasks + ownerChats.length, 1);
+        assert.equal(
+          [...one, ...two].filter((id) => id === lambda.id).length,
+          by === 'rule' ? 1 : 0,
+        );
+        assert.equal(ticked.json().apply.state, by === 'rule' ? 'reused' : 'started');
+        if (by === 'owner') assert.equal(ownerChats[0]!.sessionId, session);
+        for (let n = 0; n < 3; n++)
+          assert.deepEqual(
+            [...(await first.jobs.apply.detect()), ...(await second.jobs.apply.detect())],
+            [],
+          );
+        assert.equal((await chatOf(lambda.id)).apply_session_id, session);
+      });
+
+      await t.test(
+        'Nod starts at most applyLimits.daily a day, in the owner’s time zone',
+        async () => {
+          await pastStarts();
+          const offset = 9 * 3_600_000;
+          const local = new Date(Date.now() + offset);
+          const midnight =
+            Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()) - offset;
+          for (const at of [midnight + 60_000, midnight - 60_000])
+            await db.pool.query(
+              `INSERT INTO job_events(id,owner_id,kind,source,source_ref,created_at)
+             VALUES($1,$2,'apply_started','apply-auto',$3,$4)`,
+              [randomUUID(), a.ownerId, randomUUID(), new Date(at)],
+            );
+          const mu = await giveUp(first, 'Mu Example', { days: 9 });
+          const nu = await giveUp(first, 'Nu Example');
+          assert.deepEqual(await first.jobs.apply.detect(), [mu.id]);
+          assert.deepEqual(await second.jobs.apply.detect(), []);
+          assert.equal((await chatOf(nu.id)).apply_session_id, null);
+          await db.pool.query(
+            `UPDATE job_events SET created_at=$2 WHERE owner_id=$1 AND kind='apply_started' AND created_at>=$2`,
+            [a.ownerId, new Date(midnight - 120_000)],
+          );
+          assert.deepEqual(await first.jobs.apply.detect(), [nu.id]);
+        },
+      );
+
+      await t.test(
+        'never for a company someone referred, one the owner keeps trying, or another owner’s',
+        async () => {
+          await pastStarts();
+          const xi = await giveUp(first, 'Xi Example', { referred: true });
+          const omicron = await giveUp(first, 'Omicron Example');
+          const kept = (await request(first, 'GET', `/api/jobs/companies/${omicron.id}`)).json();
+          assert.equal(
+            (
+              await request(first, 'PUT', `/api/jobs/companies/${omicron.id}/no-luck`, {
+                noLuck: false,
+                revision: kept.revision,
+              })
+            ).statusCode,
+            200,
+          );
+          const pi = await giveUp(first, 'Pi Example', { postings: 0 });
+          const theirs = await giveUp(b, 'Rho Other Example');
+          assert.equal(
+            (await request(b, 'GET', `/api/jobs/companies/${theirs.id}`)).json().noLuck.by,
+            'rule',
+          );
+          assert.deepEqual(await first.jobs.apply.detect(), []);
+          for (const id of [xi.id, omicron.id, pi.id, theirs.id])
+            assert.equal((await chatOf(id)).apply_session_id, null);
+          await db.pool.query(
+            `INSERT INTO job_postings(id,owner_id,url_key,url,title,company,company_id)
+             VALUES($1,$2,'careers.example.test/pi/1','https://careers.example.test/pi/1','Synthetic Analyst','Pi Example',$3)`,
+            [randomUUID(), a.ownerId, pi.id],
+          );
+          assert.deepEqual(await first.jobs.apply.detect(), [pi.id]);
+        },
+      );
+
+      await t.test(
+        'only the owner’s own work and the company’s apply chat record an application',
+        async () => {
+          const [own, skipped] = kappa.postings as [string, string];
+          const sigma = await giveUp(first, 'Sigma Example', { days: 1 });
+          const elsewhere = sigma.postings[0]!;
+          const work = (
+            await db.pool.query<{ id: string; thread_id: string }>(
+              'SELECT id,thread_id FROM turns WHERE owner_id=$1 AND session_id=$2',
+              [a.ownerId, kappaChat],
+            )
+          ).rows[0]!;
+          await db.pool.query("UPDATE turns SET status='running' WHERE id=$1", [work.id]);
+          const chat = { threadId: work.thread_id, turnId: work.id };
+          const pdf = (posting: string, text = '%PDF-1.4 synthetic tailored CV') =>
+            files.set(
+              `${chat.threadId}/shared/career-ops/output/tailored-${posting}.pdf`,
+              Buffer.from(text),
+            );
+          for (const posting of [own, skipped, elsewhere]) pdf(posting);
+          const applied = (id: string, extra: Record<string, unknown> = {}) => ({
+            action: 'posting_update',
+            postings: [{ id, status: 'applied', ...extra }],
+          });
+          const tailored = (postingId: string) => ({ action: 'cv_tailored', postingId });
+          const otherChat = async (proactive: boolean) => {
+            const session = proactive
+              ? (
+                  await db.pool.query<{ observer_session_id: string }>(
+                    'SELECT observer_session_id FROM threads WHERE id=$1',
+                    [chat.threadId],
+                  )
+                ).rows[0]!.observer_session_id
+              : randomUUID();
+            const turnId = randomUUID();
+            await db.pool.query(
+              `INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,proactive)
+               VALUES($1,$2,$3,$4,'event','synthetic','running',$5)`,
+              [turnId, a.ownerId, chat.threadId, session, proactive],
+            );
+            if (!proactive)
+              await db.pool.query(
+                `INSERT INTO tasks(id,owner_id,turn_id,session_id,title,done_when,now_text)
+                 VALUES($1,$2,$3,$1,'Synthetic','','')`,
+                [session, a.ownerId, turnId],
+              );
+            return { threadId: chat.threadId, turnId };
+          };
+          for (const other of [
+            await otherChat(false),
+            await otherChat(true),
+            await turn(first, 'schedule'),
+          ]) {
+            await assert.rejects(first.jobs.execute(other, applied(own)), /apply chat/);
+            await assert.rejects(first.jobs.execute(other, tailored(own)), /apply chat/);
+          }
+          const name = (await request(first, 'GET', '/api/jobs/profile')).json().profile.name;
+          const saved = records(await first.jobs.execute(chat, tailored(own)));
+          const upload = `shared/career-ops/apply/${own}/${name} CV.pdf`;
+          assert.equal(saved.uploadFile, `/workspace/${chat.threadId}/${upload}`);
+          assert.equal(
+            files.get(`${chat.threadId}/${upload}`)?.toString(),
+            '%PDF-1.4 synthetic tailored CV',
+          );
+          assert.equal(saved.posting.tailoredCv.name, `${name} - Kappa Example.pdf`);
+          assert.equal(await expires(saved.posting.tailoredCv.id), null);
+          await assert.rejects(first.jobs.execute(chat, tailored(elsewhere)), /apply chat/);
+          await assert.rejects(first.jobs.execute(chat, applied(elsewhere)), /another company/);
+          const marked = records(
+            await first.jobs.execute(chat, applied(own, { applicationRef: 'SYN-0001' })),
+          ).updated[0];
+          assert.deepEqual(
+            [marked.status, marked.applicationRef, marked.applyChatId],
+            ['applied', 'SYN-0001', kappaChat],
+          );
+          assert.ok(Math.abs(Date.parse(marked.appliedAt) - Date.now()) < 60_000);
+          assert.equal(
+            records(
+              await first.jobs.execute(chat, {
+                action: 'posting_update',
+                postings: [{ id: own, status: 'new' }],
+              }),
+            ).kept[0].status,
+            'applied',
+          );
+          const skip = (await request(first, 'GET', '/api/jobs/postings?status=all&limit=500'))
+            .json()
+            .postings.find((posting: { id: string }) => posting.id === skipped);
+          assert.equal(
+            (
+              await request(first, 'PATCH', `/api/jobs/postings/${skipped}`, {
+                status: 'skipped',
+                revision: skip.revision,
+              })
+            ).statusCode,
+            200,
+          );
+          assert.equal(
+            records(await first.jobs.execute(chat, applied(skipped))).kept[0].status,
+            'skipped',
+          );
+          pdf(own, '%PDF-1.4 synthetic tailored CV, second version');
+          const again = records(await first.jobs.execute(chat, tailored(own)));
+          assert.notEqual(again.posting.tailoredCv.id, saved.posting.tailoredCv.id);
+          assert.notEqual(await expires(saved.posting.tailoredCv.id), null);
+          const mine = await turn(first, 'user');
+          records(await first.jobs.execute(mine, tailored(elsewhere)));
+          assert.equal(
+            records(await first.jobs.execute(mine, applied(elsewhere))).updated[0].status,
+            'applied',
+          );
+          const listed = (await request(first, 'GET', '/api/jobs/postings?status=applied')).json();
+          assert.deepEqual(
+            listed.postings.map((posting: { id: string }) => posting.id).sort(),
+            [own, elsewhere].sort(),
+          );
+          assert.equal(listed.counts.applied, 2);
+          const company = (await request(first, 'GET', `/api/jobs/companies/${kappa.id}`)).json();
+          const shown = company.postings.find((posting: { id: string }) => posting.id === own);
+          assert.deepEqual(
+            [shown.applicationRef, shown.tailoredCv.id],
+            ['SYN-0001', again.posting.tailoredCv.id],
+          );
+          await assert.rejects(
+            first.jobs.execute(mine, applied(own, { appliedAt: '2999-01-01T00:00:00Z' })),
+            /not in the future/,
+          );
+        },
+      );
+
+      await t.test('applications and tailored CVs stay with their owner', async () => {
+        const [own] = kappa.postings as [string];
+        const theirs = await turn(b, 'user');
+        assert.deepEqual(
+          records(
+            await b.jobs.execute(theirs, {
+              action: 'posting_update',
+              postings: [{ id: own, status: 'applied' }],
+            }),
+          ).missing,
+          [own],
+        );
+        await assert.rejects(
+          b.jobs.execute(theirs, { action: 'cv_tailored', postingId: own }),
+          /Posting not found/,
+        );
+        assert.equal(
+          (await request(b, 'GET', '/api/jobs/postings?status=applied')).json().total,
+          0,
+        );
+        assert.equal(
+          (await request(b, 'PATCH', `/api/jobs/postings/${own}`, { status: 'new', revision: 0 }))
+            .statusCode,
+          404,
+        );
+        assert.equal((await request(b, 'GET', `/api/jobs/companies/${kappa.id}`)).statusCode, 404);
+      });
+
+      await t.test('the application columns add to an existing 8e database, twice', async () => {
+        const legacy = `${schema}_8e`;
+        await admin.query(`CREATE SCHEMA ${legacy}`);
+        const address = new URL(process.env.TEST_DATABASE_URL!);
+        address.searchParams.set('options', `-c search_path=${legacy}`);
+        const old = new pg.Pool({ connectionString: address.href });
+        try {
+          const { jobTables } = await import('../src/server/jobs.ts');
+          await old.query(jobTables);
+          await old.query(`
+            ALTER TABLE job_postings DROP COLUMN tailored_cv_artifact_id, DROP COLUMN applied_at,
+              DROP COLUMN application_ref, DROP COLUMN apply_session_id;
+            ALTER TABLE job_companies DROP COLUMN apply_by;`);
+          const company = randomUUID();
+          const session = randomUUID();
+          await old.query(
+            `INSERT INTO job_companies(id,owner_id,name,key,status,no_luck_by,apply_session_id,apply_started_at)
+             VALUES($1,'synthetic-owner-old','Old Example','old example','no_luck','owner',$2,now())`,
+            [company, session],
+          );
+          await old.query(
+            `INSERT INTO job_postings(id,owner_id,url_key,url,title,company,company_id,status)
+             VALUES($1,'synthetic-owner-old','jobs.example.test/old','https://jobs.example.test/old','Old Role','Old Example',$2,'shortlisted')`,
+            [randomUUID(), company],
+          );
+          await old.query(jobTables);
+          await old.query(jobTables);
+          assert.deepEqual(
+            (
+              await old.query(
+                'SELECT status,applied_at,application_ref,tailored_cv_artifact_id,apply_session_id FROM job_postings',
+              )
+            ).rows,
+            [
+              {
+                status: 'shortlisted',
+                applied_at: null,
+                application_ref: '',
+                tailored_cv_artifact_id: null,
+                apply_session_id: null,
+              },
+            ],
+          );
+          assert.deepEqual(
+            (await old.query('SELECT apply_by,apply_session_id FROM job_companies')).rows,
+            [{ apply_by: 'owner', apply_session_id: session }],
+          );
+        } finally {
+          await old.end();
+          await admin.query(`DROP SCHEMA ${legacy} CASCADE`);
+        }
+      });
+      await Promise.allSettled([first.app.close(), second.app.close()]);
+
       await t.test(
         'a paired browser helper reaches only its own routes, over 127.0.0.1, with requests sealed by a key Nod paired',
         async (h) => {
@@ -3758,7 +4242,9 @@ test(
       );
     } finally {
       await Promise.allSettled([a.app.close(), b.app.close(), c.app.close()]);
+      if (queueStarted) await (await import('../src/server/thread.ts')).stopThreadWorkers();
       await db.pool.end();
+      await admin.query(`DROP SCHEMA IF EXISTS ${process.env.PGBOSS_SCHEMA} CASCADE`);
       await admin.query(`DROP SCHEMA ${schema} CASCADE`);
       await admin.end();
       await rm(root, { recursive: true, force: true });
