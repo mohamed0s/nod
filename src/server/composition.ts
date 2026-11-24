@@ -123,6 +123,7 @@ import { createFeedbackRedactor } from './feedback-redaction.ts';
 import { withFailureLog, type FailureLogSink } from './failure-log.ts';
 import { createPiMemoryCurator } from '../providers/pi/memory-curator.ts';
 import { createPublicLinkPreviewProvider } from '../providers/public-web/link-preview.ts';
+import { createTelegramChannels } from '../providers/public-web/telegram-channel.ts';
 import { createGoogleFlights } from '../providers/google-flights.ts';
 import type { FlightSearch } from '../ports/flights.ts';
 import { createAgentRuntime } from '../runtime/index.ts';
@@ -1244,7 +1245,9 @@ async function initializeApplication(
         );
       return userMessages.submit(text, attachments, { channel: 'web', sessionId });
     },
-    withTurnLock: (turnId, operation) => withTurnLock(turnId, operation),
+    withTurnLock: (turnId, operation, signal) =>
+      withTurnLock(signal ? { turnId, signal } : turnId, operation),
+    telegram: createTelegramChannels(),
     changed: () => jobsChanged(ownerId),
   });
   const pages = createPages({

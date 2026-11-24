@@ -24,6 +24,19 @@ A chat that starts with "Convert the CV I just added for job search" has the CV 
 
 Ask at most one short question in that chat, and only for something that matters and can't be inferred, such as which regions to search. Save their answer with `profile_update`.
 
+## Offer the Job radar
+
+Once the profile is drafted, and only once per owner, offer the Job radar in the same message as the summary: every morning at 07:30 Nod looks for new jobs on the sources that are on, checks and scores them, and messages only when something is worth a look. Read `nod schedule_list` first; don't offer it when a Job radar exists or the owner already said no.
+
+Also propose a short starter list of public Telegram job channels for the profile's regions and target roles: find three to six with `web_search`, check each has a public preview at `https://t.me/s/<name>` with `fetch_content`, and give each one line. Follow the owner's rules about websites to avoid while you look.
+
+When the owner says yes:
+
+- Create the schedule with `nod schedule_create` as the schedules guide describes: title "Job radar", daily at 07:30 in the owner's time zone, delivered to this chat. Its prompt: "Run the Job radar as the job-search guide's scan reference describes: read the job sources, sync, run each source that is on, import the results, give every new posting a short check, fully score the five best, then send one short message with the new postings worth a look, each with its score, company, title and link. Send nothing when nothing new is worth a look." Suggest the light model as [evaluate.md](evaluate.md) says.
+- Save only the channels they accept, with `jobs source_update {telegram: {add: [...]}}`.
+
+Never create the schedule or save a channel without their yes.
+
 ## A CV sent in chat
 
 When the owner sends a PDF or Word file and says it's a CV, or asks to add it, call `jobs cv_add {workspaceFile, label?}` with the file's `workspaceFile` from `workspaceAttachments`. Use the label they give, else a short one from the file name. Then convert it as above. Make it the main CV only if they ask.

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -8,6 +9,8 @@ import Fastify from 'fastify';
 import pg from 'pg';
 import { appConfirmation } from '../src/ports/agent.ts';
 import { runJobsTool } from '../src/runtime/jobs-tool.ts';
+import type { TelegramPost } from '../src/ports/job-sources.ts';
+import { telegramChannelPosts } from '../src/providers/public-web/telegram-channel.ts';
 import type { Turn } from '../src/runtime/turn.ts';
 
 const docx = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
@@ -33,12 +36,22 @@ test('subagents can only read job search records', async () => {
       },
       confirm: async (value: unknown) => value,
     }) as unknown as Turn;
-  for (const action of ['cv_save', 'profile_update', 'cv_add', 'cv_main', 'sync'])
+  for (const action of [
+    'cv_save',
+    'profile_update',
+    'cv_add',
+    'cv_main',
+    'sync',
+    'import',
+    'posting_update',
+    'source_update',
+    'telegram',
+  ])
     await assert.rejects(runJobsTool(turn('helper'), { action }), /subagent can only read/);
-  for (const action of ['setup_status', 'cv_get', 'cv_file'])
+  for (const action of ['setup_status', 'cv_get', 'cv_file', 'list', 'sources'])
     assert.equal(await runJobsTool(turn('helper'), { action }), 'records');
   assert.equal(await runJobsTool(turn(), { action: 'cv_save' }), 'records');
-  assert.deepEqual(calls, ['setup_status', 'cv_get', 'cv_file', 'cv_save']);
+  assert.deepEqual(calls, ['setup_status', 'cv_get', 'cv_file', 'list', 'sources', 'cv_save']);
 });
 
 test('job search limits count as an owner setting in the trust check', async () => {
@@ -120,6 +133,283 @@ test('job search limits count as an owner setting in the trust check', async () 
   assert.equal(checks, 1);
 });
 
+const alertText = `Your job alert for data analyst
+New jobs match your preferences.
+
+Data Analyst
+Example Co
+Example City, Zedland
+View job: https://www.linkedin.com/comm/jobs/view/4000000001/?trackingId=synthetic&refId=synthetic
+
+---------------------------------------------------------
+
+Reporting Analyst
+Sample Labs
+Remote
+View job: https://www.linkedin.com/comm/jobs/view/4000000002/?trackingId=synthetic
+
+See all jobs: https://www.linkedin.com/comm/jobs/search?keywords=analyst
+Unsubscribe: https://www.linkedin.com/comm/psettings/email-unsubscribe?token=synthetic
+`;
+
+const alertHtml = `<html><head><style>.x{color:red}</style></head><body><table>
+<tr><td><a href="https://www.linkedin.com/comm/jobs/view/4000000003/?trk=synthetic"><img src="https://example.test/logo.png" alt=""></a></td>
+<td><a href="https://www.linkedin.com/comm/jobs/view/4000000003/?trk=other">Data Engineer</a><p>Example Co · Example City, Zedland</p><p>Actively recruiting</p></td></tr>
+<tr><td><a href="https://click.example-board.test/track?u=https%3A%2F%2Fjobs.example-board.test%2Fjobs%2Fp%2F12345-business-analyst%3Futm_source%3Dalert">Business Analyst</a><div>Sample Labs</div><div>Remote</div></td></tr>
+<tr><td><a href="https://www.linkedin.com/comm/jobs/search?keywords=data">See all jobs</a> <a href="https://example-board.test/settings/email">Email settings</a> <a href="https://apps.apple.com/app/example">Get the app</a></td></tr>
+</table></body></html>`;
+
+const channelPosts = (at: string) => [
+  {
+    id: 101,
+    at,
+    body: `<div class="tgme_widget_message_text js-message_text" dir="auto">🔥 We're hiring: <b>Data Analyst</b><br/>Company: Example Co<br/>📍 Example City<br/>Apply: <a href="https://careers.example.test/jobs/12345?utm_source=telegram" target="_blank" rel="noopener">careers.example.test</a> · <a href="https://t.me/example_jobs" target="_blank">our channel</a></div>`,
+  },
+  {
+    id: 102,
+    at,
+    body: `<a class="tgme_widget_message_reply" href="https://t.me/example_jobs/101"><div class="tgme_widget_message_metatext js-message_reply_text">quoted text</div></a><div class="tgme_widget_message_text js-message_text" dir="auto">Junior Reporting Analyst at Sample Labs<br/><br/>Send your CV by email.</div>`,
+  },
+  {
+    id: 103,
+    at,
+    body: '<a class="tgme_widget_message_photo_wrap" href="https://t.me/example_jobs/103"></a>',
+  },
+];
+
+const telegramPage = (posts: Array<{ id: number; at: string; body: string }>) =>
+  `<!DOCTYPE html><html><head><title>Example Jobs</title></head><body>
+<div class="tgme_channel_info"><div class="tgme_channel_info_header_title"><span dir="auto">Example Jobs</span></div></div>
+<section class="tgme_channel_history js-message_history">${posts
+    .map(
+      (
+        post,
+      ) => `<div class="tgme_widget_message_wrap js-widget_message_wrap"><div class="tgme_widget_message text_not_supported_wrap js-widget_message" data-post="example_jobs/${post.id}" data-view="synthetic">
+<div class="tgme_widget_message_bubble">${post.body}
+<div class="tgme_widget_message_footer compact js-message_footer"><div class="tgme_widget_message_info short js-message_info"><span class="tgme_widget_message_views">1.2K</span><span class="tgme_widget_message_meta"><a class="tgme_widget_message_date" href="https://t.me/example_jobs/${post.id}"><time datetime="${post.at}" class="time">09:00</time></a></span></div></div>
+</div></div></div>`,
+    )
+    .join('')}</section></body></html>`;
+
+test('alert emails and channel posts become postings without a model', async () => {
+  const { alertPostings, telegramPostings } = await import('../src/server/jobs-parsers.ts');
+  const fields = (rows: Array<Record<string, unknown>>) =>
+    rows.map(({ url, title, company, location }) => ({ url, title, company, location }));
+  assert.deepEqual(fields(alertPostings({ text: alertText })), [
+    {
+      url: 'https://www.linkedin.com/jobs/view/4000000001',
+      title: 'Data Analyst',
+      company: 'Example Co',
+      location: 'Example City, Zedland',
+    },
+    {
+      url: 'https://www.linkedin.com/jobs/view/4000000002',
+      title: 'Reporting Analyst',
+      company: 'Sample Labs',
+      location: 'Remote',
+    },
+  ]);
+  assert.deepEqual(fields(alertPostings({ html: alertHtml, text: alertText })), [
+    {
+      url: 'https://www.linkedin.com/jobs/view/4000000003',
+      title: 'Data Engineer',
+      company: 'Example Co',
+      location: 'Example City, Zedland',
+    },
+    {
+      url: 'https://jobs.example-board.test/jobs/p/12345-business-analyst',
+      title: 'Business Analyst',
+      company: 'Sample Labs',
+      location: 'Remote',
+    },
+  ]);
+  const at = new Date().toISOString();
+  const posts = telegramChannelPosts(telegramPage(channelPosts(at)));
+  assert.deepEqual(
+    posts.map(({ id, links }) => ({ id, links })),
+    [
+      {
+        id: 101,
+        links: [
+          'https://careers.example.test/jobs/12345?utm_source=telegram',
+          'https://t.me/example_jobs',
+        ],
+      },
+      { id: 102, links: [] },
+      { id: 103, links: [] },
+    ],
+  );
+  assert.equal(posts[1]!.text, 'Junior Reporting Analyst at Sample Labs\n\nSend your CV by email.');
+  assert.deepEqual(fields(posts.flatMap((post) => telegramPostings('example_jobs', post))), [
+    {
+      url: 'https://careers.example.test/jobs/12345',
+      title: 'Data Analyst',
+      company: 'Example Co',
+      location: 'Example City',
+    },
+    {
+      url: 'https://t.me/example_jobs/102',
+      title: 'Junior Reporting Analyst',
+      company: 'Sample Labs',
+      location: '',
+    },
+  ]);
+  const footer = 'https://www.example-jobs.test/';
+  const channelPost = (id: number, text: string, links: string[]) =>
+    telegramPostings('example_jobs', { id, date: at, text, links });
+  assert.deepEqual(
+    [
+      ...channelPost(201, `Data Analyst\nCompany: Example Co\nMore jobs: ${footer}`, [footer]),
+      ...channelPost(202, `Data Engineer\nCompany: Sample Labs\nMore jobs: ${footer}`, [footer]),
+      ...channelPost(203, 'QA Tester at Example Co\nCV: https://forms.gle/Synthetic', [
+        'https://forms.gle/Synthetic',
+        'https://careers.example.test/jobs/55555',
+      ]),
+    ].map((row) => row.url),
+    [
+      'https://t.me/example_jobs/201',
+      'https://t.me/example_jobs/202',
+      'https://careers.example.test/jobs/55555',
+    ],
+  );
+  const digest = [
+    'Jobs this week:',
+    '1) Data Analyst at Example Co https://careers.example.test/jobs/11111',
+    '2) Data Engineer - Sample Labs - Remote https://jobs.example-board.test/jobs/p/22222-data-engineer',
+  ].join('\n');
+  assert.deepEqual(
+    fields(
+      channelPost(204, digest, [
+        'https://careers.example.test/jobs/11111',
+        'https://jobs.example-board.test/jobs/p/22222-data-engineer',
+      ]),
+    ),
+    [
+      {
+        url: 'https://careers.example.test/jobs/11111',
+        title: 'Data Analyst',
+        company: 'Example Co',
+        location: '',
+      },
+      {
+        url: 'https://jobs.example-board.test/jobs/p/22222-data-engineer',
+        title: 'Data Engineer',
+        company: 'Sample Labs',
+        location: 'Remote',
+      },
+    ],
+  );
+  const oneJob = `<html><body><table>
+<tr><td><h2>Your job alert for analyst</h2><p>1 new job matches your preferences.</p></td></tr>
+<tr><td><a href="https://www.linkedin.com/comm/jobs/view/4000000009/?trk=synthetic">Data Analyst</a><p>Example Co</p><p>Example City, Zedland</p></td></tr>
+<tr><td><a href="https://www.linkedin.com/comm/jobs/search?keywords=analyst">See all jobs</a></td></tr>
+</table></body></html>`;
+  assert.deepEqual(fields(alertPostings({ html: oneJob })), [
+    {
+      url: 'https://www.linkedin.com/jobs/view/4000000009',
+      title: 'Data Analyst',
+      company: 'Example Co',
+      location: 'Example City, Zedland',
+    },
+  ]);
+});
+
+test('the Telegram reader reads only public channel pages', async () => {
+  const { createTelegramChannels } =
+    await import('../src/providers/public-web/telegram-channel.ts');
+  const signal = new AbortController().signal;
+  const requests: string[] = [];
+  const reader = (
+    response: { status: number; type?: string; body?: string },
+    address = '1.1.1.1',
+  ) =>
+    createTelegramChannels({
+      resolver: async () => [{ address, family: 4 }],
+      request: async ({ url, maxBytes }) => {
+        requests.push(url.href);
+        assert.equal(maxBytes, 1024 * 1024);
+        return {
+          status: response.status,
+          headers: { 'content-type': response.type },
+          body: Buffer.from(response.body ?? ''),
+        };
+      },
+    });
+  const page = telegramPage(channelPosts(new Date().toISOString()));
+  assert.equal(
+    (
+      await reader({ status: 200, type: 'text/html; charset=utf-8', body: page }).read(
+        'example_jobs',
+        { before: 120, signal },
+      )
+    ).length,
+    3,
+  );
+  assert.deepEqual(requests, ['https://t.me/s/example_jobs?before=120']);
+  await assert.rejects(
+    reader({ status: 200, type: 'text/html', body: page }, '10.0.0.5').read('example_jobs', {
+      signal,
+    }),
+    /Private network destinations are blocked/,
+  );
+  await assert.rejects(
+    reader({ status: 302 }).read('example_jobs', { signal }),
+    /no public web preview for example_jobs/,
+  );
+  await assert.rejects(
+    reader({ status: 200, type: 'application/json', body: '{}' }).read('example_jobs', { signal }),
+    /not a web page/,
+  );
+  await assert.rejects(
+    reader({ status: 200, type: 'text/html', body: 'x'.repeat(1024 * 1024 + 1) }).read(
+      'example_jobs',
+      {
+        signal,
+      },
+    ),
+    /larger than 1 MB/,
+  );
+  const before = requests.length;
+  for (const name of ['jobs', 'example_jobs/../x', '1example_jobs'])
+    await assert.rejects(
+      reader({ status: 200 }).read(name, { signal }),
+      /isn't a valid public channel name/,
+    );
+  assert.equal(requests.length, before);
+});
+
+test(
+  'career-ops refuses scan options that open pages in a browser',
+  { skip: spawnSync('sh', ['-c', 'exit 0']).status !== 0 },
+  () => {
+    const wrapper = join(import.meta.dirname, '..', 'jobs', 'workspace', 'career-ops');
+    const run = (...args: string[]) => spawnSync('sh', [wrapper, ...args], { encoding: 'utf8' });
+    for (const args of [
+      ['scan', '--verify'],
+      ['scan', '--since', '7', '--rediscover-404'],
+      ['scan', '--throttle=8000'],
+      ['scan', '--company', '--verify'],
+      ['scan:full', '--liveness'],
+      ['scan:full', '--seeds', 'yc'],
+      ['scan:full', '--ats', 'workday'],
+      ['scan:full', '--ats=greenhouse,icims'],
+      ['scan', '--dry-run --json'],
+      ['liveness'],
+      ['scan:seek'],
+      ['scan:hn'],
+    ]) {
+      const result = run(...args);
+      assert.equal(result.status, 2, args.join(' '));
+      assert.doesNotMatch(result.stderr, /only inside a Nod workspace/, args.join(' '));
+    }
+    for (const args of [
+      ['scan', '--since', '7', '--json'],
+      ['scan:full', '--since', '7', '--ats', 'greenhouse,lever,ashby'],
+    ])
+      assert.match(run(...args).stderr, /only inside a Nod workspace/, args.join(' '));
+  },
+);
+
 test(
   'job records stay with their owner and change only through the work allowed to change them',
   { skip: !process.env.TEST_DATABASE_URL, timeout: 90_000 },
@@ -141,6 +431,19 @@ test(
     const { withTurnLock } = await import('../src/server/thread.ts');
     const files = new Map<string, string | Buffer>();
     const chats: Array<{ text: string; attachments: string[] }> = [];
+    const channels = new Map<string, TelegramPost[]>();
+    const reads: Array<{ channel: string; before?: number }> = [];
+    const telegram = {
+      read: async (channel: string, options: { before?: number }) => {
+        reads.push({ channel, ...(options.before ? { before: options.before } : {}) });
+        const posts = channels.get(channel);
+        if (!posts) throw new Error(`t.me has no public web preview for ${channel}.`);
+        return posts
+          .filter((post) => !options.before || post.id < options.before)
+          .sort((x, y) => y.id - x.id)
+          .slice(0, 20);
+      },
+    };
     const owner = (ownerId: string, turnLock = false) => {
       const artifacts = createArtifactService({ database: db.pool, ownerId, localRoot: root });
       const jobs = createJobs({
@@ -165,6 +468,7 @@ test(
         },
         withTurnLock: (turnId, operation) =>
           turnLock ? withTurnLock(turnId, operation) : transaction(operation, db.pool),
+        telegram,
       });
       const app = Fastify();
       jobs.registerRoutes(app);
@@ -675,6 +979,385 @@ test(
           );
         },
       );
+
+      const today = new Date().toISOString().slice(0, 10);
+      const history = [
+        'url\tfirst_seen\tportal\ttitle\tcompany\tstatus\tlocation\tfingerprint\tposted_at',
+        `https://job-boards.greenhouse.io/exampleco/jobs/1001?gh_src=scan\t${today}\tgreenhouse-api\tData Analyst\tExample Co, Inc.\tadded\tExample City, Zedland\t\t2033-01-02`,
+        `https://jobs.lever.co/samplelabs/5e1f7c1a-0000-4000-8000-000000000001\t${today}\tlever-api\tBusiness Analyst\tSample Labs\tadded\tRemote\t\t`,
+        `https://jobs.lever.co/samplelabs/5e1f7c1a-0000-4000-8000-000000000002\t${today}\tlever-api\tBusiness Analyst\tSample Labs\tadded\tRemote\t\t`,
+        `https://jobs.example.test/jobs/2002\t2000-01-01\tremotive\tOld Role\tExample Co\tadded\tRemote\t\t`,
+        `https://jobs.example.test/jobs/2003\t${today}\tremotive\tFiltered Role\tExample Co\tskipped_title\tRemote\t\t`,
+        `not a link\t${today}\tremotive\tBroken Row\tExample Co\tadded\tRemote\t\t`,
+      ].join('\n');
+      const historyFile = 'shared/career-ops/data/scan-history.tsv';
+      const put = (threadId: string, path: string, content: unknown) =>
+        files.set(
+          `${threadId}/${path}`,
+          Buffer.from(typeof content === 'string' ? content : JSON.stringify(content)),
+        );
+      const counts = (result: Record<string, number>) =>
+        Object.fromEntries(['new', 'known', 'merged', 'skipped'].map((key) => [key, result[key]]));
+
+      await t.test(
+        'imports drop the same job by link and by company, title and place',
+        async () => {
+          const run = await turn(a, 'user');
+          put(run.threadId, historyFile, history);
+          const scan = { action: 'import', workspaceFile: historyFile, source: 'career-ops' };
+          const scanned = records(await a.jobs.execute(run, scan));
+          assert.deepEqual(counts(scanned), { new: 3, known: 0, merged: 0, skipped: 1 });
+          assert.deepEqual([scanned.older, scanned.notAdded], [1, 1]);
+          assert.deepEqual(
+            scanned.postings.map((posting: { url: string }) => posting.url),
+            [
+              'https://job-boards.greenhouse.io/exampleco/jobs/1001',
+              'https://jobs.lever.co/samplelabs/5e1f7c1a-0000-4000-8000-000000000001',
+              'https://jobs.lever.co/samplelabs/5e1f7c1a-0000-4000-8000-000000000002',
+            ],
+          );
+          assert.deepEqual(counts(records(await a.jobs.execute(run, scan))), {
+            new: 0,
+            known: 3,
+            merged: 0,
+            skipped: 1,
+          });
+          put(run.threadId, 'shared/career-ops/alerts/today.json', [
+            { id: 'synthetic-1', from: 'alerts@example.test', date: today, text: alertText },
+          ]);
+          const mail = {
+            action: 'import',
+            workspaceFile: 'shared/career-ops/alerts/today.json',
+            source: 'email',
+          };
+          assert.deepEqual(counts(records(await a.jobs.execute(run, mail))), {
+            new: 1,
+            known: 0,
+            merged: 1,
+            skipped: 0,
+          });
+          assert.deepEqual(counts(records(await a.jobs.execute(run, mail))), {
+            new: 0,
+            known: 2,
+            merged: 0,
+            skipped: 0,
+          });
+          put(run.threadId, 'web.json', [
+            {
+              url: 'http://job-boards.greenhouse.io/exampleco/jobs/1001/?utm_source=board',
+              title: 'Data analyst',
+              company: 'Example Co',
+            },
+          ]);
+          assert.equal(
+            records(
+              await a.jobs.execute(run, {
+                action: 'import',
+                workspaceFile: 'web.json',
+                source: 'web',
+              }),
+            ).known,
+            1,
+          );
+          const all = records(await a.jobs.execute(run, { action: 'list', status: 'all' }))
+            .postings as Array<{ title: string; sources: Array<{ kind: string; url: string }> }>;
+          assert.equal(all.length, 4);
+          assert.deepEqual(
+            all
+              .find((posting) => posting.title === 'Data Analyst')!
+              .sources.map((source) => [source.kind, source.url]),
+            [
+              ['career-ops', 'https://job-boards.greenhouse.io/exampleco/jobs/1001'],
+              ['email', 'https://www.linkedin.com/jobs/view/4000000001'],
+            ],
+          );
+          await assert.rejects(
+            a.jobs.execute(run, { ...scan, workspaceFile: 'shared/career-ops/missing.tsv' }),
+            /couldn't read shared\/career-ops\/missing\.tsv: The workspace file operation failed\./,
+          );
+          await assert.rejects(
+            a.jobs.execute(run, { ...mail, workspaceFile: historyFile }),
+            /isn't valid JSON/,
+          );
+        },
+      );
+
+      await t.test('schedules may import and check postings; other work may not', async () => {
+        const event = await turn(a, 'event');
+        const started = await turn(a, 'task', { message: false, parent: event.turnId });
+        const id = (await request(a, 'GET', '/api/jobs/postings?status=new')).json().postings[0]
+          .id as string;
+        for (const other of [event, started]) {
+          put(other.threadId, historyFile, history);
+          for (const input of [
+            { action: 'import', workspaceFile: historyFile, source: 'career-ops' },
+            { action: 'posting_update', postings: [{ id, score: 1 }] },
+            { action: 'telegram' },
+          ])
+            await assert.rejects(a.jobs.execute(other, input), /owner message, or a schedule/);
+          await assert.rejects(
+            a.jobs.execute(other, { action: 'source_update', switches: { scan: false } }),
+            /owner message/,
+          );
+        }
+        const schedule = await turn(a, 'schedule');
+        await assert.rejects(
+          a.jobs.execute(schedule, { action: 'source_update', switches: { scan: false } }),
+          /owner message/,
+        );
+        const [first, second] = (await request(a, 'GET', '/api/jobs/postings?status=new')).json()
+          .postings as Array<{ id: string; revision: number }>;
+        const shortlisted = await request(a, 'PATCH', `/api/jobs/postings/${first!.id}`, {
+          status: 'shortlisted',
+          revision: first!.revision,
+        });
+        assert.equal(shortlisted.statusCode, 200, shortlisted.body);
+        const checked = records(
+          await a.jobs.execute(schedule, {
+            action: 'posting_update',
+            postings: [
+              { id: first!.id, score: 2, summary: 'Synthetic reason.', status: 'skipped' },
+              { id: second!.id, score: 4.5, check: 'full', status: 'skipped' },
+              { id: randomUUID(), score: 3 },
+            ],
+          }),
+        );
+        assert.deepEqual(
+          checked.updated.map((posting: Record<string, unknown>) => [
+            posting.status,
+            posting.score,
+            posting.scoreKind,
+          ]),
+          [
+            ['shortlisted', 2, 'short'],
+            ['skipped', 4.5, 'full'],
+          ],
+        );
+        assert.equal(checked.kept[0].id, first!.id);
+        assert.equal(checked.missing.length, 1);
+        const unchanged = records(
+          await a.jobs.execute(schedule, {
+            action: 'posting_update',
+            postings: [{ id: second!.id, score: 4.5, check: 'full', status: 'skipped' }],
+          }),
+        );
+        assert.equal(unchanged.updated[0].revision, checked.updated[1].revision);
+        assert.equal(
+          (
+            await request(a, 'PATCH', `/api/jobs/postings/${first!.id}`, {
+              status: 'skipped',
+              revision: first!.revision,
+            })
+          ).statusCode,
+          409,
+        );
+        const owner = await turn(a, 'user');
+        records(
+          await a.jobs.execute(owner, {
+            action: 'posting_update',
+            postings: [{ id: first!.id, status: 'skipped' }],
+          }),
+        );
+        assert.equal(
+          (await request(a, 'GET', '/api/jobs/postings?status=skipped')).json().counts.skipped,
+          2,
+        );
+        put(schedule.threadId, 'shared/career-ops/alerts/today.json', [{ text: alertText }]);
+        const switches = (await request(a, 'GET', '/api/jobs/sources')).json().switches as Array<{
+          key: string;
+          revision: number;
+        }>;
+        for (const entry of switches)
+          assert.equal(
+            (
+              await request(
+                a,
+                'PUT',
+                `/api/jobs/sources/switches/${encodeURIComponent(entry.key)}`,
+                {
+                  enabled: false,
+                  revision: entry.revision,
+                },
+              )
+            ).statusCode,
+            200,
+          );
+        for (const input of [
+          { action: 'import', workspaceFile: historyFile, source: 'career-ops' },
+          {
+            action: 'import',
+            workspaceFile: 'shared/career-ops/alerts/today.json',
+            source: 'email',
+          },
+        ])
+          await assert.rejects(a.jobs.execute(schedule, input), /turned .* off on the Sources tab/);
+        assert.equal(
+          records(
+            await a.jobs.execute(owner, {
+              action: 'import',
+              workspaceFile: historyFile,
+              source: 'career-ops',
+            }),
+          ).known,
+          3,
+        );
+        records(
+          await a.jobs.execute(owner, {
+            action: 'source_update',
+            switches: { scan: true, email: true },
+          }),
+        );
+      });
+
+      await t.test('a public channel is read once per post', async () => {
+        const at = new Date().toISOString();
+        const old = new Date(Date.now() - 40 * 86_400_000).toISOString();
+        channels.set('example_jobs', [
+          { id: 90, date: old, text: 'Old Role at Example Co', links: [] },
+          ...telegramChannelPosts(telegramPage(channelPosts(at))),
+        ]);
+        assert.equal(
+          (await request(a, 'POST', '/api/jobs/sources/telegram', { name: '@example_jobs' }))
+            .statusCode,
+          200,
+        );
+        assert.equal(
+          (
+            await request(a, 'POST', '/api/jobs/sources/telegram', {
+              name: 'https://t.me/s/example_jobs',
+            })
+          ).statusCode,
+          409,
+        );
+        const owner = await turn(a, 'user');
+        records(
+          await a.jobs.execute(owner, {
+            action: 'source_update',
+            telegram: { add: ['private_jobs'] },
+          }),
+        );
+        const schedule = await turn(a, 'schedule');
+        const first = records(await a.jobs.execute(schedule, { action: 'telegram' }));
+        assert.deepEqual(
+          first.channels.map((entry: Record<string, unknown>) =>
+            entry.error ? [entry.channel, entry.error] : [entry.channel, entry.new, entry.merged],
+          ),
+          [
+            ['example_jobs', 1, 1],
+            ['private_jobs', 't.me has no public web preview for private_jobs.'],
+          ],
+        );
+        const again = records(await a.jobs.execute(schedule, { action: 'telegram' }));
+        assert.equal(again.channels[0].posts, 0);
+        channels.set(
+          'quiet_jobs',
+          Array.from({ length: 30 }, (_, index) => ({
+            id: 300 + index,
+            date: old,
+            text: `Old Role ${index} at Example Co`,
+            links: [],
+          })),
+        );
+        records(
+          await a.jobs.execute(owner, {
+            action: 'source_update',
+            telegram: { add: ['quiet_jobs'] },
+          }),
+        );
+        for (let read = 0; read < 2; read++)
+          assert.deepEqual(
+            (
+              records(await a.jobs.execute(schedule, { action: 'telegram', channel: 'quiet_jobs' }))
+                .channels as Array<Record<string, unknown>>
+            ).map((entry) => [entry.posts, entry.new]),
+            [[0, 0]],
+          );
+        channels.get('example_jobs')!.push({
+          id: 104,
+          date: at,
+          text: 'Data Engineer\nCompany: Example Co\nhttps://careers.example.test/jobs/777',
+          links: ['https://careers.example.test/jobs/777'],
+        });
+        const third = records(
+          await a.jobs.execute(schedule, { action: 'telegram', channel: 'example_jobs' }),
+        );
+        assert.deepEqual(
+          third.postings.map((posting: { title: string }) => posting.title),
+          ['Data Engineer'],
+        );
+        const view = (await request(a, 'GET', '/api/jobs/sources')).json();
+        assert.deepEqual(
+          view.channels.map((channel: Record<string, unknown>) => [
+            channel.name,
+            channel.lastPostId,
+            Boolean(channel.lastError),
+          ]),
+          [
+            ['example_jobs', 104, false],
+            ['private_jobs', null, true],
+            ['quiet_jobs', 329, false],
+          ],
+        );
+        assert.deepEqual((await request(b, 'GET', '/api/jobs/sources')).json().channels, []);
+        assert.equal(
+          (await request(b, 'DELETE', '/api/jobs/sources/telegram/example_jobs')).statusCode,
+          404,
+        );
+        const toggled = await request(a, 'PATCH', '/api/jobs/sources/telegram/example_jobs', {
+          enabled: false,
+          revision: view.channels[0].revision,
+        });
+        assert.equal(toggled.statusCode, 200, toggled.body);
+        assert.equal(
+          (
+            await request(a, 'PATCH', '/api/jobs/sources/telegram/example_jobs', {
+              enabled: true,
+              revision: view.channels[0].revision,
+            })
+          ).statusCode,
+          409,
+        );
+      });
+
+      await t.test('postings stay with their owner', async () => {
+        const theirs = (await request(a, 'GET', '/api/jobs/postings?status=all')).json();
+        assert.ok(theirs.total > 0);
+        const empty = (await request(b, 'GET', '/api/jobs/postings?status=all')).json();
+        assert.deepEqual([empty.total, empty.postings], [0, []]);
+        const posting = theirs.postings[0];
+        assert.equal(
+          (
+            await request(b, 'PATCH', `/api/jobs/postings/${posting.id}`, {
+              status: 'skipped',
+              revision: posting.revision,
+            })
+          ).statusCode,
+          404,
+        );
+        const other = await turn(b, 'user');
+        assert.deepEqual(
+          records(await b.jobs.execute(other, { action: 'list', status: 'all' })).postings,
+          [],
+        );
+        const updated = records(
+          await b.jobs.execute(other, {
+            action: 'posting_update',
+            postings: [{ id: posting.id, status: 'skipped' }],
+          }),
+        );
+        assert.deepEqual([updated.updated, updated.missing], [[], [posting.id]]);
+        put(other.threadId, historyFile, history);
+        assert.equal(
+          records(
+            await b.jobs.execute(other, {
+              action: 'import',
+              workspaceFile: historyFile,
+              source: 'career-ops',
+            }),
+          ).new,
+          3,
+        );
+      });
     } finally {
       await Promise.allSettled([a.app.close(), b.app.close(), c.app.close()]);
       await db.pool.end();
