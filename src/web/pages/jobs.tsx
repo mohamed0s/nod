@@ -20,9 +20,10 @@ import { api, errorMessage, post } from '../lib/api';
 import { subscribeAppEvents } from '../lib/app-events';
 import { pageDataCache } from '../lib/page-data-cache';
 import { formatDateTime, useDateFormat } from '../lib/date-format';
+import { Postings, refreshPostings, Sources } from './jobs-postings';
 import './jobs.css';
 
-type View = 'cvs' | 'profile' | 'templates';
+type View = 'postings' | 'cvs' | 'profile' | 'templates' | 'sources';
 type Message = { kind: 'info' | 'success' | 'error'; text: string } | null;
 
 const checklist: Record<JobSetup['items'][number]['key'], string> = {
@@ -37,6 +38,7 @@ const send = <T,>(path: string, method: string, body?: unknown) =>
 const jobPaths = ['/api/jobs/setup', '/api/jobs/cvs', '/api/jobs/profile', '/api/jobs/templates'];
 const refreshAll = () => {
   for (const path of jobPaths) void pageDataCache.refresh(path, true);
+  refreshPostings();
 };
 
 const lines = (value: string) =>
@@ -895,7 +897,7 @@ function Templates() {
 
 export function Jobs() {
   const tabsId = useId();
-  const [view, setView] = useState<View>('cvs');
+  const [view, setView] = useState<View>('postings');
   const setup = usePageData<JobSetup>('/api/jobs/setup');
   const cvs = usePageData<JobCv[]>('/api/jobs/cvs');
   useEffect(
@@ -921,9 +923,11 @@ export function Jobs() {
         label="Job search views"
         value={view}
         items={[
+          { value: 'postings', label: 'Postings' },
           { value: 'cvs', label: 'CVs', count: cvs.data?.length },
           { value: 'profile', label: 'Profile' },
           { value: 'templates', label: 'Templates' },
+          { value: 'sources', label: 'Sources' },
         ]}
         onValueChange={setView}
       />
@@ -931,6 +935,8 @@ export function Jobs() {
         {view === 'cvs' && <Cvs />}
         {view === 'profile' && <Profile />}
         {view === 'templates' && <Templates />}
+        {view === 'postings' && <Postings />}
+        {view === 'sources' && <Sources />}
       </div>
     </div>
   );
