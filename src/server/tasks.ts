@@ -108,6 +108,7 @@ type Row = {
   created_at: Date;
   updated_at: Date;
   closed_at: Date | null;
+  archived_at: Date | null;
   turn_status: string | null;
   answered: boolean;
   question: string | null;
@@ -185,7 +186,7 @@ export function createTasks(options: {
          )
          SELECT t.id,t.title,t.done_when,t.now_text,t.result,t.state,t.waiting_for,t.next_check,
            t.message_id,t.steps,t.step_index,t.revision,t.applied_revision,
-           t.created_at,t.updated_at,t.closed_at,COALESCE((SELECT r.status FROM turns r WHERE r.owner_id=t.owner_id AND r.session_id=t.session_id AND r.status='running'),u.status) AS turn_status,
+           t.created_at,t.updated_at,t.closed_at,t.archived_at,COALESCE((SELECT r.status FROM turns r WHERE r.owner_id=t.owner_id AND r.session_id=t.session_id AND r.status='running'),u.status) AS turn_status,
            EXISTS(SELECT 1 FROM turns n WHERE n.owner_id=u.owner_id AND n.thread_id=u.thread_id
              AND n.session_id=u.session_id AND n.parent_turn_id=u.id) AS answered,
            COALESCE(${activeHandoffSql},false) AS handoff,
@@ -241,6 +242,7 @@ export function createTasks(options: {
         createdAt: row.created_at.toISOString(),
         updatedAt: row.updated_at.toISOString(),
         closedAt: row.closed_at?.toISOString() ?? null,
+        ...(row.archived_at ? { archivedAt: row.archived_at.toISOString() } : {}),
         ...(row.work
           ? {
               model: row.model,
@@ -344,7 +346,7 @@ export function createTasks(options: {
   async function recordInput(client: PoolClient, id: string, turnId: string) {
     const task = (
       await client.query(
-        "UPDATE tasks SET revision=revision+1,state='open',closed_at=NULL,turn_id=$3,updated_at=now() WHERE id=$1 AND owner_id=$2 RETURNING revision,session_id",
+        "UPDATE tasks SET revision=revision+1,state='open',closed_at=NULL,archived_at=NULL,turn_id=$3,updated_at=now() WHERE id=$1 AND owner_id=$2 RETURNING revision,session_id",
         [id, ownerId, turnId],
       )
     ).rows[0];
@@ -358,6 +360,31 @@ export function createTasks(options: {
       "UPDATE turns SET status='cancelled',finished_at=now() WHERE session_id=$1 AND owner_id=$2 AND status='waiting' AND id<>$3",
       [task.session_id, ownerId, turnId],
     );
+  }
+
+  async function startChat(
+    client: PoolClient,
+    chat: { turnId: string; sessionId: string; messageId: string; text: string; live: boolean },
+  ) {
+    const title = chat.text.trim().split('\n')[0]!.trim().slice(0, 160) || 'New chat';
+    await client.query(
+      `INSERT INTO tasks(id,owner_id,turn_id,session_id,source_message_id,title,done_when,brief,now_text,state,closed_at)
+       VALUES($1,$2,$3,$1,$4,$5,'',$6,'',$7,CASE WHEN $7='cancelled' THEN now() END)`,
+      [
+        chat.sessionId,
+        ownerId,
+        chat.turnId,
+        chat.messageId,
+        title,
+        chat.text,
+        chat.live ? 'open' : 'cancelled',
+      ],
+    );
+    await client.query('UPDATE turns SET task_id=$1,task_revision=1 WHERE id=$2 AND owner_id=$3', [
+      chat.sessionId,
+      chat.turnId,
+      ownerId,
+    ]);
   }
 
   async function deliver(
@@ -782,6 +809,7 @@ export function createTasks(options: {
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS brief text NOT NULL DEFAULT '';
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS activity_key text;
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS model jsonb;
+      ALTER TABLE tasks ADD COLUMN IF NOT EXISTS archived_at timestamptz;
       CREATE UNIQUE INDEX IF NOT EXISTS tasks_activity ON tasks(owner_id,activity_key) WHERE activity_key IS NOT NULL;
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS steps jsonb NOT NULL DEFAULT '[]';
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS step_index integer NOT NULL DEFAULT 0;
@@ -839,15 +867,34 @@ export function createTasks(options: {
     app.get('/api/tasks', () => read(pool, { closed: true }));
     app.patch<{ Params: { id: string } }>('/api/tasks/:id', async (request) => {
       const id = z.uuid().parse(request.params.id);
-      const { title } = z
-        .object({ title: z.string().trim().min(1).max(160) })
+      const { title, archived } = z
+        .object({
+          title: z.string().trim().min(1).max(160).optional(),
+          archived: z.boolean().optional(),
+        })
         .strict()
+        .refine((value) => value.title !== undefined || value.archived !== undefined, {
+          message: 'Send a new title or whether the chat is closed.',
+        })
         .parse(request.body);
       const { rowCount } = await pool.query(
-        'UPDATE tasks SET title=$3,updated_at=now() WHERE id=$1 AND owner_id=$2',
-        [id, ownerId, title],
+        `UPDATE tasks SET title=COALESCE($3,title),updated_at=now(),
+           archived_at=CASE WHEN $4::boolean IS NULL THEN archived_at WHEN $4 THEN COALESCE(archived_at,now()) END
+         WHERE id=$1 AND owner_id=$2 AND (NOT COALESCE($4,false) OR state<>'open')`,
+        [id, ownerId, title ?? null, archived ?? null],
       );
-      if (!rowCount) throw failure('Task not found.', 404);
+      if (!rowCount) {
+        const open = await pool.query(
+          "SELECT 1 FROM tasks WHERE id=$1 AND owner_id=$2 AND state='open'",
+          [id, ownerId],
+        );
+        throw open.rowCount
+          ? failure(
+              'This task is still open. Stop it or let it finish before closing its chat.',
+              409,
+            )
+          : failure('Task not found.', 404);
+      }
       refresh();
       return { ok: true };
     });
@@ -1030,6 +1077,7 @@ export function createTasks(options: {
     settle,
     context,
     resolveReply,
+    startChat,
     chatCommand,
     read: (thread?: string) => read(pool, { closed: true, thread }),
     resumeDue,
