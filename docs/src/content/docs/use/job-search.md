@@ -150,7 +150,7 @@ Nod counts a company as **no luck** only when its waves are done: you invited th
 
 ### No luck, apply here
 
-Tick **No luck, apply here** on a company to give up on referrals there. Nod opens one chat for it, **Apply for the company I marked no luck**, and **Open the apply chat** takes you to it. Ticking again, or from two windows at once, never opens a second chat. When the company already has an apply chat that Nod started by itself, or one that's done, your tick sends the same words into that chat, so Nod goes on there with your request. Unticking keeps the chat. If the chat couldn't start, or was deleted, select **Start the apply chat**.
+Tick **No luck, apply here** on a company to give up on referrals there. Nod opens one chat for it, **Apply for the company I marked no luck**, and **Open the apply chat** takes you to it. Ticking again, or from two windows at once, never opens a second chat. When the company already has an apply chat that Nod started by itself, or one that's done, your tick sends the same words into that chat, so Nod goes on there with your request. While that chat waits for your answer to a question, your tick sends nothing and the Jobs page says to answer the question there first. Unticking keeps the chat. If the chat couldn't start, or was deleted, select **Start the apply chat**.
 
 ## Applying
 
