@@ -1,6 +1,6 @@
 ---
 title: Job search
-description: Keep your CVs and job profile in Nod, find and score jobs from scans, Telegram channels and alert emails, and see what stays private. This page describes a fork of Nod.
+description: Keep your CVs and job profile in Nod, find and score jobs from scans, Telegram channels and alert emails, follow the companies and the people you invited, mark a company no luck, and see what stays private. This page describes a fork of Nod.
 sidebar:
   order: 10
 ---
@@ -9,7 +9,7 @@ sidebar:
 The job search is part of [mohamed0s/nod](https://github.com/mohamed0s/nod), a fork of Nod. Nod from n8n doesn't have it.
 :::
 
-The **Jobs** page holds the jobs Nod found for you, your CVs, your job profile, your referral message templates and the sources Nod looks in. Nod uses them to find, check and score jobs with [career-ops](https://github.com/career-ops-hq/career-ops), which runs in Nod's [workspace](/use/workspace/).
+The **Jobs** page holds the jobs Nod found for you, the companies behind them and the people you invited there, your CVs, your job profile, your referral message templates and the sources Nod looks in. Nod uses them to find, check and score jobs with [career-ops](https://github.com/career-ops-hq/career-ops), which runs in Nod's [workspace](/use/workspace/).
 
 ## Add a CV
 
@@ -93,6 +93,41 @@ Select **Shortlist** or **Skip**, or **Back to new**. Your choice stays: the Job
 
 The **Sources** tab lists your Telegram channels, with when Nod last read each one and why a read failed, and which scanners are on. Add a channel by its name, `@name` or `t.me` link, turn one off, or remove it. Scanner switches take effect from Nod's next run: the Job radar and other scheduled work never import from a source that is off.
 
+## Companies and people
+
+The **Companies** tab lists each company with open postings or people, with its best score and how many people you invited, how many accepted, how many you asked for a referral and how many replied. Every posting joins its company by name, so "Example Co" and "Example Co, Inc." are one company.
+
+Filter the list:
+
+| Filter                  | Shows companies where                                           |
+| ----------------------- | --------------------------------------------------------------- |
+| Waiting for an accept   | someone you invited hasn't accepted yet                         |
+| Accepted, not asked yet | someone accepted and you haven't asked them yet                 |
+| Asked, no reply         | someone you asked hasn't replied yet                            |
+| No luck                 | you ticked **No luck, apply here**, or Nod counts it as no luck |
+
+Select a company to see its people and postings. Each person shows their status and when it changed, **Open profile** and, once Nod knows their LinkedIn member ID, **Message**. Both open LinkedIn in a new tab for you; Nod itself never opens them. Change a person's status from the list next to them, for example to **Asked** after you send your request. The prepared referral message appears under a person who accepted, with **Copy**, once Nod has prepared it.
+
+### Tell Nod who you invited
+
+You invite people on LinkedIn yourself. Tell Nod in chat or Telegram, for example "I invited Sam Example at Example Co" with their profile link, or share a profile from the LinkedIn app to Nod on Telegram and add "Sent". Nod saves them as invited under that company. Say when someone accepts, when you ask them, and when they reply or refer you, and Nod updates them.
+
+### No luck
+
+Nod counts a company as **no luck** when nobody there referred you and each person you invited:
+
+- didn't accept within 7 days of your invite,
+- didn't reply within 5 days of your referral request, or
+- declined.
+
+The days are the no-luck days on the **Profile** tab. Nod only shows that a company counts as no luck; it doesn't apply anywhere until you tick the box. Select **Keep trying** to keep a company open, and **Let Nod decide** to go back to the days.
+
+### No luck, apply here
+
+Tick **No luck, apply here** on a company to give up on referrals there. Nod opens one chat for it, **Apply for the company I marked no luck**, and **Open the apply chat** takes you to it. Ticking again, or from two windows at once, never opens a second chat. Unticking keeps the chat.
+
+Applying on a company's own site comes in a later update. For now that chat lists the company's open postings with their scores and links, and Nod asks you before anything is submitted.
+
 ## Who can change job records
 
 | Change                                             | Who                                                                                                   |
@@ -103,6 +138,8 @@ The **Sources** tab lists your Telegram channels, with when Nod last read each o
 | Invite limits and no-luck days                     | Nod, only when your words ask for exactly that change; otherwise it asks you to approve it            |
 | Adding postings, their scores and their status     | Nod, in work you started or in a schedule. A schedule changes the status of new postings only         |
 | Telegram channels and scanner switches             | Nod, only in work that started from your message                                                      |
+| People you invited and their status                | Nod, only in work that started from your message                                                      |
+| No luck, apply here                                | You, on the Jobs page                                                                                 |
 
 These records are your own private data, so most changes skip the [trust check](/trust/). Invite limits and no-luck days go through it like Nod's other settings, because they decide how much Nod does on its own later.
 
@@ -112,4 +149,5 @@ These records are your own private data, so most changes skip the [trust check](
 - Nod copies them as files into its workspace, under `shared/career-ops`, so career-ops can read them. Nod rewrites a file when its record changes and removes it when it no longer applies, for example when the main CV has no text yet.
 - career-ops runs only scripts that don't call a model. Nod's model keys never enter the workspace. Its scans run without the options that open posting pages in a browser.
 - Your postings, channels and switches are saved in Nod's database too. Nod's server reads Telegram channels and parses alert emails itself; the links in alerts are saved, never opened to import them.
+- People you invited are saved in Nod's database with their name, headline, company, status and profile link. Their profile and message links are only shown for you to open; nothing Nod runs opens or fetches them, or contacts LinkedIn.
 - The job search doesn't need LinkedIn: jobs come from scans, Telegram channels, alert emails, links you share and company career pages. To make sure Nod never opens a website, add a rule in chat, such as "Never open linkedin.com, in the browser or with workspace scripts."
