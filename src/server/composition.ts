@@ -1251,14 +1251,8 @@ async function initializeApplication(
     pool,
     ownerId,
     artifacts,
-    workspace: {
-      write: (threadId, path, bytes, signal) =>
-        workspace.writeArtifact(threadId, path, bytes, signal),
-      read: (threadId, path, maxBytes) =>
-        workspace.readArtifact(threadId, path, maxBytes, 'attachment'),
-    },
-    withTurnLock: ({ turnId, signal }, operation) =>
-      withTurnLock(signal ? { turnId, signal } : turnId, operation),
+    workspace,
+    withTurnLock,
     changed: () => pagesChanged(ownerId),
   });
   async function describeModelChoice(input: Record<string, unknown>) {

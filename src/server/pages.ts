@@ -13,6 +13,7 @@ import {
   type PageView,
 } from '../shared/pages.ts';
 import { untrustedBlock } from '../shared/untrusted.ts';
+import type { Workspace } from '../ports/computer.ts';
 import type { ArtifactService } from './artifacts.ts';
 import { lockKey } from './locks.ts';
 import { afterCommit, transaction } from './transaction.ts';
@@ -80,6 +81,7 @@ const toolInput = z.discriminatedUnion('action', [
       title: title.optional(),
       workspaceFile: z.string().trim().min(1).max(4096),
       pageId: z.uuid().optional(),
+      revision: z.int().min(1).optional(),
     })
     .strict()
     .refine((value) => value.pageId !== undefined || value.title !== undefined, {
@@ -168,12 +170,9 @@ export function createPages(options: {
   pool: Pool;
   ownerId: string;
   artifacts: Pick<ArtifactService, 'retainArtifacts' | 'readArtifact' | 'storeArtifact'>;
-  workspace?: {
-    write(threadId: string, path: string, bytes: Uint8Array, signal?: AbortSignal): Promise<void>;
-    read(threadId: string, path: string, maxBytes: number): Promise<Uint8Array>;
-  };
+  workspace?: Pick<Workspace, 'writeArtifact' | 'readArtifact'>;
   withTurnLock?: <T>(
-    turn: { turnId: string; signal?: AbortSignal },
+    turn: string | { turnId: string; signal: AbortSignal },
     operation: (client: PoolClient) => Promise<T>,
   ) => Promise<T>;
   changed?: () => void;
@@ -190,7 +189,8 @@ export function createPages(options: {
     }, pool);
   const turnWrite = <T>(turn: TurnRef, operation: (client: PoolClient) => Promise<T>) => {
     if (!options.withTurnLock) throw failure('Pages are unavailable in this runtime.', 503);
-    return options.withTurnLock(turn, async (client) => {
+    const { turnId, signal } = turn;
+    return options.withTurnLock(signal ? { turnId, signal } : turnId, async (client) => {
       await lock(client);
       const value = await operation(client);
       afterCommit(client, changed);
@@ -206,7 +206,7 @@ export function createPages(options: {
        FROM pages p
        LEFT JOIN artifacts a ON a.id=p.artifact_id AND a.owner_id=p.owner_id AND a.deleting_at IS NULL
        WHERE p.owner_id=$1 AND ($2::uuid IS NULL OR p.id=$2)
-         AND ($3::text IS NULL OR (lower(p.title)=lower($3) AND p.archived_at IS NULL))
+         AND ($3::text IS NULL OR lower(p.title)=lower($3))
        ORDER BY p.archived_at IS NOT NULL,p.updated_at DESC,p.id`,
       [ownerId, filter.id ?? null, filter.title ?? null],
     );
@@ -270,25 +270,37 @@ export function createPages(options: {
     return found;
   }
 
-  async function target(client: Query, input: { pageId?: string; title?: string }) {
+  async function target(
+    client: Query,
+    input: { pageId?: string; title?: string; revision?: number },
+  ) {
+    let row: PageRow | undefined;
     if (input.pageId) {
-      const row = (await pages(client, { id: input.pageId }))[0];
+      row = (await pages(client, { id: input.pageId }))[0];
       if (!row)
         throw failure('No page has that pageId. Read pages list for the pages and their ids.', 404);
-      if (row.archived_at)
+    } else {
+      const rows = await pages(client, { title: input.title });
+      if (rows.length > 1)
         throw failure(
-          'That page is archived. The owner can unarchive it on the Pages page before Nod updates it.',
+          'More than one page has that title. Use its pageId from pages list to update one.',
           409,
         );
-      return row;
+      row = rows[0];
     }
-    const rows = await pages(client, { title: input.title });
-    if (rows.length > 1)
+    if (row?.archived_at)
       throw failure(
-        'More than one page has that title. Use its pageId from pages list to update one.',
+        `The page “${row.title}” is archived, and Nod can't update an archived page. The owner can unarchive it on the Pages tab; for a separate page, publish with another title.`,
         409,
       );
-    return rows[0];
+    if (input.revision !== undefined && row?.revision !== input.revision)
+      throw failure(
+        row
+          ? `The page changed since you read it: it is now at version ${row.revision}, and you edited version ${input.revision}. Read it again with pages get, make your change on that copy, then publish with revision ${row.revision}.`
+          : 'No page has that title. Leave out revision to make a new page.',
+        409,
+      );
+    return row;
   }
 
   async function expire(client: Query, ids: string[]) {
@@ -309,12 +321,9 @@ export function createPages(options: {
     await options.artifacts.retainArtifacts([change.artifactId], client);
     const id = existing?.id ?? randomUUID();
     const revision = (existing?.revision ?? 0) + 1;
-    const publisher = change.by.sessionId !== null || change.by.scheduleId !== null;
     if (existing)
       await client.query(
-        `UPDATE pages SET title=$3,artifact_id=$4,revision=$5,updated_at=now(),
-           session_id=CASE WHEN $8 THEN $6::uuid ELSE session_id END,
-           schedule_id=CASE WHEN $8 THEN $7::uuid ELSE schedule_id END
+        `UPDATE pages SET title=$3,artifact_id=$4,revision=$5,updated_at=now(),session_id=$6,schedule_id=$7
          WHERE id=$1 AND owner_id=$2`,
         [
           id,
@@ -324,7 +333,6 @@ export function createPages(options: {
           revision,
           change.by.sessionId,
           change.by.scheduleId,
-          publisher,
         ],
       );
     else
@@ -377,7 +385,7 @@ export function createPages(options: {
 
   async function publish(
     turn: TurnRef,
-    input: { title?: string; workspaceFile: string; pageId?: string },
+    input: { title?: string; workspaceFile: string; pageId?: string; revision?: number },
   ) {
     const workspace = options.workspace;
     if (!workspace) throw failure('The workspace is unavailable.', 503);
@@ -386,10 +394,12 @@ export function createPages(options: {
     const where = `/workspace/${turn.threadId}/${path}`;
     let bytes: Buffer;
     try {
-      bytes = Buffer.from(await workspace.read(turn.threadId, path, pageBytes));
+      bytes = Buffer.from(
+        await workspace.readArtifact(turn.threadId, path, pageBytes, 'attachment'),
+      );
     } catch (error) {
       throw failure(
-        `Nod couldn't read ${where}: ${error instanceof Error ? error.message : String(error)} A page is one .html file of at most ${megabytes}.`,
+        `Nod couldn't read ${where} (${error instanceof Error ? error.message : String(error)}). A page is one .html file of at most ${megabytes}.`,
       );
     }
     checkPage(bytes, where);
@@ -400,7 +410,7 @@ export function createPages(options: {
         ? undefined
         : await options.artifacts.storeArtifact(
             bytes,
-            storedName(input.title ?? before?.title ?? 'Page'),
+            storedName(before?.title ?? input.title ?? 'Page'),
             'text/html',
             undefined,
             undefined,
@@ -410,22 +420,14 @@ export function createPages(options: {
     return turnWrite(turn, async (client) => {
       const by = await allowed(client, turn);
       const existing = await target(client, input);
-      const named =
-        existing && (by.kind !== 'owner' || !input.title) ? existing.title : input.title!;
       if (existing && existing.digest === hash) {
         if (stored) await expire(client, [stored.id]);
-        if (named !== existing.title)
-          await client.query('UPDATE pages SET title=$3 WHERE id=$1 AND owner_id=$2', [
-            existing.id,
-            ownerId,
-            named,
-          ]);
-        return { page: await onePage(client, existing.id), created: false, unchanged: true };
+        return { page: existing, created: false, unchanged: true };
       }
       if (!stored)
         throw failure('The page changed while Nod was publishing it. Publish it again.', 409);
       const page = await save(client, existing, {
-        title: named,
+        title: existing?.title ?? input.title!,
         artifactId: stored.id,
         digest: hash,
         by: { sessionId: by.sessionId, scheduleId: by.kind === 'schedule' ? by.scheduleId : null },
@@ -450,7 +452,7 @@ export function createPages(options: {
             );
           if (row.file_size === null) throw failure("This page's file is unavailable.", 409);
           const path = `pages/${row.id}.html`;
-          await options.workspace.write(
+          await options.workspace.writeArtifact(
             turn.threadId,
             path,
             await options.artifacts.readArtifact(row.artifact_id),

@@ -65,17 +65,16 @@ test(
         ownerId,
         artifacts,
         workspace: {
-          write: async (threadId, path, bytes) => {
+          writeArtifact: async (threadId, path, bytes) => {
             files.set(`${threadId}/${path}`, Buffer.from(bytes));
           },
-          read: async (threadId, path) => {
+          readArtifact: async (threadId, path) => {
             const file = files.get(`${threadId}/${path}`);
             if (!file) throw new Error('The workspace file operation failed.');
             return Buffer.from(file);
           },
         },
-        withTurnLock: ({ turnId, signal }, operation) =>
-          withTurnLock(signal ? { turnId, signal } : turnId, operation),
+        withTurnLock,
       });
       const app = Fastify();
       pages.registerRoutes(app);
@@ -152,10 +151,13 @@ test(
 
         const task = await turn(a, 'task', { parent: started.turnId });
         write(task, 'tracker.html', html('from a task'));
-        assert.equal(
-          (await publish(a, task, { pageId: trackerId, workspaceFile: 'tracker.html' })).revision,
-          2,
-        );
+        const fromTask = await publish(a, task, {
+          pageId: trackerId,
+          title: 'Renamed in chat',
+          workspaceFile: 'tracker.html',
+        });
+        assert.equal(fromTask.revision, 2);
+        assert.equal(fromTask.title, 'Reading tracker');
 
         const scheduleId = randomUUID();
         await db.pool.query('INSERT INTO schedules(id,owner_id,title) VALUES($1,$2,$3)', [
@@ -279,6 +281,45 @@ test(
         assert.equal((await request(a, 'GET', `/api/pages/${trackerId}`)).json().revision, 12);
       });
 
+      await t.test('a publish from a copy read before a newer version is refused', async () => {
+        const chat = await turn(a, 'user');
+        write(chat, 'plan.html', html('plan one'));
+        const plan = await publish(a, chat, { title: 'Weekly plan', workspaceFile: 'plan.html' });
+        const read = records(await a.pages.execute(chat, { action: 'get', pageId: plan.pageId }));
+        assert.equal(read.revision, 1);
+        const copy = read.workspaceFile.slice(`/workspace/${chat.threadId}/`.length);
+        assert.ok(files.has(`${chat.threadId}/${copy}`));
+        const scheduleId = randomUUID();
+        await db.pool.query('INSERT INTO schedules(id,owner_id,title) VALUES($1,$2,$3)', [
+          scheduleId,
+          a.ownerId,
+          'Plan refresh',
+        ]);
+        const scheduled = await turn(a, 'schedule', {
+          sourceId: `schedule:${scheduleId}:${randomUUID()}`,
+        });
+        write(scheduled, 'plan.html', html('plan from the schedule'));
+        await publish(a, scheduled, { pageId: plan.pageId, workspaceFile: 'plan.html' });
+        write(chat, copy, html('plan with a stale edit'));
+        await assert.rejects(
+          publish(a, chat, { pageId: plan.pageId, revision: 1, workspaceFile: copy }),
+          /changed since you read it: it is now at version 2/,
+        );
+        const fresh = records(await a.pages.execute(chat, { action: 'get', pageId: plan.pageId }));
+        write(chat, copy, html('plan with a fresh edit'));
+        assert.equal(
+          (
+            await publish(a, chat, {
+              pageId: plan.pageId,
+              revision: fresh.revision,
+              workspaceFile: copy,
+            })
+          ).revision,
+          3,
+        );
+        assert.equal((await request(a, 'DELETE', `/api/pages/${plan.pageId}`)).statusCode, 200);
+      });
+
       await t.test(
         'Keep in Pages copies an HTML file once and owner saves refuse stale changes',
         async () => {
@@ -315,6 +356,7 @@ test(
           assert.equal((await restore(11)).statusCode, 409);
           const restored = (await restore(12)).json();
           assert.equal(restored.revision, 13);
+          assert.deepEqual(restored.source, { kind: 'owner' });
           const fifth = (
             await db.pool.query(
               'SELECT artifact_id FROM page_versions WHERE page_id=$1 AND revision=5',
@@ -322,14 +364,30 @@ test(
             )
           ).rows[0].artifact_id;
           assert.equal(restored.file.id, fifth);
+          const started = await turn(a, 'user');
+          for (const count of [14, 15]) {
+            write(started, 'tracker.html', html(`after the restore ${count}`));
+            await publish(a, started, { pageId: trackerId, workspaceFile: 'tracker.html' });
+          }
+          const history = (await request(a, 'GET', `/api/pages/${trackerId}/versions`)).json();
+          assert.equal(history.at(-1).revision, 6);
+          assert.equal(
+            history.find((entry: { revision: number }) => entry.revision === 13).file.id,
+            fifth,
+          );
+          assert.equal(await expires(fifth), null);
           const archived = await request(a, 'POST', `/api/pages/${trackerId}/archive`);
           assert.ok(archived.json().archivedAt);
-          const started = await turn(a, 'user');
           write(started, 'tracker.html', html('archived'));
           await assert.rejects(
             publish(a, started, { pageId: trackerId, workspaceFile: 'tracker.html' }),
             /archived/,
           );
+          await assert.rejects(
+            publish(a, started, { title: 'books', workspaceFile: 'tracker.html' }),
+            /archived/,
+          );
+          assert.equal((await request(a, 'GET', '/api/pages')).json().length, 2);
           await request(a, 'POST', `/api/pages/${trackerId}/unarchive`);
         },
       );
@@ -381,6 +439,7 @@ test(
               workspaceFile: 'late.html',
             },
           ),
+          { name: 'AbortError' },
         );
         assert.equal(
           (await db.pool.query("SELECT 1 FROM pages WHERE title='Late page'")).rowCount,
