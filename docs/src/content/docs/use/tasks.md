@@ -33,6 +33,8 @@ The chat list sits to the left of the conversation. **Main** is your ongoing con
 
 Select a chat to open it. A task's chat shows only that task. Its card sits at the top with its status, steps, activity and **Stop this task**, and the chat's [model](#choose-the-model-for-a-chat) under it. Below it are the task's own messages, questions, approvals and results. Whatever you type there goes to that task, and the composer's Stop control stops only that task. In the web app run from source, **Open the live browser** under the card opens that task's browser view in a new tab.
 
+To give a chat a name, instructions and a model that last, make it an [agent](/use/agents/). Agents have their own group under **Main**.
+
 A number next to a chat counts its unread replies, and the badge on **Chat** counts them all. Reading **Main** doesn't mark a task's replies as read; opening that task's chat does.
 
 **Main** shows your conversation with Nod and the card of each task it started. To open a task's chat, select **Open chat** on its card or its pulsing dot above the message box. A task's questions, approvals and results appear in its own chat, not in **Main**.
