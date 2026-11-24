@@ -172,7 +172,7 @@ import { createPostgresObjectStore } from './object-storage.ts';
 import { loadPrivacyNoticeFile, registerPrivacyNotice } from './privacy.ts';
 import { createDocumentation } from './documentation.ts';
 import { initializeDatabase, pool } from './db.ts';
-import { events, jobsChanged, refresh } from './events.ts';
+import { events, jobsChanged, pagesChanged, refresh } from './events.ts';
 import { createIntegrations } from './integrations.ts';
 import {
   calendarEventTarget,
@@ -228,6 +228,7 @@ import type { VaultActivityReason } from '../shared/contracts.ts';
 import { createTriage, getPreferences } from './triage.ts';
 import { createTasks } from './tasks.ts';
 import { createJobs, jobLimitsInput } from './jobs.ts';
+import { createPages } from './pages.ts';
 import { createActivity, createActivityLine } from './activity.ts';
 import {
   checkedKeyStore,
@@ -1245,6 +1246,14 @@ async function initializeApplication(
     },
     withTurnLock: (turnId, operation) => withTurnLock(turnId, operation),
     changed: () => jobsChanged(ownerId),
+  });
+  const pages = createPages({
+    pool,
+    ownerId,
+    artifacts,
+    workspace,
+    withTurnLock,
+    changed: () => pagesChanged(ownerId),
   });
   async function describeModelChoice(input: Record<string, unknown>) {
     const models = adapters.models;
@@ -2801,6 +2810,7 @@ async function initializeApplication(
       speech,
       audioReplies: async () => (await speechPreferences.get()).speechReply,
       manage: async (turn, action, args, { admit, signal, ...provenance }) => {
+        if (action === 'pages') return pages.execute({ ...turn, signal }, args);
         if (action === 'jobs')
           return jobs.execute(turn, args, {
             signal,
@@ -3511,6 +3521,7 @@ async function initializeApplication(
   onboardingProfile.registerRoutes(app);
   tasks.registerRoutes(app);
   jobs.registerRoutes(app);
+  pages.registerRoutes(app);
   triage.registerRoutes(app);
   let channelSettings: Awaited<ReturnType<typeof createChannelSettings>> | undefined;
   let lastChannelObservation: { consentVersion: number; signature: string } | undefined;

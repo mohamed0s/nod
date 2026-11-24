@@ -12,9 +12,9 @@ type DeltaEvent = {
   done?: boolean;
 };
 type ActivityEvent = { type: 'activity'; ownerId: string; items: Activity[] };
-type JobsEvent = { type: 'jobs'; ownerId: string };
+type OwnerEvent = { type: 'jobs' | 'pages'; ownerId: string };
 export type ServerEvent =
-  { type: 'refresh' } | { type: 'working' } | DeltaEvent | ActivityEvent | JobsEvent;
+  { type: 'refresh' } | { type: 'working' } | DeltaEvent | ActivityEvent | OwnerEvent;
 
 export const events = new EventEmitter<{ event: [ServerEvent] }>();
 events.setMaxListeners(50);
@@ -29,4 +29,7 @@ export function delta(event: Omit<DeltaEvent, 'type'>) {
 }
 export function jobsChanged(ownerId: string) {
   events.emit('event', { type: 'jobs', ownerId });
+}
+export function pagesChanged(ownerId: string) {
+  events.emit('event', { type: 'pages', ownerId });
 }

@@ -68,6 +68,7 @@ export function registerLocalAccess(
     '/',
     '/tasks',
     '/jobs',
+    '/pages',
     '/memory',
     '/usage',
     '/vault',

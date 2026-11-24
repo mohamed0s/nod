@@ -3,6 +3,7 @@ import {
   Briefcase,
   CalendarClock,
   Gauge,
+  LayoutDashboard,
   MessageCircle,
   Send,
   Vault,
@@ -16,6 +17,7 @@ export const sidebarItems = [
   { path: '/usage', label: 'Usage', key: '5', icon: Gauge },
   { path: '/vault', label: 'Vault', key: '6', icon: Vault },
   { path: '/jobs', label: 'Jobs', key: '7', icon: Briefcase },
+  { path: '/pages', label: 'Pages', key: '8', icon: LayoutDashboard },
 ] as const;
 
 type NavigationGuard = (path: string, proceed: () => void) => boolean;

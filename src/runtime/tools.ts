@@ -39,6 +39,7 @@ import { untrustedBlock } from '../shared/untrusted.ts';
 import { withoutSchemaPatterns } from '../shared/json-schema.ts';
 import type { Turn } from './turn.ts';
 import { jobsToolDescription, jobsToolParameters, runJobsTool } from './jobs-tool.ts';
+import { pagesToolDescription, pagesToolParameters, runPagesTool } from './pages-tool.ts';
 import type { FlightOption, FlightSearch } from '../ports/flights.ts';
 
 export const memoryActions = [
@@ -706,6 +707,7 @@ export const toolDefinitions = {
     ]),
   ),
   jobs: defineTool('jobs', jobsToolDescription, jobsToolParameters),
+  pages: defineTool('pages', pagesToolDescription, pagesToolParameters),
   share_file: defineTool(
     'share_file',
     'Attach a workspace file to your next reply, or deliver it on its own when no reply follows. Check the file first and share each file once.',
@@ -1503,6 +1505,7 @@ export function nodTools(
         : result;
     }),
     bind(toolDefinitions.jobs, (p) => runJobsTool(turn, p)),
+    bind(toolDefinitions.pages, (p) => runPagesTool(turn, p)),
     bind(toolDefinitions.share_file, (p) => context.publish(p.path, p.name)),
     bind(toolDefinitions.create_audio, async (p) => {
       if (!context.createAudio)

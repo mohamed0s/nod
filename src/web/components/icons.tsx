@@ -11,6 +11,7 @@ import {
   Heart as LucideHeart,
   Highlighter as LucideHighlighter,
   KeyRound as LucideKeyRound,
+  LayoutDashboard as LucideLayoutDashboard,
   Leaf as LucideLeaf,
   Merge as LucideMerge,
   ListOrdered as LucideListOrdered,
@@ -188,6 +189,7 @@ export const Hand = lucide(LucideHand);
 export const Heart = lucide(LucideHeart);
 export const Highlighter = lucide(LucideHighlighter);
 export const KeyRound = lucide(LucideKeyRound);
+export const LayoutDashboard = lucide(LucideLayoutDashboard);
 export const Leaf = lucide(LucideLeaf);
 export const ListOrdered = lucide(LucideListOrdered);
 export const MapPin = lucide(LucideMapPin);
