@@ -1,6 +1,6 @@
 ---
 name: job-search
-description: Run the owner's own job search pipeline in Nod. Use whenever the owner sends or mentions their own CV or resume, even with just "this is my CV", to add it to their CV library before anything else, and for their CVs, job profile, message templates, career-ops checks, scoring jobs and CV PDFs. Use hiring-and-career for other people's CVs and any other career or hiring task.
+description: Run the owner's own job search pipeline in Nod. Use whenever the owner sends or mentions their own CV or resume, even with just "this is my CV", to add it to their CV library before anything else, and for their CVs, job profile, message templates, finding jobs (career-ops scans, Telegram job channels, job-alert emails, the Job radar), the postings list, scoring jobs and CV PDFs. Use hiring-and-career for other people's CVs and any other career or hiring task.
 ---
 
 # Job search
@@ -10,7 +10,7 @@ The owner's job search lives in Nod. Postgres holds the records, and the `jobs` 
 ## Rules
 
 - Do the work yourself. Ask the owner only for what needs them: a choice only they can make, a missing fact that matters, or an approval.
-- This pipeline never needs to open LinkedIn. Jobs arrive through alert emails, links the owner shares and company career pages.
+- This pipeline never needs to open LinkedIn. Jobs arrive through career-ops scans of company career sites and boards, public Telegram channels, alert emails, links the owner shares and company career pages.
 - Follow the owner's rules about websites to avoid. They also apply to workspace scripts that visit websites, which the trust check doesn't see.
 - The main CV is the source of truth. A referral request always uses the main CV unchanged. A tailored CV is made only when Nod applies on a company's own form, and it always starts from the main CV.
 - Never invent experience, dates, skills, links or results. Keep the CV's own wording when converting it.
@@ -28,9 +28,11 @@ The owner's job search lives in Nod. Postgres holds the records, and the `jobs` 
 - Run commands from the workspace, for example `career-ops doctor`. `career-ops help` lists them. Keep files you pass to `career-ops pdf` inside `shared/career-ops/`.
 - `jobs cv_main {label}` when the owner asks to switch their main CV. `jobs cv_file` puts the main CV's PDF in the workspace; send it with `share_file`.
 - A change to `inviteLimits` or `noLuck` goes to the owner for approval unless their words ask for exactly that change.
+- `jobs import`, `jobs telegram` and `jobs list` bring in and read postings, and `jobs posting_update` saves checks, scores and statuses. `jobs sources` and `jobs source_update` read and change the Telegram channels and which scanners are on; change them only when the owner asks or accepts.
 
 ## Guides
 
 - Adding or converting a CV, drafting the profile, or the owner sending a CV in chat: read [references/setup.md](references/setup.md).
+- Finding jobs, importing them, the Telegram channels, alert emails or the Job radar: read [references/scan.md](references/scan.md).
 - Checking or scoring a job: read [references/evaluate.md](references/evaluate.md).
 - Making or sending a CV PDF: read [references/cv-pdf.md](references/cv-pdf.md).
