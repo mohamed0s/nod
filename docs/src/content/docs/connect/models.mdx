@@ -13,7 +13,7 @@ Your requests go to the service you connect. Paid providers bill you for use. To
 
 Nod checks the selected model in the background. You can continue setup as soon as Nod saves the connection and selects a model. Chat shows a small status while the check runs. It disappears when the check succeeds. If the check fails, chat shows the service's reason and a link to **Models**. A check the service turns away only because it's busy for now, such as a rate limit or a model at capacity (HTTP 429), doesn't count as a failure; a 429 for a used-up quota or billing limit does.
 
-A model discovery failure shows the service name, HTTP status and service reason when available. Nod removes the connection key.
+A model discovery failure shows the service name, HTTP status and service reason when available, including Mistral's reason when it rejects a key. Nod removes the connection key.
 
 ## Supported connections
 
@@ -470,6 +470,7 @@ flowchart LR
 - Keys from `.env` stay in server memory and aren't copied into the database.
 - Each key goes only to its own service: Amazon Bedrock in the Region you entered, Google Vertex AI, the Azure OpenAI endpoint you entered, or the OpenAI-compatible server address you entered.
 - Your browser doesn't store the key, and Nod removes it from provider errors.
+- Requests to model, speech and decision services identify the app as `nod`. OpenRouter and Vercel AI Gateway show Nod's usage under that name.
 
 ## Related resources
 
