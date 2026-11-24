@@ -389,6 +389,34 @@ export function createTasks(options: {
     ]);
   }
 
+  async function startWork(
+    client: PoolClient,
+    work: { sessionId: string; title: string; brief: string; sourceId: string },
+  ) {
+    const prefs = await preferences.get();
+    const turnId = await enqueueTurn(work.brief, {
+      source: 'event',
+      sourceId: work.sourceId,
+      sessionId: work.sessionId,
+      background: true,
+      proactive: false,
+      startAfter: isQuietTime(prefs) ? (deliveryTime(prefs, Date.now()) ?? undefined) : undefined,
+      client,
+    });
+    await client.query(
+      `INSERT INTO tasks(id,owner_id,turn_id,session_id,title,done_when,brief,now_text)
+       VALUES($1,$2,$3,$1,$4,'',$5,'')`,
+      [work.sessionId, ownerId, turnId, work.title.slice(0, 160), work.brief],
+    );
+    await client.query('UPDATE turns SET task_id=$1,task_revision=1 WHERE id=$2 AND owner_id=$3', [
+      work.sessionId,
+      turnId,
+      ownerId,
+    ]);
+    afterCommit(client, refresh);
+    return turnId;
+  }
+
   async function deliver(
     client: PoolClient,
     taskId: string,
@@ -1086,6 +1114,7 @@ export function createTasks(options: {
     context,
     resolveReply,
     startChat,
+    startWork,
     chatCommand,
     read: (thread?: string) => read(pool, { closed: true, thread }),
     resumeDue,

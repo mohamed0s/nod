@@ -1251,6 +1251,11 @@ async function initializeApplication(
     curator,
     notify: async (client, notice) => (channels ? channels.notice(client, notice) : false),
     timeZone: async () => (await getPreferences()).timeZone,
+    automatic: {
+      start: tasks.startWork,
+      lock: (client) => lockThread(client),
+      ready: () => adapters.model.configured,
+    },
     signal: closing.signal,
     changed: () => jobsChanged(ownerId),
   });

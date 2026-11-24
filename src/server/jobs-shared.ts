@@ -17,6 +17,18 @@ export function parse<T extends z.ZodType>(schema: T, value: unknown, what: stri
   throw failure(`${what}${path ? ` (${path})` : ''}: ${issue.message}`);
 }
 
+export async function applyChatOf(client: Query, ownerId: string, turn: TurnRef) {
+  const { rows } = await client.query<{ company_id: string; session_id: string }>(
+    `SELECT c.id AS company_id,u.session_id FROM turns u
+     JOIN job_companies c ON c.owner_id=u.owner_id AND c.apply_session_id=u.session_id
+     JOIN tasks t ON t.owner_id=u.owner_id AND t.id=u.session_id
+     WHERE u.id=$1 AND u.owner_id=$2 AND u.thread_id=$3 AND NOT u.proactive`,
+    [turn.turnId, ownerId, turn.threadId],
+  );
+  const row = rows[0];
+  return row ? { companyId: row.company_id, sessionId: row.session_id } : null;
+}
+
 export async function rootedIn(client: Query, ownerId: string, turn: TurnRef): Promise<Lineage> {
   const { rows } = await client.query<{ source: string; message_id: string | null }>(
     `WITH RECURSIVE lineage AS (

@@ -66,6 +66,14 @@ export const companyActions = new Set([
 export const applyRequest = (companyId: string) =>
   `Apply for the company I marked no luck\nCompany id: ${companyId}. Ask me before you submit anything.`;
 
+export const automaticApplyRequest = (companyId: string) =>
+  `Apply for a company that counts as no luck\nCompany id: ${companyId}. Nod started this chat by itself because the company counts as no luck; nobody asked for it in chat. Follow the job-search guide's apply reference.`;
+
+export type StartWork = (
+  client: PoolClient,
+  work: { sessionId: string; title: string; brief: string; sourceId: string },
+) => Promise<unknown>;
+
 const day = 86_400_000;
 const memberId = /^ACoAA[A-Za-z0-9_-]{10,120}$/;
 const placeholderCompanies = new Set([
@@ -91,6 +99,12 @@ const placeholderCompanies = new Set([
 const applyState = `CASE WHEN c.apply_session_id IS NULL THEN NULL
   WHEN EXISTS (SELECT 1 FROM tasks t WHERE t.owner_id=c.owner_id AND t.id=c.apply_session_id) THEN 'open'
   WHEN c.apply_started_at>now()-interval '2 minutes' THEN 'starting' ELSE 'lost' END`;
+const applyProgress = `(SELECT CASE WHEN t.state<>'open' THEN 'done'
+    WHEN EXISTS (SELECT 1 FROM turns r WHERE r.owner_id=t.owner_id AND r.session_id=t.session_id
+      AND r.status IN ('queued','running')) THEN 'working'
+    WHEN jsonb_array_length(t.waiting_for)>0 OR t.next_check>now() THEN 'working'
+    ELSE 'needs_you' END
+  FROM tasks t WHERE t.owner_id=c.owner_id AND t.id=c.apply_session_id)`;
 const timeColumn: Record<JobPersonStatus, string> = {
   invited: 'invited_at',
   accepted: 'accepted_at',
@@ -162,6 +176,7 @@ type PersonState = {
   declined_at: string | null;
 };
 type WaveSettings = Pick<JobProfile, 'noLuck' | 'waves' | 'inviteLimits'>;
+export type CompanySettings = WaveSettings & Pick<JobProfile, 'applyLimits'>;
 
 function chanceEnd(person: PersonState, limits: JobProfile['noLuck']) {
   const after = (value: string | null, days: number) =>
@@ -445,6 +460,8 @@ type CompanyRow = {
   no_luck_by: 'owner' | 'rule' | null;
   apply_session_id: string | null;
   apply_state: 'open' | 'starting' | 'lost' | null;
+  apply_progress: 'working' | 'needs_you' | 'done' | null;
+  apply_by: 'owner' | 'rule' | null;
   revision: number;
   updated_at: Date;
   open: number;
@@ -532,7 +549,7 @@ const byActivity = (a: Summary, b: Summary) =>
 export function createJobCompanies(options: {
   pool: Pool;
   ownerId: string;
-  settings: (client: Query) => Promise<WaveSettings>;
+  settings: (client: Query) => Promise<CompanySettings>;
   timeZone: () => Promise<string>;
   drafts: JobDrafts;
   postings: (client: Query, companyId: string) => Promise<JobPosting[]>;
@@ -565,8 +582,8 @@ export function createJobCompanies(options: {
     const search = filter.search?.toLowerCase() ?? null;
     const { rows } = await client.query<CompanyRow>(
       `SELECT c.id,c.name,c.linkedin_slug,c.careers_url,c.status,c.no_luck_at,c.no_luck_by,c.apply_session_id,
-         c.revision,c.updated_at,
-         ${applyState} AS apply_state,
+         c.apply_by,c.revision,c.updated_at,
+         ${applyState} AS apply_state,${applyProgress} AS apply_progress,
          p.open,p.best,COALESCE(f.people,'[]') AS people,f.active
        FROM job_companies c
        LEFT JOIN LATERAL (SELECT count(*)::int AS open,max(j.score) AS best FROM job_postings j
@@ -619,7 +636,12 @@ export function createJobCompanies(options: {
           noLuck,
           applyChat:
             row.apply_session_id && row.apply_state
-              ? { id: row.apply_session_id, state: row.apply_state }
+              ? {
+                  id: row.apply_session_id,
+                  state: row.apply_state,
+                  progress: row.apply_progress,
+                  by: row.apply_by,
+                }
               : null,
           waves,
           revision: row.revision,
@@ -629,7 +651,7 @@ export function createJobCompanies(options: {
     });
     return {
       list,
-      limits: { ...settings.noLuck, waves: settings.waves },
+      limits: { ...settings.noLuck, waves: settings.waves, apply: settings.applyLimits },
       invites: { ...invites, ...settings.inviteLimits },
     };
   }
@@ -1117,7 +1139,7 @@ export function createJobCompanies(options: {
       if (choice !== true || row.apply_state === 'open' || row.apply_state === 'starting')
         return null;
       await client.query(
-        'UPDATE job_companies SET apply_session_id=$3,apply_started_at=now() WHERE owner_id=$1 AND id=$2',
+        "UPDATE job_companies SET apply_session_id=$3,apply_started_at=now(),apply_by='owner' WHERE owner_id=$1 AND id=$2",
         [ownerId, row.id, sessionId],
       );
       return row.id;
@@ -1129,7 +1151,7 @@ export function createJobCompanies(options: {
         apply = { state: 'started' };
       } catch (error) {
         await pool.query(
-          `UPDATE job_companies SET apply_session_id=NULL,apply_started_at=NULL
+          `UPDATE job_companies SET apply_session_id=NULL,apply_started_at=NULL,apply_by=NULL
            WHERE owner_id=$1 AND id=$2 AND apply_session_id=$3`,
           [ownerId, start, sessionId],
         );
@@ -1138,6 +1160,60 @@ export function createJobCompanies(options: {
       options.changed();
     }
     return { company: await company(pool, id), apply };
+  }
+
+  async function startAutomatic(client: PoolClient, start: StartWork) {
+    const settings = await options.settings(client);
+    const today = (
+      await client.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM job_events WHERE owner_id=$1 AND kind='apply_started' AND created_at>=$2",
+        [ownerId, localDayStart(await options.timeZone(), new Date())],
+      )
+    ).rows[0]!.count;
+    let room = settings.applyLimits.daily - today;
+    if (room <= 0) return [];
+    const due = (await summaries(client)).list
+      .map((entry) => entry.company)
+      .filter(
+        (entry) =>
+          entry.noLuck.choice === 'auto' &&
+          entry.noLuck.by === 'rule' &&
+          entry.openPostings > 0 &&
+          (!entry.applyChat || entry.applyChat.state === 'lost'),
+      )
+      .sort(
+        (a, b) =>
+          Date.parse(a.noLuck.since ?? '') - Date.parse(b.noLuck.since ?? '') ||
+          a.id.localeCompare(b.id),
+      );
+    const started: string[] = [];
+    for (const entry of due) {
+      if (room <= 0) break;
+      const earlier = await client.query(
+        "SELECT 1 FROM job_events WHERE owner_id=$1 AND source='apply-auto' AND source_ref=$2",
+        [ownerId, entry.id],
+      );
+      if (earlier.rowCount) continue;
+      const sessionId = randomUUID();
+      await client.query(
+        `UPDATE job_companies SET apply_session_id=$3,apply_started_at=now(),apply_by='rule'
+         WHERE owner_id=$1 AND id=$2`,
+        [ownerId, entry.id, sessionId],
+      );
+      await client.query(
+        `INSERT INTO job_events(id,owner_id,kind,source,source_ref) VALUES($1,$2,'apply_started','apply-auto',$3)`,
+        [randomUUID(), ownerId, entry.id],
+      );
+      await start(client, {
+        sessionId,
+        title: `Apply at ${entry.name}`,
+        brief: automaticApplyRequest(entry.id),
+        sourceId: `job-apply:${sessionId}`,
+      });
+      started.push(entry.id);
+      room--;
+    }
+    return started;
   }
 
   function updatePerson(
@@ -1473,6 +1549,7 @@ export function createJobCompanies(options: {
     handles,
     execute,
     registerRoutes,
+    startAutomatic,
     helper: {
       find: onLinkedIn,
       company: pageCompany,

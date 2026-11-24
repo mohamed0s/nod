@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const jobPostingStatuses = ['new', 'shortlisted', 'skipped'] as const;
+export const jobPostingStatuses = ['new', 'shortlisted', 'skipped', 'applied'] as const;
 export type JobPostingStatus = (typeof jobPostingStatuses)[number];
 
 export const jobSourceKinds = ['career-ops', 'telegram', 'email', 'web'] as const;
@@ -51,6 +51,10 @@ export type JobPosting = {
   status: JobPostingStatus;
   programme: string;
   track: string;
+  appliedAt: string | null;
+  applicationRef: string;
+  tailoredCv: { id: string; name: string; url: string } | null;
+  applyChatId: string | null;
   revision: number;
   firstSeenAt: string;
   lastSeenAt: string;

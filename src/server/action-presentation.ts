@@ -554,6 +554,7 @@ export function actionTarget(
       const invites = (args.inviteLimits ?? {}) as { daily?: unknown; weekly?: unknown };
       const luck = (args.noLuck ?? {}) as { noAcceptDays?: unknown; noReplyDays?: unknown };
       const waves = (args.waves ?? {}) as { size?: unknown; max?: unknown };
+      const apply = (args.applyLimits ?? {}) as { daily?: unknown; perCompany?: unknown };
       return [
         invites.daily !== undefined && `daily invites ${String(invites.daily)}`,
         invites.weekly !== undefined && `weekly invites ${String(invites.weekly)}`,
@@ -563,6 +564,10 @@ export function actionTarget(
           `no luck after ${String(luck.noReplyDays)} days without a reply`,
         waves.size !== undefined && `waves of ${String(waves.size)} people`,
         waves.max !== undefined && `up to ${String(waves.max)} people a company`,
+        apply.daily !== undefined &&
+          `up to ${String(apply.daily)} apply chats Nod starts by itself a day`,
+        apply.perCompany !== undefined &&
+          `up to ${String(apply.perCompany)} applications a company`,
       ]
         .filter(Boolean)
         .join(', ');

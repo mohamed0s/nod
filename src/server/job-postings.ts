@@ -27,7 +27,15 @@ import {
   telegramPostings,
   type JobCandidate,
 } from './jobs-parsers.ts';
-import { failure, parse, rootedIn, type Lineage, type Query, type TurnRef } from './jobs-shared.ts';
+import {
+  applyChatOf,
+  failure,
+  parse,
+  rootedIn,
+  type Lineage,
+  type Query,
+  type TurnRef,
+} from './jobs-shared.ts';
 
 export const jobPostingTables = `
   CREATE TABLE IF NOT EXISTS job_postings (
@@ -80,6 +88,13 @@ const firstReadDays = 14;
 const morePages = 3;
 const score = z.number().min(0).max(5);
 const statusFilter = z.enum([...jobPostingStatuses, 'all']);
+const appliedTime = z.iso.datetime({ offset: true }).refine(
+  (value) => {
+    const time = Date.parse(value);
+    return time <= Date.now() + 5 * 60_000 && time >= Date.now() - 365 * 86_400_000;
+  },
+  { message: 'needs a time in the last year, not in the future' },
+);
 
 const candidate = z.object({
   url: z
@@ -181,6 +196,12 @@ const toolInput = z.discriminatedUnion('action', [
               status: z.enum(jobPostingStatuses).optional(),
               programme: z.string().trim().max(160).optional(),
               track: z.string().trim().max(160).optional(),
+              appliedAt: appliedTime.optional(),
+              applicationRef: z
+                .string()
+                .max(1000)
+                .transform((value) => clean(value, 200))
+                .optional(),
             })
             .strict()
             .refine(
@@ -194,6 +215,12 @@ const toolInput = z.discriminatedUnion('action', [
                 message:
                   'Each change needs score, summary, status, programme, track or more than one of them.',
               },
+            )
+            .refine(
+              (entry) =>
+                entry.status === 'applied' ||
+                (entry.appliedAt === undefined && entry.applicationRef === undefined),
+              { message: "appliedAt and applicationRef go only with status 'applied'." },
             ),
         )
         .min(1)
@@ -242,6 +269,11 @@ type PostingRow = {
   status: JobPosting['status'];
   programme: string;
   track: string;
+  applied_at: Date | null;
+  application_ref: string;
+  tailored_cv_artifact_id: string | null;
+  tailored_cv_name: string | null;
+  apply_session_id: string | null;
   revision: number;
   first_seen_at: Date;
   last_seen_at: Date;
@@ -284,6 +316,17 @@ function view(row: PostingRow): JobPosting {
     status: row.status,
     programme: row.programme,
     track: row.track,
+    appliedAt: row.status === 'applied' ? (row.applied_at?.toISOString() ?? null) : null,
+    applicationRef: row.application_ref,
+    tailoredCv:
+      row.tailored_cv_artifact_id && row.tailored_cv_name
+        ? {
+            id: row.tailored_cv_artifact_id,
+            name: row.tailored_cv_name,
+            url: `/api/artifacts/${row.tailored_cv_artifact_id}`,
+          }
+        : null,
+    applyChatId: row.apply_session_id,
     revision: row.revision,
     firstSeenAt: row.first_seen_at.toISOString(),
     lastSeenAt: row.last_seen_at.toISOString(),
@@ -340,9 +383,10 @@ export function createJobPostings(options: {
     } = {},
   ) {
     const { rows } = await client.query<PostingRow>(
-      `SELECT p.*,COALESCE((SELECT json_agg(json_build_object('kind',l.source,'detail',l.source_detail,'url',l.url)
+      `SELECT p.*,a.name AS tailored_cv_name,COALESCE((SELECT json_agg(json_build_object('kind',l.source,'detail',l.source_detail,'url',l.url)
            ORDER BY l.first_seen_at,l.url_key) FROM job_posting_links l WHERE l.owner_id=p.owner_id AND l.posting_id=p.id),'[]') AS sources
        FROM job_postings p
+       LEFT JOIN artifacts a ON a.id=p.tailored_cv_artifact_id AND a.owner_id=p.owner_id AND a.deleting_at IS NULL
        WHERE p.owner_id=$1 AND ($2::uuid IS NULL OR p.id=$2) AND ($3::text IS NULL OR $3='all' OR p.status=$3)
          AND ($4::real IS NULL OR p.score>=$4)
          AND ($5::text IS NULL OR ($5='none' AND p.score IS NULL) OR p.score_kind=$5)
@@ -582,20 +626,35 @@ export function createJobPostings(options: {
       status?: JobPosting['status'];
       programme?: string;
       track?: string;
+      appliedAt?: string;
+      applicationRef?: string;
     }>,
     signal?: AbortSignal,
   ) {
     return options.turnWrite(
       turn,
       async (client) => {
-        const lineage: Lineage = await writer(client, turn, 'change job postings');
+        const lineage: Lineage = await rootedIn(client, ownerId, turn);
+        const chat = lineage === 'owner' ? null : await applyChatOf(client, ownerId, turn);
+        if (lineage === 'other' && !chat)
+          throw failure(
+            "Only work started by an owner message, a schedule, or a company's apply chat can change job postings.",
+            403,
+          );
+        const session = (
+          await client.query<{ session_id: string }>(
+            `SELECT u.session_id FROM turns u JOIN tasks t ON t.id=u.session_id AND t.owner_id=u.owner_id
+             WHERE u.id=$1 AND u.owner_id=$2`,
+            [turn.turnId, ownerId],
+          )
+        ).rows[0]?.session_id;
         const updated: JobPosting[] = [];
         const kept: Array<{ id: string; status: string; reason: string }> = [];
         const missing: string[] = [];
         for (const change of changes) {
           const current = (
-            await client.query<{ status: JobPosting['status'] }>(
-              'SELECT status FROM job_postings WHERE owner_id=$1 AND id=$2 FOR UPDATE',
+            await client.query<{ status: JobPosting['status']; company_id: string | null }>(
+              'SELECT status,company_id FROM job_postings WHERE owner_id=$1 AND id=$2 FOR UPDATE',
               [ownerId, change.id],
             )
           ).rows[0];
@@ -603,31 +662,51 @@ export function createJobPostings(options: {
             missing.push(change.id);
             continue;
           }
+          const ownChat = Boolean(chat && current.company_id === chat.companyId);
+          if (lineage === 'other' && !ownChat)
+            throw failure(
+              `The posting ${change.id} belongs to another company. This apply chat changes only its own company's postings.`,
+              403,
+            );
+          if (change.status === 'applied' && lineage !== 'owner' && !ownChat)
+            throw failure(
+              "Only work started by an owner message, or the company's own apply chat, can mark a posting applied.",
+              403,
+            );
           let status = change.status;
-          if (
-            status &&
-            status !== current.status &&
-            lineage !== 'owner' &&
-            current.status !== 'new'
-          ) {
+          const allowed =
+            status === 'applied'
+              ? current.status === 'new' || current.status === 'shortlisted'
+              : current.status === 'new';
+          if (status && status !== current.status && lineage !== 'owner' && !allowed) {
             kept.push({
               id: change.id,
               status: current.status,
               reason:
-                'The owner already chose this status; scheduled work changes only new postings.',
+                status === 'applied'
+                  ? 'The owner skipped this posting, so only the owner can mark it applied.'
+                  : 'The owner already chose this status; work the owner didn’t start changes only new postings.',
             });
             status = undefined;
           }
+          const applying = status === 'applied';
           await client.query(
             `UPDATE job_postings SET score=COALESCE($3,score),score_kind=CASE WHEN $3::real IS NULL THEN score_kind ELSE $4 END,
                summary=COALESCE($5,summary),status=COALESCE($6,status),
-               programme=COALESCE($7,programme),track=COALESCE($8,track),revision=revision+1,updated_at=now()
+               programme=COALESCE($7,programme),track=COALESCE($8,track),
+               applied_at=CASE WHEN $9 THEN COALESCE($10::timestamptz,CASE WHEN status='applied' THEN applied_at END,now())
+                 WHEN $6::text IS NOT NULL THEN NULL ELSE applied_at END,
+               application_ref=CASE WHEN $9 THEN COALESCE($11,application_ref) ELSE application_ref END,
+               apply_session_id=CASE WHEN $9 THEN COALESCE($12::uuid,apply_session_id) ELSE apply_session_id END,
+               revision=revision+1,updated_at=now()
              WHERE owner_id=$1 AND id=$2 AND (
                ($3::real IS NOT NULL AND (score IS DISTINCT FROM $3::real OR score_kind IS DISTINCT FROM $4::text))
                OR ($5::text IS NOT NULL AND summary IS DISTINCT FROM $5::text)
                OR ($6::text IS NOT NULL AND status IS DISTINCT FROM $6::text)
                OR ($7::text IS NOT NULL AND programme IS DISTINCT FROM $7::text)
-               OR ($8::text IS NOT NULL AND track IS DISTINCT FROM $8::text))`,
+               OR ($8::text IS NOT NULL AND track IS DISTINCT FROM $8::text)
+               OR ($9 AND $10::timestamptz IS NOT NULL AND applied_at IS DISTINCT FROM $10::timestamptz)
+               OR ($9 AND $11::text IS NOT NULL AND application_ref IS DISTINCT FROM $11::text))`,
             [
               ownerId,
               change.id,
@@ -637,6 +716,10 @@ export function createJobPostings(options: {
               status ?? null,
               change.programme ?? null,
               change.track ?? null,
+              applying,
+              applying ? (change.appliedAt ?? null) : null,
+              applying ? (change.applicationRef ?? null) : null,
+              applying ? (ownChat ? chat!.sessionId : (session ?? null)) : null,
             ],
           );
           updated.push(await onePosting(client, change.id));
@@ -937,7 +1020,8 @@ export function createJobPostings(options: {
           );
         if (current.status !== change.status)
           await client.query(
-            `UPDATE job_postings SET status=$3,revision=revision+1,updated_at=now() WHERE owner_id=$1 AND id=$2`,
+            `UPDATE job_postings SET status=$3,applied_at=CASE WHEN $3='applied' THEN now() END,
+               revision=revision+1,updated_at=now() WHERE owner_id=$1 AND id=$2`,
             [ownerId, current.id, change.status],
           );
         return onePosting(client, current.id);
@@ -997,6 +1081,7 @@ export function createJobPostings(options: {
     handles,
     execute,
     registerRoutes,
+    one: onePosting,
     ofCompany: (client: Query, companyId: string) =>
       postings(client, { companyId, status: 'all', limit: 100 }),
   };
