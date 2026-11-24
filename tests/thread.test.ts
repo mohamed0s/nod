@@ -2849,9 +2849,10 @@ test(
             (
               (await recentOwnerWords(db.pool, ownerId, current, [messageId], task)).words
                 .userMessages ?? []
-            ).map(({ text }) => text);
+            ).flatMap(({ text, replyTo }) => (replyTo ? [replyTo, text] : [text]));
           assert.deepEqual(await checked(firstAgain.messageId, bikes), [
             'Synthetic first chat about bicycles',
+            'done: Synthetic first chat about bicycles',
             'Synthetic first chat follow-up',
           ]);
           const mainChecked = await checked(mainAgain.messageId, null);
