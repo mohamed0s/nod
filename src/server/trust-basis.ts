@@ -101,17 +101,45 @@ const ownSettings = new Set([
   'NOD_model_select',
 ]);
 
-export function trustBasis(
-  answer: unknown,
-  words: TrustWords & { action?: { name: string; arguments?: Record<string, unknown> } },
-): TrustBasis | undefined {
+type BasisWords = TrustWords & {
+  action?: { name: string; arguments?: Record<string, unknown> };
+  replacesInstruction?: boolean;
+};
+
+export function citedSource(answer: unknown) {
   if (!answer || typeof answer !== 'object') return undefined;
-  const { run, because, source, terms } = answer as {
-    run?: unknown;
-    because?: unknown;
-    source?: unknown;
-    terms?: unknown;
-  };
+  const { because, source } = answer as { because?: unknown; source?: unknown };
+  return typeof source === 'string'
+    ? source
+    : because === 'read'
+      ? 'read'
+      : because === 'schedule approval'
+        ? 'scheduleApproval'
+        : undefined;
+}
+
+export function trustSources(words: BasisWords) {
+  return [
+    'read',
+    ...(words.userMessages ?? []).map((_, index) => `message:${index}`),
+    ...(words.scheduledInstructions ?? []).map((_, index) => `schedule:${index}`),
+    'scheduleApproval',
+    'standing',
+    'rules',
+  ].filter((source) => trustBasis({ run: true, source, terms: [] }, words));
+}
+
+export function trustBasisProblem(answer: unknown, words: BasisWords) {
+  const cited = citedSource(answer);
+  if (!cited) return 'no_source';
+  if (!trustSources(words).includes(cited)) return 'unlisted_source';
+  const { terms } = answer as { terms?: unknown };
+  return terms === undefined || terms === null ? 'missing_terms' : 'bad_terms';
+}
+
+export function trustBasis(answer: unknown, words: BasisWords): TrustBasis | undefined {
+  if (!answer || typeof answer !== 'object') return undefined;
+  const { run, terms } = answer as { run?: unknown; terms?: unknown };
   if (
     terms !== undefined &&
     (!Array.isArray(terms) ||
@@ -127,18 +155,12 @@ export function trustBasis(
       ))
   )
     return undefined;
-  const cited =
-    typeof source === 'string'
-      ? source
-      : because === 'read'
-        ? 'read'
-        : because === 'schedule approval'
-          ? 'scheduleApproval'
-          : undefined;
+  const cited = citedSource(answer);
   if (
     run !== true ||
     !cited ||
-    (cited !== 'read' && cited !== 'scheduleApproval' && !Array.isArray(terms))
+    (cited !== 'read' && cited !== 'scheduleApproval' && !Array.isArray(terms)) ||
+    (words.replacesInstruction && !/^(message|schedule):/.test(cited))
   )
     return undefined;
   const name = words.action?.name ?? '';

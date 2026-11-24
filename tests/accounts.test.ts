@@ -39,7 +39,12 @@ import type { ModelTrace } from '../src/ports/traces.ts';
 import type { ProviderUsageEvent } from '../src/ports/provider-usage.ts';
 import { setRequestAccount } from '../src/web/lib/api.ts';
 import { createOtlpTelemetry } from '../src/providers/otlp/telemetry.ts';
-import { trustBasis, trustDecision } from '../src/server/trust-basis.ts';
+import {
+  trustBasis,
+  trustBasisProblem,
+  trustDecision,
+  trustSources,
+} from '../src/server/trust-basis.ts';
 import { createTrust } from '../src/server/trust.ts';
 import { createTrustReview } from '../src/server/trust-review.ts';
 import { trustFacts } from '../src/server/trust-facts.ts';
@@ -1395,6 +1400,87 @@ test('trust decisions select only owner evidence and keep reply evidence separat
   assert.deepEqual(trustBasis({ run: true, source: 'read' }, act('GMAIL_FETCH_EMAILS')), {
     kind: 'read',
   });
+  const mixed = {
+    scheduledInstructions: [
+      ...scheduled.scheduledInstructions,
+      { at: '2026-11-14T00:02:00Z', text: '', fields: { cron: '0 20 * * *' } },
+    ],
+  };
+  for (const [words, sources] of [
+    [
+      { ...mixed, ...rules, ...act('GMAIL_LIST_THREADS') },
+      ['read', 'schedule:0', 'schedule:1', 'rules'],
+    ],
+    [{ ...mixed, ...act('NOD_schedule_pause') }, ['schedule:0', 'schedule:1']],
+    [
+      { ...mixed, ...rules, ...act('NOD_schedule_update'), replacesInstruction: true },
+      ['schedule:0', 'schedule:1'],
+    ],
+    [
+      {
+        ...owner,
+        ...rules,
+        standingInstruction: 'Create my schedules.',
+        ...act('NOD_schedule_create'),
+        replacesInstruction: true,
+      },
+      ['message:0'],
+    ],
+    [
+      {
+        ...owner,
+        ...rules,
+        standingInstruction: 'Create my schedules.',
+        ...act('NOD_schedule_create'),
+      },
+      ['message:0', 'rules'],
+    ],
+    [{ ...owner, ...rules, ...act('NOD_bug_report_send') }, ['message:0']],
+    [
+      {
+        ...withOwnerIds(
+          {
+            userMessages: [
+              { at: '2026-11-03T09:00:00Z', text: 'Yes.', canAuthorize: false },
+              { at: '2026-11-03T09:01:00Z', text: 'Send the report.' },
+            ],
+          },
+          ['answer', 'request'],
+        ),
+        standingInstruction: 'Reply to delivery questions.',
+        ...act('GMAIL_SEND_EMAIL'),
+      },
+      ['read', 'message:1', 'standing'],
+    ],
+  ] as const)
+    assert.deepEqual(trustSources(words), sources);
+  const listing = { ...mixed, ...act('GMAIL_LIST_THREADS') };
+  for (const [answer, problem] of [
+    [{ run: true }, 'no_source'],
+    [{ run: true, because: 'Read my inbox.' }, 'no_source'],
+    [{ run: true, source: 'schedule:2', terms: [] }, 'unlisted_source'],
+    [{ run: true, source: 'schedule:4', terms: [] }, 'unlisted_source'],
+    [{ run: true, source: 'scheduledInstructions[1]', terms: [] }, 'unlisted_source'],
+    [{ run: true, source: 'schedule:1' }, 'missing_terms'],
+    [{ run: true, source: 'schedule:1', terms: null }, 'missing_terms'],
+    [
+      { run: true, source: 'schedule:1', terms: { user: 'today', action: 'week', same: false } },
+      'bad_terms',
+    ],
+    [
+      { run: true, source: 'schedule:1', terms: [{ user: 'today', action: 'week', same: false }] },
+      'bad_terms',
+    ],
+    [
+      { run: true, source: 'schedule:1', terms: [{ user: 'today', action: '', same: true }] },
+      'bad_terms',
+    ],
+    [
+      { run: true, source: 'read', terms: [{ user: 'today', action: 'week', same: false }] },
+      'bad_terms',
+    ],
+  ] as const)
+    assert.equal(trustBasisProblem(answer, listing), problem, JSON.stringify(answer));
   assert.equal(
     trustDecision(scheduled).question.choices.some(({ value }) =>
       String(value).startsWith('message:'),
