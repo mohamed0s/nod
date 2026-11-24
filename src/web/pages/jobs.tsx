@@ -897,9 +897,10 @@ function Templates() {
 
 export function Jobs() {
   const tabsId = useId();
-  const [view, setView] = useState<View>('postings');
+  const [chosen, setView] = useState<View | null>(null);
   const setup = usePageData<JobSetup>('/api/jobs/setup');
   const cvs = usePageData<JobCv[]>('/api/jobs/cvs');
+  const view = chosen ?? (cvs.data?.length ? 'postings' : 'cvs');
   useEffect(
     () =>
       subscribeAppEvents(undefined, {
