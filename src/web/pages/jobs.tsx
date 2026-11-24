@@ -434,7 +434,9 @@ type ProfileForm = Record<
   | 'noAcceptDays'
   | 'noReplyDays'
   | 'waveSize'
-  | 'waveMax',
+  | 'waveMax'
+  | 'applyDaily'
+  | 'applyPerCompany',
   string
 >;
 
@@ -463,6 +465,8 @@ function toForm(profile: JobProfile): ProfileForm {
     noReplyDays: String(profile.noLuck.noReplyDays),
     waveSize: String(profile.waves.size),
     waveMax: String(profile.waves.max),
+    applyDaily: String(profile.applyLimits.daily),
+    applyPerCompany: String(profile.applyLimits.perCompany),
   };
 }
 
@@ -509,6 +513,7 @@ function fromForm(form: ProfileForm): JobProfile {
     inviteLimits: { daily: Number(form.daily), weekly: Number(form.weekly) },
     noLuck: { noAcceptDays: Number(form.noAcceptDays), noReplyDays: Number(form.noReplyDays) },
     waves: { size: Number(form.waveSize), max: Number(form.waveMax) },
+    applyLimits: { daily: Number(form.applyDaily), perCompany: Number(form.applyPerCompany) },
   };
 }
 
@@ -639,6 +644,15 @@ function Profile() {
         Nod suggests inviting a company's people in waves. The next wave opens once everyone in the
         earlier ones had their chance; it stops at the first referral, and a company counts as no
         luck only once the most people were invited and none of them helped.
+      </p>
+      <div className="jobs-numbers">
+        {field('applyDaily', 'Apply chats Nod starts by itself a day', { type: 'number' })}
+        {field('applyPerCompany', 'Applications a company, at most', { type: 'number' })}
+      </div>
+      <p className="field-hint">
+        When a company counts as no luck, Nod opens one chat to apply on its own careers site, at
+        most this many a day in your time zone. It submits nothing without your yes, unless your
+        rules say otherwise.
       </p>
       {message && <Notice kind={message.kind}>{message.text}</Notice>}
       <div className="jobs-actions">
