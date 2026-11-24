@@ -1677,11 +1677,19 @@ async function initializeApplication(
         action === 'NOD_model_select' ||
         action.startsWith('NOD_memory_') ||
         action === 'NOD_notification_preferences_update';
-      if (action === 'NOD_agent_update' || action === 'NOD_jobs_limits_update') {
-        const result = await withTurnLock<object>(turnLock, (client) =>
-          action === 'NOD_agent_update'
-            ? agents.apply(args, client)
-            : jobs.applyLimits(args, client, provenance.details?.current),
+      if (action === 'NOD_agent_update') {
+        const result = await withTurnLock(turnLock, (client) => agents.apply(args, client));
+        await ledger.action(
+          provenance.turnId,
+          action,
+          provenance.basis ?? { kind: 'approved' },
+          actionTarget(action, args, provenance.details),
+        );
+        return result;
+      }
+      if (action === 'NOD_jobs_limits_update') {
+        const result = await withTurnLock(turnLock, (client) =>
+          jobs.applyLimits(args, client, provenance.details?.current),
         );
         await ledger.action(
           provenance.turnId,
@@ -2034,6 +2042,7 @@ async function initializeApplication(
       return result;
     },
     async (action, args, expectedRevision, client) => {
+      if (action === 'NOD_agent_update') return agents.validate(args, client);
       if (
         ['NOD_browser', 'NOD_vault_allow', 'NOD_bug_report_send', 'NOD_workspace_command'].includes(
           action,
@@ -2043,7 +2052,6 @@ async function initializeApplication(
         return;
       if (action === 'NOD_limits_update') limitsInput.parse(args);
       else if (action === 'NOD_jobs_limits_update') jobLimitsInput.parse(args);
-      else if (action === 'NOD_agent_update') await agents.validate(args, client);
       else if (action.startsWith('NOD_')) {
         if (
           ['NOD_schedule_update', 'NOD_schedule_pause', 'NOD_schedule_cancel'].includes(action) &&
