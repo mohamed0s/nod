@@ -86,6 +86,7 @@ export type JobDraft = {
   languageBy: 'owner' | 'guess' | 'default' | null;
   templateRevision: number | null;
   missing: string[];
+  editedBy: 'owner' | 'nod' | null;
   at: string | null;
 };
 

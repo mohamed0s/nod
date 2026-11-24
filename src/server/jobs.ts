@@ -31,7 +31,7 @@ import {
 import type { ArtifactService } from './artifacts.ts';
 import { logFailure } from './failure-log.ts';
 import { createJobCompanies, jobCompanyTables, linkPostings } from './job-companies.ts';
-import { createJobDrafts, jobDraftTables, validZone } from './job-drafts.ts';
+import { createJobDrafts, jobDraftTables, validZone, type DraftNotice } from './job-drafts.ts';
 import { createJobHelper, jobHelperTables } from './job-helper.ts';
 import { createJobPostings, jobPostingTables } from './job-postings.ts';
 import { careerOpsFiles, scanConfig, scanSummary } from './jobs-files.ts';
@@ -322,6 +322,7 @@ export function createJobs(options: {
   ) => Promise<T>;
   telegram?: TelegramChannels;
   curator?: MemoryCurator;
+  notify?: (client: Query, notice: DraftNotice) => Promise<boolean>;
   timeZone?: () => Promise<string | null | undefined>;
   signal?: AbortSignal;
   changed?: () => void;
@@ -379,6 +380,7 @@ export function createJobs(options: {
       ).rows,
     timeZone,
     ...(options.curator ? { curator: options.curator } : {}),
+    ...(options.notify ? { notify: options.notify } : {}),
     ...(options.signal ? { signal: options.signal } : {}),
     owned,
   });
@@ -956,7 +958,7 @@ export function createJobs(options: {
       ) as JobLimits;
       if (Object.keys(change).length && !review)
         throw failure(
-          "Changing invite limits or no-luck days needs the owner's approval, which isn't available here.",
+          "Changing invite limits, no-luck days or waves needs the owner's approval, which isn't available here.",
           403,
         );
       const revision =

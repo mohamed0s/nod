@@ -284,7 +284,17 @@ export function localDayStart(timeZone: string, at: Date, daysBack = 0) {
   };
   const today = parts(at.getTime());
   const target = Date.UTC(today.year, today.month - 1, today.day - daysBack);
-  return new Date(target - offset(target - offset(target)));
+  const day = new Date(target);
+  const first = target - offset(target);
+  const starts = [first, target - offset(first)].filter((time) => {
+    const local = parts(time);
+    return (
+      local.year === day.getUTCFullYear() &&
+      local.month === day.getUTCMonth() + 1 &&
+      local.day === day.getUTCDate()
+    );
+  });
+  return new Date(starts.length ? Math.min(...starts) : target - offset(first));
 }
 
 function keyOf(name: string) {
@@ -419,6 +429,7 @@ const toolInput = z.discriminatedUnion('action', [
       text: z.string().max(8000),
       changes: z.string().max(1000).optional(),
       revision: z.int().min(0),
+      replace: z.boolean().optional(),
     })
     .strict(),
 ]);
@@ -461,6 +472,7 @@ type PersonRow = {
   draft_missing: string[];
   draft_inputs: Record<string, string>;
   draft_at: Date | null;
+  draft_edited_by: 'owner' | 'nod' | null;
   revision: number;
   created_at: Date;
   updated_at: Date;
@@ -728,6 +740,7 @@ export function createJobCompanies(options: {
       at?: string;
     },
     label: string,
+    replaceEdits = false,
   ) {
     const status = next.status ?? current.status;
     const stamp = status !== current.status || next.at !== undefined;
@@ -771,7 +784,7 @@ export function createJobCompanies(options: {
         after.language !== current.language &&
         (after.draft || after.draft_state || after.status === 'accepted')
       )
-        await options.drafts.make(client, after.id);
+        await options.drafts.languageChanged(client, after.id, replaceEdits);
       return onePerson(client, current.id);
     });
   }
@@ -821,18 +834,19 @@ export function createJobCompanies(options: {
     const status =
       mergeOrder.indexOf(drop.status) > mergeOrder.indexOf(keep.status) ? drop.status : keep.status;
     await client.query(
-      `UPDATE job_people k SET draft_state=d.draft_state,draft_reason=d.draft_reason,draft_note=d.draft_note,
+      `UPDATE job_people k SET draft=d.draft,draft_revision=GREATEST(k.draft_revision,d.draft_revision),
+         draft_state=d.draft_state,draft_reason=d.draft_reason,draft_note=d.draft_note,
          draft_language=d.draft_language,draft_language_by=d.draft_language_by,
          draft_template_revision=d.draft_template_revision,draft_missing=d.draft_missing,
-         draft_inputs=d.draft_inputs,draft_at=d.draft_at
-       FROM job_people d WHERE k.owner_id=$1 AND k.id=$2 AND d.owner_id=$1 AND d.id=$3
-         AND k.draft='' AND k.draft_state IS NULL AND d.draft_state IS NOT NULL`,
+         draft_inputs=d.draft_inputs,draft_at=d.draft_at,draft_edited_by=d.draft_edited_by
+       FROM job_people d WHERE k.owner_id=$1 AND k.id=$2 AND d.owner_id=$1 AND d.id=$3 AND k.draft=''
+         AND (d.draft<>'' OR (k.draft_state IS NULL AND d.draft_state IS NOT NULL))`,
       [ownerId, keep.id, drop.id],
     );
     await client.query(
       `INSERT INTO job_events(id,owner_id,kind,source,source_ref,person_id,detail,created_at)
        SELECT gen_random_uuid(),owner_id,kind,source,$2,$4::uuid,detail,created_at FROM job_events
-       WHERE owner_id=$1 AND source IN ('draft','accept') AND source_ref=$3
+       WHERE owner_id=$1 AND source IN ('draft','accept','accept-missing') AND source_ref=$3
        ON CONFLICT (owner_id,source,source_ref) DO NOTHING`,
       [ownerId, keep.id, drop.id, keep.id],
     );
@@ -844,9 +858,7 @@ export function createJobCompanies(options: {
          referred_at=LEAST(referred_at,$10::timestamptz),declined_at=LEAST(declined_at,$11::timestamptz),
          name=CASE WHEN name='' THEN $12 ELSE name END,headline=CASE WHEN headline='' THEN $13 ELSE headline END,
          language=CASE WHEN language='' THEN $14 ELSE language END,
-         draft_revision=CASE WHEN draft='' THEN $16 ELSE draft_revision END,
-         draft=CASE WHEN draft='' THEN $15 ELSE draft END,
-         created_at=LEAST(created_at,$17::timestamptz),revision=GREATEST(revision,$18)+1,updated_at=now()
+         created_at=LEAST(created_at,$15::timestamptz),revision=GREATEST(revision,$16)+1,updated_at=now()
        WHERE owner_id=$1 AND id=$2`,
       [
         ownerId,
@@ -858,12 +870,11 @@ export function createJobCompanies(options: {
         drop.name,
         drop.headline,
         drop.language,
-        drop.draft,
-        drop.draft_revision,
         drop.created_at,
         drop.revision,
       ],
     );
+    await options.drafts.resume(client, keep.id);
     return onePerson(client, keep.id);
   }
 
@@ -1024,9 +1035,9 @@ export function createJobCompanies(options: {
       'prepare referral messages',
       async (client) => {
         const row = await onePerson(client, request.personId);
-        if (row.draft_state === 'edited' && !request.replace)
+        if (row.draft_state === 'edited' && row.draft_edited_by !== 'nod' && !request.replace)
           throw failure(
-            'This message was edited after Nod made it. Ask the owner before replacing their version, then call draft_prepare again with replace: true.',
+            'The owner edited this message. Replace it only when the owner asks you to, then call draft_prepare again with replace: true.',
             409,
           );
         if (request.language !== undefined && request.language !== row.language)
@@ -1035,6 +1046,7 @@ export function createJobCompanies(options: {
             [ownerId, row.id, request.language],
           );
         const made = await options.drafts.make(client, row.id, {
+          replace: Boolean(request.replace),
           inputs: {
             ...(request.postingId ? { postingId: request.postingId } : {}),
             ...(request.programme ? { programme: request.programme } : {}),
@@ -1132,6 +1144,7 @@ export function createJobCompanies(options: {
     id: string,
     next: Parameters<typeof change>[2],
     revision: number,
+    how: { replaceEdits?: boolean; make?: boolean } = {},
   ): Promise<JobPerson> {
     return options.owned(async (client) => {
       const current = await onePerson(client, id);
@@ -1140,8 +1153,9 @@ export function createJobCompanies(options: {
           'This person changed since you loaded the company. Reload it, then make your change again.',
           409,
         );
-      const row = await change(client, current, next, 'The person');
-      return personView(row, await options.drafts.viewer(client));
+      const changed = await change(client, current, next, 'The person', how.replaceEdits);
+      if (how.make && !changed.draft) await options.drafts.make(client, changed.id);
+      return personView(await onePerson(client, id), await options.drafts.viewer(client));
     });
   }
 
@@ -1347,6 +1361,7 @@ export function createJobCompanies(options: {
                 ...(request.changes !== undefined ? { changes: request.changes } : {}),
                 revision: request.revision,
                 actor: 'nod',
+                replace: Boolean(request.replace),
               });
               return draftResult(client, request.personId, { saved: true });
             },
@@ -1411,7 +1426,7 @@ export function createJobCompanies(options: {
         request.body,
         'The person change',
       );
-      return updatePerson(request.params.id, next, revision);
+      return updatePerson(request.params.id, next, revision, { replaceEdits: true });
     });
     app.post<{ Params: { id: string } }>('/api/jobs/people/:id/draft', async (request) => {
       const { draftRevision } = parse(
@@ -1426,7 +1441,7 @@ export function createJobCompanies(options: {
             'This message changed since you opened it. Reload the company, then remake it again.',
             409,
           );
-        const made = await options.drafts.make(client, current.id);
+        const made = await options.drafts.make(client, current.id, { replace: true });
         return {
           person: personView(
             await onePerson(client, current.id),

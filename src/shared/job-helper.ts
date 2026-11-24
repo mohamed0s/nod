@@ -1,4 +1,4 @@
-import type { JobCompanyView, JobPerson, JobWaves } from './job-companies';
+import type { JobCompanyView, JobDraft, JobPerson, JobWaves } from './job-companies';
 
 export type JobHelper = {
   id: string;
@@ -16,12 +16,16 @@ export type JobHelperPairing = { code: string; expiresAt: string };
 
 export type JobHelperInvites = { today: number; week: number; daily: number; weekly: number };
 
+export type JobHelperPerson = Omit<JobPerson, 'draftInfo'> & {
+  draftInfo: Omit<JobDraft, 'raw' | 'templateRevision' | 'languageBy' | 'at'> | null;
+};
+
 export type JobHelperCompany = {
-  company: Omit<JobCompanyView, 'postings'> | null;
+  company: (Omit<JobCompanyView, 'postings' | 'people'> & { people: JobHelperPerson[] }) | null;
   invites: JobHelperInvites;
 };
 
 export type JobHelperAccepted = {
-  people: Array<JobPerson & { company: string; waves: JobWaves }>;
+  people: Array<JobHelperPerson & { company: string; waves: JobWaves }>;
   languages: string[];
 };
