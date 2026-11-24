@@ -1,6 +1,6 @@
 ---
 name: job-search
-description: Run the owner's own job search pipeline in Nod. Use whenever the owner sends or mentions their own CV or resume, even with just "this is my CV", to add it to their CV library before anything else, and for their CVs, job profile, message templates, finding jobs (career-ops scans, Telegram job channels, job-alert emails, the Job radar), the postings list, scoring jobs and CV PDFs. Use hiring-and-career for other people's CVs and any other career or hiring task.
+description: Run the owner's own job search pipeline in Nod. Use whenever the owner sends or mentions their own CV or resume, even with just "this is my CV", to add it to their CV library before anything else, and for their CVs, job profile, message templates, finding jobs (career-ops scans, Telegram job channels, job-alert emails, the Job radar), the postings list, scoring jobs, CV PDFs, the companies and the people the owner invited on LinkedIn, and a company the owner marked no luck. Use hiring-and-career for other people's CVs and any other career or hiring task.
 ---
 
 # Job search
@@ -29,6 +29,7 @@ The owner's job search lives in Nod. Postgres holds the records, and the `jobs` 
 - `jobs cv_main {label}` when the owner asks to switch their main CV. `jobs cv_file` puts the main CV's PDF in the workspace; send it with `share_file`.
 - A change to `inviteLimits` or `noLuck` goes to the owner for approval unless their words ask for exactly that change.
 - `jobs import`, `jobs telegram` and `jobs list` bring in and read postings, and `jobs posting_update` saves checks, scores and statuses. `jobs sources` and `jobs source_update` read and change the Telegram channels and which scanners are on; change them only when the owner asks or accepts.
+- `jobs companies` and `jobs company` read the companies, their people and their postings. `jobs person_update` saves the people the owner tells you they invited or talked to.
 
 ## Guides
 
@@ -36,3 +37,4 @@ The owner's job search lives in Nod. Postgres holds the records, and the `jobs` 
 - Finding jobs, importing them, the Telegram channels, alert emails or the Job radar: read [references/scan.md](references/scan.md).
 - Checking or scoring a job: read [references/evaluate.md](references/evaluate.md).
 - Making or sending a CV PDF: read [references/cv-pdf.md](references/cv-pdf.md).
+- People the owner invited or talked to, the companies list, no luck, or a chat that starts "Apply for the company I marked no luck": read [references/companies.md](references/companies.md).
