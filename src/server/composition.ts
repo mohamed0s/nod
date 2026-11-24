@@ -1672,11 +1672,6 @@ async function initializeApplication(
         'NOD_schedule_create',
         'NOD_schedule_update',
       ].includes(action);
-      const lockedWrite =
-        action === 'NOD_limits_update' ||
-        action === 'NOD_model_select' ||
-        action.startsWith('NOD_memory_') ||
-        action === 'NOD_notification_preferences_update';
       if (action === 'NOD_agent_update') {
         const result = await withTurnLock(turnLock, (client) => agents.apply(args, client));
         await ledger.action(
@@ -1687,6 +1682,11 @@ async function initializeApplication(
         );
         return result;
       }
+      const lockedWrite =
+        action === 'NOD_limits_update' ||
+        action === 'NOD_model_select' ||
+        action.startsWith('NOD_memory_') ||
+        action === 'NOD_notification_preferences_update';
       if (action === 'NOD_jobs_limits_update') {
         const result = await withTurnLock(turnLock, (client) =>
           jobs.applyLimits(args, client, provenance.details?.current),
@@ -2651,9 +2651,9 @@ async function initializeApplication(
       recall: personal.recall,
       learnedSkills: learnedSkills.index,
       taskContext: tasks.context,
-      agentContext: agents.context,
       settleTask: tasks.settle,
       taskLedger: tasks.read,
+      agentContext: agents.context,
       task: async (turn, raw, sourceMessageId, priorMessageId, priorHandoff) => {
         const request = raw as { action?: unknown; model?: unknown } | undefined;
         if (request?.action === 'start' && request.model) {

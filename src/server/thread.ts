@@ -255,9 +255,9 @@ export interface ThreadDependencies {
     priorHandoff?: boolean,
   ) => Promise<unknown>;
   taskContext?: (turn: TurnRef) => Promise<RuntimeContext['taskContext']>;
-  agentContext?: (sessionId: string) => Promise<RuntimeContext['agent']>;
   settleTask?: (turn: TurnRef, result: string) => Promise<void>;
   taskLedger?: (threadId: string) => Promise<NonNullable<RuntimeContext['tasks']>>;
+  agentContext?: (sessionId: string) => Promise<RuntimeContext['agent']>;
   startTurn?: (turn: TurnRef) => Promise<void>;
   runTurn: (context: RuntimeContext) => Promise<RuntimeResult>;
   speech: Pick<SpeechService, 'synthesize'> & Partial<Pick<SpeechService, 'configured'>>;
@@ -2349,9 +2349,9 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     await dependencies.startTurn?.(ref);
     const taskContext = await dependencies.taskContext?.(ref);
     if (taskContext?.messageId) ref.taskMessageId = taskContext.messageId;
-    const agent = await dependencies.agentContext?.(turn.session_id);
     const tasks = await dependencies.taskLedger?.(threadId);
     const workspacePath = join(dataRoot, 'workspaces', threadId);
+    const agent = await dependencies.agentContext?.(turn.session_id);
     await mkdir(workspacePath, { recursive: true });
     const workspaceReference = (path: string) =>
       taskContext ? `/workspace/${threadId}/${path}` : path;
@@ -2551,9 +2551,9 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       channel: String(turn.channel).split(':')[0],
       ...loaded.context,
       speech,
+      ...(agent ? { agent } : {}),
       ...(proactivity ? { proactivity } : {}),
       taskContext,
-      ...(agent ? { agent } : {}),
       tasks,
       ...(checkIn ? { checkIn } : {}),
       ...(limit ? { spendingLimitReached: { monthlyUsd: limit.monthlyUsd } } : {}),

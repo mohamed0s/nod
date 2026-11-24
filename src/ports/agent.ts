@@ -182,7 +182,6 @@ export interface RuntimeContext {
   credentialRequests?: Array<
     Pick<CredentialRequest, 'turnId' | 'origin' | 'label' | 'kind' | 'status' | 'notEntered'>
   >;
-  agent?: { name: string; description: string; instructions: string };
   taskContext?: {
     id: string;
     title: string;
@@ -192,6 +191,7 @@ export interface RuntimeContext {
     messageId?: string | null;
   };
   tasks?: import('../shared/contracts.ts').Task[];
+  agent?: { name: string; description: string; instructions: string };
   workspacePath: string;
   signal: AbortSignal;
   attachments: Array<{
