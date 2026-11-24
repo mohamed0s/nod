@@ -1,6 +1,6 @@
 ---
 title: Job search
-description: Keep your CVs and job profile in Nod, find and score jobs from scans, Telegram channels and alert emails, follow the companies and the people you invited, log LinkedIn invites from an Edge panel beside the page, mark a company no luck, and see what stays private. This page describes a fork of Nod.
+description: Keep your CVs and job profile in Nod, find and score jobs from scans, Telegram channels and alert emails, follow the companies and the people you invited, pair a browser helper, mark a company no luck, and see what stays private. This page describes a fork of Nod.
 sidebar:
   order: 10
 ---
@@ -9,7 +9,7 @@ sidebar:
 The job search is part of [mohamed0s/nod](https://github.com/mohamed0s/nod), a fork of Nod. Nod from n8n doesn't have it.
 :::
 
-The **Jobs** page holds the jobs Nod found for you, the companies behind them and the people you invited there, your CVs, your job profile, your referral message templates, the sources Nod looks in and the Edge panels you paired. Nod uses them to find, check and score jobs with [career-ops](https://github.com/career-ops-hq/career-ops), which runs in Nod's [workspace](/use/workspace/).
+The **Jobs** page holds the jobs Nod found for you, the companies behind them and the people you invited there, your CVs, your job profile, your referral message templates, the sources Nod looks in and the browser helpers you paired. Nod uses them to find, check and score jobs with [career-ops](https://github.com/career-ops-hq/career-ops), which runs in Nod's [workspace](/use/workspace/).
 
 ## Add a CV
 
@@ -110,7 +110,7 @@ Select a company to see its people and postings. Each person shows their status 
 
 ### Tell Nod who you invited
 
-You invite people on LinkedIn yourself. The [Edge panel](#the-edge-panel-beside-linkedin) logs them as you go. Without it, tell Nod in chat or Telegram, for example "I invited Sam Example at Example Co" with their profile link, or share a profile from the LinkedIn app to Nod on Telegram and add "Sent". Nod saves them as invited under that company. Say when someone accepts, when you ask them, and when they reply or refer you, and Nod updates them.
+You invite people on LinkedIn yourself. A [paired browser helper](#a-paired-browser-helper) can log them as you go. Without one, tell Nod in chat or Telegram, for example "I invited Sam Example at Example Co" with their profile link, or share a profile from the LinkedIn app to Nod on Telegram and add "Sent". Nod saves them as invited under that company. Say when someone accepts, when you ask them, and when they reply or refer you, and Nod updates them.
 
 ### No luck
 
@@ -128,59 +128,34 @@ Tick **No luck, apply here** on a company to give up on referrals there. Nod ope
 
 Applying on a company's own site comes in a later update. For now that chat lists the company's open postings with their scores and links, and Nod asks you before anything is submitted.
 
-## The Edge panel beside LinkedIn
+## A paired browser helper
 
-A panel in your own Microsoft Edge sits beside LinkedIn. When you send invites from a company's **People** tab, it logs each person under that company with no extra clicks. When someone accepts, it shows them with what you need to ask for a referral.
+A browser helper is a companion you install separately; it isn't part of Nod or of this fork. Once paired, it reaches Nod through a few routes of its own, only on this computer, and can:
 
-The panel is the extension in the `extensions/linkedin-helper` folder of your Nod checkout. It isn't in any extension store.
+- log people you invited, under their company;
+- add the LinkedIn member ID of someone you invited who has none yet, so **Message** can open a chat;
+- mark people you invited as accepted, from a list of their profile links;
+- show a company's people, and the invites you sent in the last day and the last 7 days against the invite limits on the **Profile** tab;
+- show who accepted and is waiting for your message, with the prepared message once Nod has written it;
+- download your main CV;
+- change a person's status, and tick **No luck, apply here**, which works like the box on the **Companies** tab.
 
-### Install and pair
+Its key opens nothing else in Nod.
 
-1. In Edge, open `edge://extensions`, turn on **Developer mode**, select **Load unpacked** and choose the `extensions\linkedin-helper` folder. You do this once.
-2. On the **Jobs** page, open **Helper** and select **Pair the Edge panel**. Nod shows a one-time code and copies it.
-3. From your checkout, run `powershell -ExecutionPolicy Bypass -File scripts\windows\pair-helper.ps1`. It takes the code from the clipboard, or asks for it, and saves the panel's key with Nod's address in `extensions\linkedin-helper\.pairing.json`.
+### Pair a helper
 
-Select the extension's button in Edge's toolbar to open the panel. It connects within 20 seconds.
+1. On the **Jobs** page, open **Helper** and select **Pair a helper**. Nod shows a one-time code and copies it.
+2. Run the helper's own pairing script, as its instructions say. It proves it has the code without sending it, and Nod sends the helper's key back encrypted under the code, so a program pretending to be Nod learns neither.
 
-The script finds the desktop app from the port file the app writes to its profile at each start, and stops if another program holds that port. It proves it has the code without sending it, and Nod sends the key back encrypted under the code, so a program pretending to be Nod learns neither. Before saving the key, it makes sure no other Windows account can change the extension folder, so nobody else can change the panel's code; when the folder allows that, the script says so and limits it to you, SYSTEM and Administrators. The key never appears on screen or in the terminal, and it never travels after pairing: the panel encrypts and signs each request with keys made from it. Git ignores `.pairing.json`, only your Windows user can open it, and Nod's own **Local files** never read it. A code works once, for 10 minutes, and five wrong codes cancel it. Pairing again replaces the panel's old key, and **Revoke** on the **Helper** tab cuts a panel off at once.
+A code works once, for 10 minutes, and five wrong codes cancel it. Pairing the same helper again replaces its old key. The **Helper** tab lists paired helpers with when each was last used, and **Revoke** cuts one off at once.
 
-The desktop app uses port `4310` when it's free, so the panel finds Nod after every restart. If Nod had to take another port, or another program answers at the panel's address, the panel says it can't confirm Nod; that program gets only encrypted requests it can't read. Run the script again. The panel talks to Nod only at `127.0.0.1`. For a source run whose server listens on `127.0.0.1` itself, pass its address: `pair-helper.ps1 -Nod http://127.0.0.1:4310`. A server in a container, or a self-hosted server with a public address or a server token, can't use the panel. After you update Nod, select **Reload** on the extension in `edge://extensions`.
+A helper works only with a Nod that listens only on this computer, and reaches it only at `127.0.0.1`: the desktop app, or a source run whose server listens on `127.0.0.1` itself. A server in a container, or a self-hosted server with a public address or a server token, can't use one. The desktop app uses port `4310` when it's free, so a helper finds Nod after every restart, and writes its port, process ID and program path to `engine-port.json` in its profile at each start, so a pairing script can check that it's talking to the app. If Nod had to take another port, pair the helper again.
 
-### What the panel shows
+### What Nod accepts from a helper
 
-- **Invites you sent** in the last day and the last 7 days, against the invite limits on the **Profile** tab.
-- On a company's LinkedIn page: its people with their status, and **No luck, apply here**, which works like the box on the **Companies** tab.
-- **Accepted, waiting for your message**: each person who accepted, with **Open profile**, **Message** once Nod knows their LinkedIn member ID, the prepared message with **Copy message** once Nod has written it, **CV**, and **I sent it**, which marks them asked.
+Nod treats everything a helper sends as data, never as your words. Names and headlines are saved as plain text, profile links must be `https://www.linkedin.com/in/…`, and anything too long or shaped differently is refused. Someone Nod already has keeps their status and company. A helper never replaces a member ID Nod already has or joins two people into one; Nod refuses it and keeps both as they are. A list of profile links marks only people you invited as accepted; nobody else is saved.
 
-**CV** downloads your main CV, so you can drag it from Edge's downloads into the LinkedIn chat. You paste the message and attach the CV yourself: the panel never sends anything. Arabic and other right-to-left messages are shown right to left, and the panel follows Edge's light or dark theme.
-
-When Nod isn't running, the panel keeps the invites it saw and sends them once Nod answers. It retries an invite Nod couldn't save for a few hours, and drops one only when Nod refuses it, for example when it names a person who is already someone else in your job search, telling you which. Each paired panel can start at most 5 apply chats and add at most 30 new companies in a day. Past that, an invite at a new company waits in the panel until the limit frees up; to save it sooner, or to start another apply chat, use the **Companies** tab or tell Nod in chat.
-
-### What it reads
-
-The panel only reads pages you open in your own Edge, while you look at them:
-
-| Page you open              | What it reads                                                                                                          | What Nod saves                                                                                    |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| A company's **People** tab | A card whose button turns to **Pending** after you invite: the name, headline and profile link, and the company's name | The person, as invited under that company. Someone Nod already has keeps their status and company |
-| A person's profile         | The profile link and the member ID in the page's own **Message** link to `linkedin.com/messaging/compose`              | The member ID, only for someone you invited who has none yet, so **Message** can open a chat      |
-| Your connections list      | The profile links on the page                                                                                          | People you invited who appear there become accepted. Nobody else is saved                         |
-
-The connections list is a backup check for accepts, on until you turn it off with the switch at the bottom of the panel. A later update spots accepts mainly from LinkedIn's "accepted your invitation" emails.
-
-Nod treats everything the panel reads as data from LinkedIn, never as your words. Names and headlines are saved as plain text, profile links must be `https://www.linkedin.com/in/…`, and anything too long or shaped differently is refused. What the panel reads never replaces a member ID Nod already has or joins two people into one; Nod refuses it and keeps both as they are.
-
-### What it never does
-
-- It never clicks, types, scrolls, opens pages or loads anything on LinkedIn by itself. It reads the page you have open.
-- Only the extension's background worker talks to Nod, and only on this computer. Its content policy blocks every other address, LinkedIn included, so the worker and the panel can't fetch anything from LinkedIn.
-- Nothing Nod runs contacts LinkedIn. **Open profile** and **Message** are links you select.
-
-### The risk you take
-
-LinkedIn's terms ban browser extensions that copy data from its site, even ones that only read what you see. The panel stays outside the page and doesn't change it, so detection is unlikely, but not impossible, and LinkedIn could restrict your account. Use the panel only if you accept that.
-
-The panel reads LinkedIn's current page layout, which LinkedIn changes from time to time. If an invite doesn't show up, tell Nod in chat, as before.
+Each paired helper can start at most 5 apply chats and add at most 30 new companies in a day. Past that, Nod answers with the time until the limit frees up. To save an invite at a new company sooner, or to start another apply chat, use the **Companies** tab or tell Nod in chat.
 
 ## Who can change job records
 
@@ -192,8 +167,8 @@ The panel reads LinkedIn's current page layout, which LinkedIn changes from time
 | Invite limits and no-luck days                     | Nod, only when your words ask for exactly that change; otherwise it asks you to approve it            |
 | Adding postings, their scores and their status     | Nod, in work you started or in a schedule. A schedule changes the status of new postings only         |
 | Telegram channels and scanner switches             | Nod, only in work that started from your message                                                      |
-| People you invited and their status                | Nod, only in work that started from your message. The Edge panel you paired, from pages you open      |
-| No luck, apply here                                | You, on the Jobs page or in the Edge panel                                                            |
+| People you invited and their status                | Nod, only in work that started from your message. A browser helper you paired                         |
+| No luck, apply here                                | You, on the Jobs page or through a browser helper you paired                                          |
 
 These records are your own private data, so most changes skip the [trust check](/trust/). Invite limits and no-luck days go through it like Nod's other settings, because they decide how much Nod does on its own later.
 
@@ -204,5 +179,5 @@ These records are your own private data, so most changes skip the [trust check](
 - career-ops runs only scripts that don't call a model. Nod's model keys never enter the workspace. Its scans run without the options that open posting pages in a browser.
 - Your postings, channels and switches are saved in Nod's database too. Nod's server reads Telegram channels and parses alert emails itself; the links in alerts are saved, never opened to import them.
 - People you invited are saved in Nod's database with their name, headline, company, status and profile link. Their profile and message links are only shown for you to open; nothing Nod runs opens or fetches them, or contacts LinkedIn.
-- The Edge panel sends what it reads only to Nod on your computer. Its key works only for the panel's own requests, never for the rest of Nod.
+- A paired browser helper's key works only for its own requests to Nod on this computer, never for the rest of Nod.
 - The job search doesn't need LinkedIn: jobs come from scans, Telegram channels, alert emails, links you share and company career pages. To make sure Nod never opens a website, add a rule in chat, such as "Never open linkedin.com, in the browser or with workspace scripts."
