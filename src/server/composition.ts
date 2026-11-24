@@ -1256,14 +1256,17 @@ async function initializeApplication(
     continueChat: async (text, sessionId) => {
       if (await chatWaiting(pool, ownerId, sessionId)) return 'waiting';
       const latest = (
-        await pool.query<{ id: string }>(
-          `SELECT m.id FROM messages m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
+        await pool.query<{ id: string; open: boolean }>(
+          `SELECT m.id,(u.status='waiting' OR EXISTS (SELECT 1 FROM approvals a
+             WHERE a.owner_id=m.owner_id AND a.confirmation_message_id=m.id AND a.status='pending')) AS open
+           FROM messages m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
            WHERE m.owner_id=$1 AND u.session_id=$2 AND m.role='assistant' AND m.hidden_at IS NULL
            ORDER BY m.created_at DESC,m.id DESC LIMIT 1`,
           [ownerId, sessionId],
         )
       ).rows[0];
       if (!latest) return 'empty';
+      if (latest.open) return 'waiting';
       await userMessages.submit(text, [], { channel: 'web', replyToMessageId: latest.id });
       return 'sent';
     },
