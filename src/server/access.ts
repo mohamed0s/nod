@@ -2,6 +2,7 @@ import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmod, link, lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { loopbackHost } from '../shared/loopback.ts';
 
 const token = /^[A-Za-z0-9_-]{43}$/;
 
@@ -54,6 +55,10 @@ export function registerLocalAccess(
         ? [origin.host]
         : ['localhost', '127.0.0.1', '[::1]'].map((name) => new URL(`http://${name}:${port}`).host),
   );
+  const helper =
+    desktop || (!access.bearer && (!origin || loopbackHost(origin.hostname)))
+      ? access.helper
+      : undefined;
   const expected = Buffer.from(access.key);
   const cookie = accessCookie(port);
   const matches = (value: unknown) => {
@@ -100,15 +105,7 @@ export function registerLocalAccess(
     const path = request.url.split('?')[0];
     if (!hosts.has(request.headers.host || ''))
       return reply.code(403).send({ error: 'This host is not permitted.' });
-    if (request.routeOptions.url?.startsWith('/api/helper/')) {
-      if (!/^chrome-extension:\/\/[a-p]{32}$/.test(request.headers.origin ?? ''))
-        return reply
-          .code(403)
-          .send({ error: 'Helper requests must come from a paired extension.' });
-      if (!(await access.helper?.(request)))
-        return reply.code(401).send({ error: 'Pair the helper again on the Jobs page.' });
-      return;
-    }
+    if (await helper?.(request)) return;
     if (
       !desktop &&
       request.method === 'POST' &&
@@ -151,9 +148,6 @@ export function registerLocalAccess(
     const open =
       appCallback ||
       connectionBridge ||
-      (access.helper !== undefined &&
-        request.method === 'POST' &&
-        path === '/api/helper-pairing') ||
       (!desktop &&
         ((request.method === 'POST' && path === '/api/access') ||
           (request.method === 'GET' && path === '/api/privacy')));
