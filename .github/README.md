@@ -92,6 +92,45 @@ corepack enable
 pnpm start
 ```
 
+## Free models to start with
+
+Nod runs on the model you choose ([Models](https://nod.n8n.io/docs/connect/models/)). Two services give you an API key for free models, enough to try Nod or to run light background work:
+
+| Service       | Get a key                                                                                                                                                                                                         | Connect it in Nod                                                                                                                 |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| NVIDIA        | Sign in at [build.nvidia.com](https://build.nvidia.com/), verify your phone number, then select **Get API Key**                                                                                                   | **Settings → Models → Add connection → NVIDIA**, then paste the key. Nod loads NVIDIA's list of hosted models                     |
+| AMD Token Lab | Join the free [AMD AI Developer Program](https://www.amd.com/aidevprogram), then get a key on [Token Lab](https://notebooks.amd.com/tokenlab), one of its [member perks](https://developer.amd.com/member-perks/) | **Settings → Models → Add connection → OpenAI-compatible**, with the server address `https://api.tokenlab.amd.com/v1` and the key |
+
+In mainland China, AMD's developer site has the same kind of key, with the server address `https://developer.amd.com.cn/radeon/api/v1`.
+
+Free keys come with limits. Each service caps how many requests you send a minute (NVIDIA's free tier allows about 40; your account page shows yours), and one big job can hit the cap: reading a full inbox sends one safety check per email. Use a paid connection for heavy schedules, and set up [backup models](https://nod.n8n.io/docs/connect/models/#backup-models). Free tiers can also have their own data-use terms, so read them before you send private material.
+
+## Use the job search
+
+Open **Jobs** in the sidebar and go through its tabs once:
+
+1. **CVs:** select **Add a CV** and choose a PDF or Word file. Nod converts it, drafts your job profile from it, and asks at most one short question. Add more if you like: the main CV goes with your referral requests, and **Mark as main** switches it. You can also send a CV to Nod in chat or on Telegram.
+2. **Profile:** check what Nod drafted: the name and one-line introduction it uses in messages, the roles and regions you want, the programmes and tracks you're applying to, which language to write in for each country, and your invite limits (15 a day and 80 a week to start). Select **Save profile**, or tell Nod the change in chat.
+3. **Templates:** write your referral message, one per language. Nod fills in the blanks for each person: `{greeting}`, `{first_name}`, `{company}`, `{programme}`, `{track}`, `{role}`, `{my_name}` and `{my_intro}`.
+4. **Sources:** turn on the scanners and add public Telegram channels that post jobs. For job-alert emails, connect Gmail on the **Apps** page.
+5. **Job radar:** when Nod has drafted your profile, it offers a morning check. Say yes, and every day at 07:30 it looks for new jobs, scores them against your CV and messages you the best ones. Each job shows once on **Postings**, best score first, to **Shortlist** or **Skip**.
+6. **Companies:** each company with its open jobs and the people you invited there, filtered by who is waiting to accept, accepted but not asked yet, asked with no reply, and no luck. You invite people on LinkedIn yourself. Tell Nod in chat or on Telegram, for example "I invited Sam Example at Example Co" with their profile link, or let a paired helper log it. Where referrals don't work out, tick **No luck, apply here**, and Nod opens one chat to apply to that company.
+7. **Helper (optional):** pair a browser helper you install separately. It logs your invites and shows who accepted, through signed routes on this computer only.
+
+**Open profile** and **Message** open LinkedIn in a new tab for you; Nod never opens them itself. Your CVs, profile and templates stay in Nod's storage on your computer, never in the code. The details are in [Job search](https://github.com/mohamed0s/nod/blob/mine/docs/src/content/docs/use/job-search.md).
+
+## Use Pages
+
+Ask Nod for a page in chat, for example "make a page that tracks my reading list and update it every morning". For the schedules you already have, try "for each of my schedules, make a page and keep it current". Nod builds the page and puts it on the **Pages** tab. When you ask for a change, or a schedule runs, it updates the same page instead of sending a new file. To keep an HTML file Nod sent in chat, open it and select **Keep in Pages**.
+
+On the **Pages** tab, select a page to see it:
+
+- **History** keeps its last 10 versions, and **Make it the current version** brings an earlier one back.
+- **Rename**, **Archive** and **Delete** do what they say. Nod can't update an archived page until you unarchive it.
+- **Open chat** or **Open schedules** goes to whatever publishes the page.
+
+Pages can't reach the internet. A click opens only the public `https://` links written in the page itself, in a new tab. The details are in [Pages](https://github.com/mohamed0s/nod/blob/mine/docs/src/content/docs/use/pages.md).
+
 ## Day to day on Windows
 
 | To                         | Source run                                                                  | Desktop app                                                                                         |
