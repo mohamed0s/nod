@@ -34,6 +34,7 @@ import {
 import AttachmentData, { PreviewUnavailable } from './attachment-data';
 import PdfPreview from './attachment-pdf';
 import { FileActions, fileDrag, prepareFile } from './file-actions';
+import { KeepInPages } from './keep-in-pages';
 import { apiResponse } from '../lib/api';
 import { Button } from './ui';
 import { Tooltip } from './tooltip';
@@ -589,6 +590,7 @@ function ArtifactDrawer({
                 {copied ? <Check size={16} /> : <Copy size={16} />}
               </Button>
             )}
+            {kind === 'html' && <KeepInPages key={current.id} item={current} />}
             {!current.presentation && <FileActions item={current} location="drawer" />}
             <Button
               variant="ghost"
