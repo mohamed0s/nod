@@ -2983,8 +2983,14 @@ test(
           const value = (name: string) =>
             call.parameters.find((entry) => entry.name === name)?.value;
           if (path === 'messages') {
-            searches.push(String(value('q')));
-            const newest = [...stored].reverse();
+            const query = String(value('q'));
+            searches.push(query);
+            const before = Number(/ before:(\d+)$/.exec(query)?.[1] ?? Number.POSITIVE_INFINITY);
+            const newest = [...stored]
+              .reverse()
+              .filter(
+                (entry) => !Number.isFinite(before) || Number(entry.internalDate) / 1000 < before,
+              );
             const start = Number(value('pageToken') ?? 0);
             const end = start + Number(value('maxResults'));
             return {
@@ -3054,7 +3060,9 @@ test(
       });
       const n = owner('synthetic-owner-n', false, {
         notify: notify('synthetic-owner-n'),
-        mailboxes: async () => [{ id: 'gmail-connection-three', address: 'other@example.test' }],
+        mailboxes: async () => [
+          { id: 'gmail-connection-three', address: 'synthetic.owner@gmail.com' },
+        ],
         mail: mailAccess,
         mailCheck,
       });
@@ -3077,7 +3085,14 @@ test(
         id: string,
         from: string,
         subject: string,
-        values: { html?: string; text?: string; auth?: string[]; labels?: string[] } = {},
+        values: {
+          html?: string;
+          text?: string;
+          auth?: string[];
+          labels?: string[];
+          to?: string;
+          cc?: string;
+        } = {},
       ) => ({
         id,
         internalDate: String((clock += 1000)),
@@ -3090,6 +3105,8 @@ test(
               value,
             })),
             { name: 'From', value: from },
+            { name: 'To', value: values.to ?? 'Sam Example <sam.jobs@example.test>' },
+            ...(values.cc ? [{ name: 'Cc', value: values.cc }] : []),
             { name: 'Subject', value: subject },
           ],
           parts: [
@@ -3357,25 +3374,51 @@ test(
           }),
           message('spoof-two', `${invitations}, Eve <eve@evil.test>`, subject, { html }),
           message('spoof-spam', invitations, subject, { html, labels: ['SPAM'] }),
+          message('spoof-replay', invitations, subject, {
+            html,
+            to: 'Someone Else <someone.else@example.test>',
+          }),
         );
         const result = await match(m);
         assert.equal(await statusOf(m, fay.id), 'invited');
         assert.deepEqual(
-          [result.counts.unverified, result.counts.ignored, result.accepted.length],
-          [3, 2, 0],
+          [
+            result.counts.unverified,
+            result.counts.ignored,
+            result.counts.misaddressed,
+            result.counts.unreadable,
+            result.accepted.length,
+          ],
+          [3, 2, 1, 1, 0],
         );
+        assert.match(result.reasons.join(' '), /couldn't read/);
+        assert.match(result.reasons.join(' '), /sent to the job mail account itself/);
         assert.deepEqual(
-          await claimed(m, ['spoof-name', 'spoof-check', 'spoof-relay', 'spoof-dkim', 'spoof-two']),
+          await claimed(m, [
+            'spoof-name',
+            'spoof-check',
+            'spoof-relay',
+            'spoof-dkim',
+            'spoof-two',
+            'spoof-replay',
+          ]),
           [
             { source_ref: 'spoof-check', kind: 'mail_unverified' },
             { source_ref: 'spoof-dkim', kind: 'mail_unverified' },
             { source_ref: 'spoof-name', kind: 'mail_ignored' },
             { source_ref: 'spoof-relay', kind: 'mail_unverified' },
+            { source_ref: 'spoof-replay', kind: 'mail_ignored' },
             { source_ref: 'spoof-two', kind: 'mail_ignored' },
           ],
         );
-        assert.equal(searches.length > 0, true);
-        deliver('gmail-connection-one', message('fay-real', invitations, subject, { html }));
+        deliver(
+          'gmail-connection-one',
+          message('fay-real', invitations, subject, {
+            html,
+            to: 'Someone Else <someone.else@example.test>',
+            cc: 'Sam <Sam.Jobs+linkedin@Example.test>',
+          }),
+        );
         assert.deepEqual(
           (await match(m)).accepted.map((entry: { personId: string }) => entry.personId),
           [fay.id],
@@ -3482,6 +3525,12 @@ test(
               'Kappa Mail Labs <talent@kappamail.test>',
               'Kappa Mail Labs: HELD update',
             ),
+            message(
+              'kappa-replay',
+              'Kappa Talent <talent@kappamail.test>',
+              'Unfortunately, about Data Analyst',
+              { to: 'someone.else@example.test' },
+            ),
           );
           const result = await match(m);
           assert.deepEqual(
@@ -3504,8 +3553,13 @@ test(
             /wasn't interview, rejection, other or unrelated/,
           );
           assert.deepEqual(
-            [result.counts.ignored, result.counts.unverified, result.counts.withheld],
-            [5, 1, 1],
+            [
+              result.counts.ignored,
+              result.counts.unverified,
+              result.counts.withheld,
+              result.counts.misaddressed,
+            ],
+            [5, 1, 1, 1],
           );
           assert.deepEqual(
             labelled.map((entry) => entry.input.email.subject),
@@ -3541,9 +3595,17 @@ test(
           assert.equal(await outcome('job_companies', tau.companyId), null);
           assert.equal(await outcome('job_companies', omega), null);
           assert.deepEqual(
-            await claimed(m, ['omega-1', 'omega-2', 'kappa-spoof', 'kappa-code', 'kappa-held']),
+            await claimed(m, [
+              'omega-1',
+              'omega-2',
+              'kappa-spoof',
+              'kappa-code',
+              'kappa-held',
+              'kappa-replay',
+            ]),
             [
               { source_ref: 'kappa-code', kind: 'mail_ignored' },
+              { source_ref: 'kappa-replay', kind: 'mail_ignored' },
               { source_ref: 'kappa-spoof', kind: 'mail_unverified' },
               { source_ref: 'omega-1', kind: 'mail_ignored' },
               { source_ref: 'omega-2', kind: 'mail_ignored' },
@@ -3588,6 +3650,40 @@ test(
           );
         },
       );
+
+      await t.test('the safety check and labels stay within each turn’s budget', async () => {
+        const many = Array.from({ length: 21 }, (_, index) =>
+          message(
+            `held-${index}`,
+            'Kappa Mail Labs <talent@kappamail.test>',
+            `Kappa Mail Labs: HELD note ${index}`,
+          ),
+        );
+        deliver('gmail-connection-one', ...many);
+        checked.length = 0;
+        labelled.length = 0;
+        const at = await mailOwner(m);
+        const first = await match(m, at);
+        const once = checked.filter((subject) => subject.includes('HELD note')).length;
+        assert.equal(once, 19);
+        assert.match(first.reasons.join(' '), /wait for the next run, which labels at most 20/);
+        await match(m, at);
+        assert.equal(checked.filter((subject) => subject.includes('HELD note')).length, once);
+        assert.deepEqual(labelled, []);
+        assert.deepEqual(
+          await claimed(
+            m,
+            many.map((entry) => String(entry.id)),
+          ),
+          [],
+        );
+        inboxes.set(
+          'account-gmail-connection-one',
+          (inboxes.get('account-gmail-connection-one') ?? []).filter(
+            (entry) => !String(entry.id).startsWith('held-'),
+          ),
+        );
+      });
 
       await t.test(
         'a LinkedIn message moves the matching person to replied, with one ping',
@@ -3950,6 +4046,7 @@ test(
           'gmail-connection-three',
           message('acc-slug', invitations, 'Synthetic ada-example accepted your invitation', {
             html: profileLink('ada-example'),
+            to: 'SyntheticOwner+jobs@googlemail.com',
           }),
         );
         const result = await match(n);
@@ -3958,6 +4055,35 @@ test(
           [0, 0, 1],
         );
         assert.deepEqual(await pings(n), []);
+        const backlog = Array.from({ length: 501 }, (_, index) =>
+          message(
+            `backlog-${index}`,
+            'LinkedIn <messages-noreply@linkedin.com>',
+            'You have 3 new messages',
+            { to: 'synthetic.owner@gmail.com' },
+          ),
+        );
+        deliver('gmail-connection-three', ...backlog);
+        const drained = await match(n);
+        assert.deepEqual([drained.counts.emails, drained.counts.ignored], [200, 200]);
+        assert.match(drained.reasons.join(' '), /next run reads the rest/);
+        await match(n);
+        assert.match(searches.at(-1)!, / before:\d+$/);
+        assert.deepEqual(await claimed(n, ['backlog-0']), [
+          { source_ref: 'backlog-0', kind: 'mail_ignored' },
+        ]);
+        await match(n);
+        const done = await match(n);
+        assert.equal(
+          (
+            await claimed(
+              n,
+              backlog.map((entry) => String(entry.id)),
+            )
+          ).length,
+          501,
+        );
+        assert.equal(done.counts.emails, 0);
         assert.equal(
           (
             await request(m, 'PUT', '/api/jobs/mail', {

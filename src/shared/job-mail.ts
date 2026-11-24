@@ -9,9 +9,11 @@ export const jobMailCounts = [
   'seenBefore',
   'toAsk',
   'unverified',
+  'misaddressed',
   'withheld',
   'noHeaders',
   'ignored',
+  'unreadable',
 ] as const;
 export type JobMailCount = (typeof jobMailCounts)[number];
 

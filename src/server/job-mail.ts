@@ -162,6 +162,7 @@ type Mail = {
   name: string;
   subject: string;
   date: string;
+  recipients: string[];
   authenticatedDomain: string | null;
   signedDomains: string[];
   text: string;
@@ -249,11 +250,20 @@ export function mailOf(message: JobMailMessage): Mail {
     name: plain(message.senderName),
     subject: clean(message.subject, 300),
     date: new Date(Math.min(message.receivedAt, Date.now())).toISOString(),
+    recipients: message.recipients,
     authenticatedDomain: message.authenticatedDomain,
     signedDomains: message.signedDomains,
     text: message.text,
     links: expanded(message.links),
   };
+}
+
+export function mailboxKey(value: string) {
+  const [local = '', domain = '', ...rest] = value.trim().toLowerCase().split('@');
+  const name = local.split('+')[0] ?? '';
+  if (!name || !domain || rest.length) return '';
+  const canonical = domain === 'googlemail.com' ? 'gmail.com' : domain;
+  return `${canonical === 'gmail.com' ? name.replaceAll('.', '') : name}@${canonical}`;
 }
 
 export function linkedInChecked(mail: Pick<Mail, 'address' | 'authenticatedDomain'>) {
@@ -637,6 +647,7 @@ export function createJobMail(options: {
 }) {
   const { pool, ownerId } = options;
   const labelled = new Map<string, number>();
+  const cleared = new Map<string, boolean>();
 
   async function settings(client: Query) {
     const row = (
@@ -645,7 +656,7 @@ export function createJobMail(options: {
         mail_schedule_id: string | null;
         mail_revision: number;
         mail_offered_at: Date | null;
-        mail_run: (JobMailRun & { retryFrom?: string | null }) | null;
+        mail_run: (JobMailRun & { retryFrom?: string | null; olderThan?: number | null }) | null;
       }>(
         'SELECT mail_account,mail_schedule_id,mail_revision,mail_offered_at,mail_run FROM job_profile WHERE owner_id=$1',
         [ownerId],
@@ -974,12 +985,30 @@ export function createJobMail(options: {
     if (!options.mail) throw failure('Nod can’t read Gmail for job mail on this server.', 503);
     const stop = AbortSignal.any([AbortSignal.timeout(readTimeout), ...(signal ? [signal] : [])]);
     const window = await search(pool);
-    let listed: { ids: string[]; more: boolean };
-    try {
-      listed = await options.mail.list(state.account, window.query, mostListed, stop);
-    } catch (error) {
-      if (signal?.aborted) throw error;
-      throw failure(`Nod couldn't search the job mail account: ${message(error)}`, 502);
+    const accountKey = mailboxKey(
+      (await mailboxes()).find((entry) => entry.id === state.account)?.address ?? '',
+    );
+    if (!accountKey)
+      throw failure(
+        "Nod can't see the address of the job mail account, so it can't check that emails were sent to the owner. Ask the owner to reconnect that Gmail account on the Apps page.",
+        409,
+      );
+    const addressed = (mail: Mail) =>
+      mail.recipients.some((entry) => mailboxKey(entry) === accountKey);
+    const olderThan = state.run?.olderThan ?? null;
+    const listed = { ids: [] as string[], more: false };
+    for (const query of [
+      window.query,
+      ...(olderThan ? [`${window.query} before:${olderThan}`] : []),
+    ]) {
+      try {
+        const found = await options.mail.list(state.account, query, mostListed, stop);
+        for (const id of found.ids) if (!listed.ids.includes(id)) listed.ids.push(id);
+        listed.more ||= found.more;
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        throw failure(`Nod couldn't search the job mail account: ${message(error)}`, 502);
+      }
     }
     const known = new Set(
       (
@@ -1022,42 +1051,49 @@ export function createJobMail(options: {
     }
     const linkedInSenders = [...jobMailSenders.accept, ...jobMailSenders.message];
     const companies = await eligible(pool);
-    const candidates = mails.flatMap((mail) => {
-      if (linkedInSenders.includes(mail.address) || !senderChecked(mail)) return [];
+    const pending = mails.flatMap((mail) => {
+      if (linkedInSenders.includes(mail.address) || !senderChecked(mail) || !addressed(mail))
+        return [];
       const target = employerOf(mail, companies);
       return target && target !== 'ambiguous' ? [{ mail, target }] : [];
     });
-    const checks = new Map<string, boolean | string>();
+    const used = labelled.get(turn.turnId) ?? 0;
+    const candidates = pending.slice(0, Math.max(0, mostLabels - used));
+    const deferred = pending.length - candidates.length;
     if (candidates.length) {
+      labelled.set(turn.turnId, used + candidates.length);
+      if (labelled.size > 200) labelled.delete(labelled.keys().next().value!);
+    }
+    const checks = new Map<string, boolean | string>();
+    for (const { mail } of candidates)
+      if (cleared.has(mail.id)) checks.set(mail.id, cleared.get(mail.id)!);
+    const unchecked = candidates.filter(({ mail }) => !checks.has(mail.id));
+    if (unchecked.length) {
       const results = options.mailCheck
         ? await options
             .mailCheck(
-              candidates.map(({ mail }) => ({
+              unchecked.map(({ mail }) => ({
                 from: mail.address,
                 subject: mail.subject,
                 text: mail.text.slice(0, 8000),
               })),
               stop,
             )
-            .catch((error: unknown) => candidates.map(() => message(error)))
-        : candidates.map(() => 'no mail safety check is available');
-      candidates.forEach(({ mail }, index) =>
-        checks.set(mail.id, results[index] ?? 'the check gave no answer'),
-      );
+            .catch((error: unknown) => unchecked.map(() => message(error)))
+        : unchecked.map(() => 'no mail safety check is available');
+      unchecked.forEach(({ mail }, index) => {
+        const result = results[index] ?? 'the check gave no answer';
+        checks.set(mail.id, result);
+        if (typeof result === 'boolean') {
+          cleared.set(mail.id, result);
+          if (cleared.size > 500) cleared.delete(cleared.keys().next().value!);
+        }
+      });
     }
     const labels = new Map<string, Label>();
-    let deferred = 0;
-    for (const { mail, target } of candidates) {
-      if (checks.get(mail.id) !== false) continue;
-      const used = labelled.get(turn.turnId) ?? 0;
-      if (used >= mostLabels) {
-        deferred++;
-        continue;
-      }
-      labelled.set(turn.turnId, used + 1);
-      if (labelled.size > 200) labelled.delete(labelled.keys().next().value!);
-      labels.set(mail.id, await label(mail, target.company.name, stop));
-    }
+    for (const { mail, target } of candidates)
+      if (checks.get(mail.id) === false)
+        labels.set(mail.id, await label(mail, target.company.name, stop));
     if (deferred) {
       reasons.push(
         `${deferred} more employer ${deferred === 1 ? 'email waits' : 'emails wait'} for the next run, which labels at most ${mostLabels} at a time.`,
@@ -1085,12 +1121,18 @@ export function createJobMail(options: {
       client: Query,
       mail: Mail,
       current: Eligible[],
-    ): Promise<'done' | 'seen' | 'unverified' | 'ignored' | 'already' | 'withheld' | 'later'> => {
+    ): Promise<
+      'done' | 'seen' | 'unverified' | 'misaddressed' | 'ignored' | 'already' | 'withheld' | 'later'
+    > => {
       const exists = await client.query(
         "SELECT 1 FROM job_events WHERE owner_id=$1 AND source='gmail' AND source_ref=$2",
         [ownerId, mail.id],
       );
       if (exists.rowCount) return 'seen';
+      if (!addressed(mail)) {
+        await claim(client, mail, 'mail_ignored', 'not addressed to the job mail account');
+        return 'misaddressed';
+      }
       const accept = jobMailSenders.accept.includes(mail.address);
       if (accept || jobMailSenders.message.includes(mail.address)) {
         if (!linkedInChecked(mail)) {
@@ -1191,6 +1233,7 @@ export function createJobMail(options: {
         return 'unverified';
       }
       const check = checks.get(mail.id);
+      if (check === undefined) return 'later';
       if (check === true) {
         await claim(client, mail, 'mail_ignored', 'sign-in mail');
         return 'ignored';
@@ -1258,6 +1301,7 @@ export function createJobMail(options: {
             await client.query('RELEASE SAVEPOINT job_mail_one');
             if (outcome === 'seen') counts.seenBefore++;
             else if (outcome === 'unverified') counts.unverified++;
+            else if (outcome === 'misaddressed') counts.misaddressed++;
             else if (outcome === 'ignored') counts.ignored++;
             else if (outcome === 'already') counts.already++;
             else if (outcome === 'withheld') {
@@ -1277,6 +1321,15 @@ export function createJobMail(options: {
         counts.personReplies = personReplies.length;
         counts.employerReplies = employerReplies.length;
         counts.toAsk = toAsk.length;
+        counts.unreadable = unreadable.length;
+        if (unreadable.length)
+          reasons.push(
+            `Gmail returned ${unreadable.length} ${unreadable.length === 1 ? 'email' : 'emails'} that Nod couldn't read, such as one too large or in spam, sent mail or drafts, so Nod skipped ${unreadable.length === 1 ? 'it' : 'them'}.`,
+          );
+        if (counts.misaddressed)
+          reasons.push(
+            `${counts.misaddressed} ${counts.misaddressed === 1 ? "email wasn't" : "emails weren't"} sent to the job mail account itself, so Nod didn't apply ${counts.misaddressed === 1 ? 'it' : 'them'}.`,
+          );
         if (counts.withheld)
           reasons.push(
             `Nod's safety check couldn't clear ${counts.withheld} employer ${counts.withheld === 1 ? 'email' : 'emails'}, so ${counts.withheld === 1 ? 'it waits' : 'they wait'} for the next run.`,
@@ -1293,11 +1346,16 @@ export function createJobMail(options: {
           reasons.push(
             `${toAsk.length} ${toAsk.length === 1 ? 'email matched' : 'emails matched'} nobody, or more than one person, in the job search.`,
           );
-        const run: JobMailRun & { retryFrom: string | null } = {
+        const earliest = Math.min(
+          olderThan ?? Number.POSITIVE_INFINITY,
+          ...mails.map((mail) => Math.floor(Date.parse(mail.date) / 1000)),
+        );
+        const run: JobMailRun & { retryFrom: string | null; olderThan: number | null } = {
           at: new Date().toISOString(),
           counts,
           reasons: reasons.slice(0, 10),
           retryFrom,
+          olderThan: listed.more && Number.isFinite(earliest) ? earliest : null,
         };
         await client.query(
           `INSERT INTO job_profile(owner_id,mail_run) VALUES($1,$2)

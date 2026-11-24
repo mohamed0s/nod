@@ -20,9 +20,11 @@ const countLabels: Array<[JobMailCount, string, string]> = [
   ['seenBefore', 'read before', 'read before'],
   ['toAsk', 'not matched', 'not matched'],
   ['unverified', 'failed the sender check', 'failed the sender check'],
+  ['misaddressed', 'sent to another address', 'sent to another address'],
   ['withheld', 'withheld', 'withheld'],
   ['noHeaders', 'without headers', 'without headers'],
   ['ignored', 'not job mail', 'not job mail'],
+  ['unreadable', 'unreadable', 'unreadable'],
 ];
 
 export function JobMail() {
