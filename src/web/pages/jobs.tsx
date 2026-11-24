@@ -20,10 +20,11 @@ import { api, errorMessage, post } from '../lib/api';
 import { subscribeAppEvents } from '../lib/app-events';
 import { pageDataCache } from '../lib/page-data-cache';
 import { formatDateTime, useDateFormat } from '../lib/date-format';
+import { Companies, refreshCompanies } from './jobs-companies';
 import { Postings, refreshPostings, Sources } from './jobs-postings';
 import './jobs.css';
 
-type View = 'postings' | 'cvs' | 'profile' | 'templates' | 'sources';
+type View = 'postings' | 'companies' | 'cvs' | 'profile' | 'templates' | 'sources';
 type Message = { kind: 'info' | 'success' | 'error'; text: string } | null;
 
 const checklist: Record<JobSetup['items'][number]['key'], string> = {
@@ -39,6 +40,7 @@ const jobPaths = ['/api/jobs/setup', '/api/jobs/cvs', '/api/jobs/profile', '/api
 const refreshAll = () => {
   for (const path of jobPaths) void pageDataCache.refresh(path, true);
   refreshPostings();
+  refreshCompanies();
 };
 
 const lines = (value: string) =>
@@ -925,6 +927,7 @@ export function Jobs() {
         value={view}
         items={[
           { value: 'postings', label: 'Postings' },
+          { value: 'companies', label: 'Companies' },
           { value: 'cvs', label: 'CVs', count: cvs.data?.length },
           { value: 'profile', label: 'Profile' },
           { value: 'templates', label: 'Templates' },
@@ -937,6 +940,7 @@ export function Jobs() {
         {view === 'profile' && <Profile />}
         {view === 'templates' && <Templates />}
         {view === 'postings' && <Postings />}
+        {view === 'companies' && <Companies />}
         {view === 'sources' && <Sources />}
       </div>
     </div>

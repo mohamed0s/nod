@@ -1250,6 +1250,7 @@ async function initializeApplication(
     telegram: createTelegramChannels(),
     changed: () => jobsChanged(ownerId),
   });
+  await jobs.initialize();
   const pages = createPages({
     pool,
     ownerId,
