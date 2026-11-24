@@ -408,6 +408,22 @@ test('a careers site is its tenant on shared hosts, and typing or choosing there
       'https://acme.wd5.myworkdayjobs.com',
     ],
     ['https://careers.example.test/', 'https://careers.example.test'],
+    [
+      'https://wd5.myworkdaysite.com/recruiting/Acme/External/job/1',
+      'https://wd5.myworkdaysite.com/recruiting/acme',
+    ],
+    ['https://app.dover.com/apply/Acme/123', 'https://app.dover.com/apply/acme'],
+    ['https://www.comeet.com/jobs/acme/12.345', 'https://www.comeet.com/jobs/acme'],
+    [
+      'https://careers.jobscore.com/careers/acme/jobs/x',
+      'https://careers.jobscore.com/careers/acme',
+    ],
+    ['https://careers.example.test/careers', 'https://careers.example.test/careers'],
+    [
+      'https://career2.successfactors.eu/career?company=AcmeP&career_job_req_id=1',
+      'https://career2.successfactors.eu/acmep',
+    ],
+    ['https://career2.successfactors.eu/career', null],
     ['ftp://careers.example.test/', null],
   ] as const)
     assert.equal(applySite(url), site, url);

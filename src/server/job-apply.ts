@@ -69,6 +69,7 @@ const greenhouseHosts = new Set([
   'job-boards.eu.greenhouse.io',
 ]);
 const notTenants = new Set(['embed', 'j']);
+const genericWords = new Set(['recruiting', 'apply', 'jobs', 'careers', 'career', 'public']);
 const plainControls = new Set(['button', 'link', 'tab']);
 const entryActions = new Set([
   'fill',
@@ -86,7 +87,7 @@ const siteInput = z
     site: z
       .string()
       .max(300)
-      .regex(/^https?:\/\/[^/\s`]+(?:\/[^/\s`]+)?$/),
+      .regex(/^https?:\/\/[^/\s`]+(?:\/[^/\s`]+){0,2}$/),
   })
   .strict();
 
@@ -100,12 +101,18 @@ export function applySite(url: string) {
   if (page.protocol !== 'https:' && page.protocol !== 'http:') return null;
   const host = page.hostname.toLowerCase();
   if (tenantHosts.some((suffix) => host.endsWith(suffix))) return page.origin;
-  const first = page.pathname.split('/').find(Boolean)?.toLowerCase();
-  if (greenhouseHosts.has(host) && first === 'embed') {
-    const tenant = page.searchParams.get('for')?.toLowerCase();
+  const [first, second] = page.pathname
+    .split('/')
+    .filter(Boolean)
+    .map((part) => part.toLowerCase());
+  const named = (key: string) => {
+    const tenant = page.searchParams.get(key)?.toLowerCase();
     return tenant && /^[a-z0-9_-]{1,100}$/.test(tenant) ? `${page.origin}/${tenant}` : null;
-  }
+  };
+  if (greenhouseHosts.has(host) && first === 'embed') return named('for');
+  if (/(?:^|\.)successfactors\.(?:com|eu)$/.test(host)) return named('company');
   if (first && notTenants.has(first)) return null;
+  if (first && second && genericWords.has(first)) return `${page.origin}/${first}/${second}`;
   return first ? `${page.origin}/${first}` : page.origin;
 }
 
