@@ -101,8 +101,6 @@ Nod runs on the model you choose ([Models](https://nod.n8n.io/docs/connect/model
 | NVIDIA        | Sign in at [build.nvidia.com](https://build.nvidia.com/), verify your phone number, then select **Get API Key**                                                                                                   | **Settings → Models → Add connection → NVIDIA**, then paste the key. Nod loads NVIDIA's list of hosted models                     |
 | AMD Token Lab | Join the free [AMD AI Developer Program](https://www.amd.com/aidevprogram), then get a key on [Token Lab](https://notebooks.amd.com/tokenlab), one of its [member perks](https://developer.amd.com/member-perks/) | **Settings → Models → Add connection → OpenAI-compatible**, with the server address `https://api.tokenlab.amd.com/v1` and the key |
 
-In mainland China, AMD's developer site has the same kind of key, with the server address `https://developer.amd.com.cn/radeon/api/v1`.
-
 Free keys come with limits. Each service caps how many requests you send a minute (NVIDIA's free tier allows about 40; your account page shows yours), and one big job can hit the cap: reading a full inbox sends one safety check per email. Use a paid connection for heavy schedules, and set up [backup models](https://nod.n8n.io/docs/connect/models/#backup-models). Free tiers can also have their own data-use terms, so read them before you send private material.
 
 ## Use the job search
