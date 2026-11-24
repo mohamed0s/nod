@@ -201,7 +201,7 @@ let setupWindowLoaded;
 let engineWindow;
 let engineFocusRequested = false;
 let resumeWindow;
-let resumePort;
+let resumePort = 4310;
 let pendingFeedback = false;
 let startupFeedbackOpen = false;
 let engine;
