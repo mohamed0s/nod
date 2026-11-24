@@ -1193,6 +1193,56 @@ test('mail access requests preserve the full input and hide oversized records', 
   assert.equal(requests.length, 11);
 });
 
+test('a rate-limited mail check starts no further checks and keeps every unchecked email private', async () => {
+  const started: string[] = [];
+  const check = createMailCheck({
+    curator: {
+      id: 'fixture',
+      configured: true,
+      curate: ({ input }, signal) => {
+        const { email } = input as { email: { subject: string } };
+        started.push(email.subject);
+        if (email.subject === 'Later') return Promise.resolve({ access: false });
+        if (email.subject === 'Notice 1')
+          return Promise.reject(
+            Object.assign(new Error('Synthetic rate limit 482913.'), { providerStatus: 429 }),
+          );
+        return new Promise((resolve, reject) => {
+          const answer = setTimeout(() => resolve({ access: false }), 1_000);
+          signal?.addEventListener(
+            'abort',
+            () => {
+              clearTimeout(answer);
+              reject(signal.reason);
+            },
+            { once: true },
+          );
+        });
+      },
+    },
+  });
+  const emails = Array.from({ length: 10 }, (_, index) => ({
+    from: 'fixture@example.test',
+    subject: `Notice ${index}`,
+    text: 'Synthetic notice.',
+  }));
+  assert.deepEqual(
+    await check(emails),
+    emails.map((_, index) =>
+      index === 1
+        ? 'the check model request failed (HTTP 429)'
+        : 'the check model hit its rate limit (HTTP 429)',
+    ),
+  );
+  assert.equal(started.length, 6);
+  const later = Array.from({ length: 8 }, () => ({
+    from: 'fixture@example.test',
+    subject: 'Later',
+    text: 'Synthetic notice.',
+  }));
+  assert.deepEqual(await check(later), Array<boolean>(8).fill(false));
+});
+
 test('a failed or invalid decision hides its record without a second model', async (t) => {
   for (const result of [undefined, null, {}, { access: 'false' }])
     await t.test(JSON.stringify(result) ?? 'unavailable', async () => {
