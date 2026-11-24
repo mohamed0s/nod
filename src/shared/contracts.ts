@@ -274,6 +274,7 @@ export interface AppState {
   chatRecovery?: { turnId: string };
   chatClearedAt?: string;
   tasks?: Task[];
+  agents?: import('./agents').Agent[];
   threadId: string;
   hasEarlierMessages?: boolean;
   hiddenMessageCount?: number;

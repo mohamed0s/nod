@@ -161,6 +161,7 @@ import { memoryFileName, memoryMarkdown } from '../shared/memory-export.ts';
 import { createChannels } from './channels.ts';
 import { createChatTitles } from './chat-titles.ts';
 import { chatModelArgs } from './chat-model.ts';
+import { createAgents } from './agents.ts';
 import { createChannelSettings, managedChannelEnvironment } from './channel-settings.ts';
 import { createChannelMedia } from './channel-media.ts';
 import { createChannelSessionStore } from './channel-session.ts';
@@ -1215,6 +1216,8 @@ async function initializeApplication(
     renamed: renameTopic,
   });
   await tasks.initialize();
+  const agents = createAgents({ pool, ownerId, refresh, renamed: renameTopic });
+  await agents.initialize();
   const chatTitles = createChatTitles({
     pool,
     ownerId,
@@ -1674,9 +1677,11 @@ async function initializeApplication(
         action === 'NOD_model_select' ||
         action.startsWith('NOD_memory_') ||
         action === 'NOD_notification_preferences_update';
-      if (action === 'NOD_jobs_limits_update') {
-        const result = await withTurnLock(turnLock, (client) =>
-          jobs.applyLimits(args, client, provenance.details?.current),
+      if (action === 'NOD_agent_update' || action === 'NOD_jobs_limits_update') {
+        const result = await withTurnLock<object>(turnLock, (client) =>
+          action === 'NOD_agent_update'
+            ? agents.apply(args, client)
+            : jobs.applyLimits(args, client, provenance.details?.current),
         );
         await ledger.action(
           provenance.turnId,
@@ -2038,6 +2043,7 @@ async function initializeApplication(
         return;
       if (action === 'NOD_limits_update') limitsInput.parse(args);
       else if (action === 'NOD_jobs_limits_update') jobLimitsInput.parse(args);
+      else if (action === 'NOD_agent_update') await agents.validate(args, client);
       else if (action.startsWith('NOD_')) {
         if (
           ['NOD_schedule_update', 'NOD_schedule_pause', 'NOD_schedule_cancel'].includes(action) &&
@@ -2490,7 +2496,10 @@ async function initializeApplication(
   const submittedMessages = createUserMessageService({
     confirmAction: approvals.chat,
     taskReply: tasks.resolveReply,
-    startChat: tasks.startChat,
+    startChat: async (client, chat) => {
+      await tasks.startChat(client, chat);
+      if (chat.agentId) await agents.attach(client, chat.agentId, chat.sessionId);
+    },
     accepted: ownerMessageAccepted,
   });
   const userMessages = {
@@ -2629,6 +2638,7 @@ async function initializeApplication(
       recall: personal.recall,
       learnedSkills: learnedSkills.index,
       taskContext: tasks.context,
+      agentContext: agents.context,
       settleTask: tasks.settle,
       taskLedger: tasks.read,
       task: async (turn, raw, sourceMessageId, priorMessageId, priorHandoff) => {
@@ -2820,6 +2830,23 @@ async function initializeApplication(
       audioReplies: async () => (await speechPreferences.get()).speechReply,
       manage: async (turn, action, args, { admit, signal, ...provenance }) => {
         if (action === 'pages') return pages.execute({ ...turn, signal }, args);
+        if (action === 'agent_update') {
+          const { input, current } = await agents.review(turn.turnId, args);
+          const verdict = await trust.check(
+            turn,
+            'NOD_agent_update',
+            { ...input, currentAgent: current },
+            signal,
+          );
+          return approvals.request(turn, 'NOD_agent_update', input, {
+            ...provenance,
+            signal,
+            allowed: !verdict.confirm,
+            ...(verdict.confirm ? {} : { basis: verdict.basis }),
+            admit,
+            details: { current, ...(verdict.confirm ? { reason: verdict.reason } : {}) },
+          });
+        }
         if (action === 'jobs')
           return jobs.execute(turn, args, {
             signal,
@@ -3437,6 +3464,7 @@ async function initializeApplication(
     attributeAudioUsage: ledger.attributeMediaUsage,
     verification: chatVerification,
     taskLedger: tasks.read,
+    agents: agents.list,
     activity: activity.current,
     planningTasks: onboardingSuggestions.planning,
     computer,
@@ -3534,6 +3562,7 @@ async function initializeApplication(
   onboardingSuggestions.registerRoutes(app);
   onboardingProfile.registerRoutes(app);
   tasks.registerRoutes(app);
+  agents.registerRoutes(app);
   jobs.registerRoutes(app);
   pages.registerRoutes(app);
   triage.registerRoutes(app);

@@ -40,6 +40,7 @@ export const messageInput = z
     verificationRequestId: z.uuid().optional(),
     newChat: z.literal(true).optional(),
     chatModel: modelSelectionInput.optional(),
+    chatAgent: z.uuid().optional(),
   })
   .strict();
 

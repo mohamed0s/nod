@@ -143,6 +143,7 @@ interface SubmitUserMessageOptions {
   threadId?: string;
   sessionId?: string;
   chatModel?: ModelSelection;
+  chatAgent?: string;
   sourceId?: string;
   channel?: string;
   client?: PoolClient;
@@ -254,6 +255,7 @@ export interface ThreadDependencies {
     priorHandoff?: boolean,
   ) => Promise<unknown>;
   taskContext?: (turn: TurnRef) => Promise<RuntimeContext['taskContext']>;
+  agentContext?: (sessionId: string) => Promise<RuntimeContext['agent']>;
   settleTask?: (turn: TurnRef, result: string) => Promise<void>;
   taskLedger?: (threadId: string) => Promise<NonNullable<RuntimeContext['tasks']>>;
   startTurn?: (turn: TurnRef) => Promise<void>;
@@ -789,6 +791,7 @@ type StartChat = (
     text: string;
     live: boolean;
     model?: ModelSelection;
+    agentId?: string;
   },
 ) => Promise<void>;
 
@@ -816,6 +819,8 @@ export async function submitUserMessage(
     throw httpError('A new chat starts without a reply. Send it as a new message.', 400);
   if (options.chatModel && !newChat)
     throw httpError('Only a new chat can start with its own model.', 400);
+  if (options.chatAgent && !newChat)
+    throw httpError('Only a new chat can start for an agent.', 400);
   const confirmation = {
     text,
     displayText: options.displayText,
@@ -1033,6 +1038,7 @@ export async function submitUserMessage(
         text: options.prompt ?? text,
         live: queued,
         ...(options.chatModel ? { model: options.chatModel } : {}),
+        ...(options.chatAgent ? { agentId: options.chatAgent } : {}),
       });
     if (queued) await sendDrain(client, thread.id);
     markInserted();
@@ -2343,6 +2349,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     await dependencies.startTurn?.(ref);
     const taskContext = await dependencies.taskContext?.(ref);
     if (taskContext?.messageId) ref.taskMessageId = taskContext.messageId;
+    const agent = await dependencies.agentContext?.(turn.session_id);
     const tasks = await dependencies.taskLedger?.(threadId);
     const workspacePath = join(dataRoot, 'workspaces', threadId);
     await mkdir(workspacePath, { recursive: true });
@@ -2546,6 +2553,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       speech,
       ...(proactivity ? { proactivity } : {}),
       taskContext,
+      ...(agent ? { agent } : {}),
       tasks,
       ...(checkIn ? { checkIn } : {}),
       ...(limit ? { spendingLimitReached: { monthlyUsd: limit.monthlyUsd } } : {}),
