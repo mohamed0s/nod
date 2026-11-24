@@ -39,7 +39,12 @@ import type { ModelTrace } from '../src/ports/traces.ts';
 import type { ProviderUsageEvent } from '../src/ports/provider-usage.ts';
 import { setRequestAccount } from '../src/web/lib/api.ts';
 import { createOtlpTelemetry } from '../src/providers/otlp/telemetry.ts';
-import { trustBasis, trustDecision, trustSources } from '../src/server/trust-basis.ts';
+import {
+  trustBasis,
+  trustBasisProblem,
+  trustDecision,
+  trustSources,
+} from '../src/server/trust-basis.ts';
 import { createTrust } from '../src/server/trust.ts';
 import { createTrustReview } from '../src/server/trust-review.ts';
 import { trustFacts } from '../src/server/trust-facts.ts';
@@ -1426,6 +1431,24 @@ test('trust decisions select only owner evidence and keep reply evidence separat
     ],
   ] as const)
     assert.deepEqual(trustSources(words), sources);
+  const listing = { ...mixed, ...act('GMAIL_LIST_THREADS') };
+  for (const [answer, problem] of [
+    [{ run: true }, 'no_source'],
+    [{ run: true, because: 'Read my inbox.' }, 'no_source'],
+    [{ run: true, source: 'schedule:2', terms: [] }, 'unlisted_source'],
+    [{ run: true, source: 'schedule:4', terms: [] }, 'unlisted_source'],
+    [{ run: true, source: 'scheduledInstructions[1]', terms: [] }, 'unlisted_source'],
+    [{ run: true, source: 'schedule:1' }, 'bad_terms'],
+    [
+      { run: true, source: 'schedule:1', terms: [{ user: 'today', action: '', same: true }] },
+      'bad_terms',
+    ],
+    [
+      { run: true, source: 'read', terms: [{ user: 'today', action: 'week', same: false }] },
+      'bad_terms',
+    ],
+  ] as const)
+    assert.equal(trustBasisProblem(answer, listing), problem, JSON.stringify(answer));
   assert.equal(
     trustDecision(scheduled).question.choices.some(({ value }) =>
       String(value).startsWith('message:'),

@@ -127,6 +127,12 @@ export function trustSources(words: BasisWords) {
   ].filter((source) => trustBasis({ run: true, source, terms: [] }, words));
 }
 
+export function trustBasisProblem(answer: unknown, words: BasisWords) {
+  const cited = answer && typeof answer === 'object' ? citedSource(answer) : undefined;
+  if (!cited) return 'no_source';
+  return trustSources(words).includes(cited) ? 'bad_terms' : 'unlisted_source';
+}
+
 export function trustBasis(answer: unknown, words: BasisWords): TrustBasis | undefined {
   if (!answer || typeof answer !== 'object') return undefined;
   const { run, terms } = answer as { run?: unknown; terms?: unknown };

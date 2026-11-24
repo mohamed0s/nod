@@ -2463,6 +2463,199 @@ test(
       });
 
       await t.test(
+        'an unusable trust check answer is asked again once, and only a valid second answer runs',
+        async () => {
+          const { withFailureLog } = await import('../src/server/failure-log.ts');
+          const logged: Array<{ event: string; error: unknown }> = [];
+          const sink = (event: string, error: unknown) => {
+            logged.push({ event, error });
+          };
+          const reasked = () =>
+            logged.filter(({ event }) => event === 'trust_check_reask').map(({ error }) => error);
+          const sequence = (...answers: Array<(input: Record<string, any>) => unknown>) => {
+            let index = 0;
+            aligned = (input) => {
+              const next = answers[index++];
+              if (!next) assert.fail('The trust check asked more than twice.');
+              const answer = next(input);
+              if (answer instanceof Error) throw answer;
+              return answer as boolean | Record<string, unknown>;
+            };
+          };
+          const failure = () => new Error('Synthetic checker failure.');
+          const declined = () => false;
+          const unsourced = () => ({ run: true });
+          const untermed = (input: Record<string, any>) => ({ run: true, source: cite(input) });
+          const sourced = (input: Record<string, any>) => ({
+            run: true,
+            source: cite(input),
+            terms: [],
+          });
+          const unlisted = () => ({ run: true, source: 'message:99', terms: [] });
+          const background = () => ({ run: true, source: 'schedule:0', terms: [] });
+          const cronEdit = () => ({ run: true, source: 'schedule:2', terms: [] });
+          const read = () => ({ run: true, source: 'read' });
+          const check = async (
+            turn: Awaited<ReturnType<typeof begin>>,
+            action: string,
+            args: Record<string, unknown>,
+          ) => {
+            logged.length = 0;
+            const before = reviews.length;
+            const verdict = await withFailureLog(sink, () => trust.check(turn, action, args)).catch(
+              (error: unknown) => error,
+            );
+            return { verdict, asked: reviews.slice(before) };
+          };
+          const scheduled = async () => {
+            const turn = await begin('Synthetic scheduled work', { source: 'schedule' });
+            const at = new Date().toISOString();
+            await db.pool.query(
+              "INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority) VALUES($1,$2,$3,0,$4,'Synthetic schedule',$5,now(),'UTC',$6)",
+              [
+                randomUUID(),
+                ownerId,
+                randomUUID(),
+                randomUUID(),
+                turn.turnId,
+                {
+                  messages: [
+                    { id: null, at, text: 'Synthetic earlier context.', canAuthorize: false },
+                    { id: null, at, text: 'Every evening, rank my synthetic inbox.' },
+                    { id: null, at, text: '', fields: { cron: '0 20 * * *' } },
+                  ],
+                },
+              ],
+            );
+            return turn;
+          };
+          const list = { query: 'newer_than:1d', max_results: 50 };
+
+          const chat = await begin('Email Ana the synthetic invoice.');
+          sequence(untermed, sourced);
+          const ran = calls.length;
+          logged.length = 0;
+          const before = reviews.length;
+          await withFailureLog(sink, () =>
+            approvals.request(chat, 'GMAIL_SEND_EMAIL', email('ana@example.test')),
+          );
+          assert.equal(calls.length, ran + 1);
+          assert.equal(reviews.length, before + 2);
+          const [first, second] = reviews.slice(before);
+          const { correction, ...repeated } = second!;
+          assert.equal(first!.correction, undefined);
+          assert.equal(typeof correction, 'string');
+          assert.deepEqual(repeated, first);
+          assert.deepEqual(first!.validSources, [
+            'read',
+            ...first!.userMessages.flatMap((message: { canAuthorize?: boolean }, index: number) =>
+              message.canAuthorize === false ? [] : [`message:${index}`],
+            ),
+          ]);
+          assert.deepEqual(reasked(), [
+            { name: 'TrustCheckReask', code: 'accepted', reason: 'bad_terms' },
+          ]);
+          await finish(chat.turnId, 'cancelled');
+
+          for (const [answers, code, reason] of [
+            [[unlisted, unlisted], 'basis_rejected', 'unlisted_source'],
+            [[unsourced, declined], 'declined', 'no_source'],
+            [[untermed, failure], 'failed', 'bad_terms'],
+          ] as const) {
+            const turn = await begin('Email Ana the synthetic invoice.');
+            sequence(...answers);
+            const { verdict, asked } = await check(
+              turn,
+              'GMAIL_SEND_EMAIL',
+              email('ana@example.test'),
+            );
+            compareVerdict(verdict as Awaited<ReturnType<typeof trust.check>>, {
+              confirm: true,
+              reason: 'unrequested',
+            });
+            assert.equal(asked.length, 2);
+            assert.deepEqual(reasked(), [{ name: 'TrustCheckReask', code, reason }]);
+            await finish(turn.turnId, 'cancelled');
+          }
+          for (const answer of [declined, failure]) {
+            const turn = await begin('Email Ana the synthetic invoice.');
+            sequence(answer);
+            const { verdict, asked } = await check(
+              turn,
+              'GMAIL_SEND_EMAIL',
+              email('ana@example.test'),
+            );
+            compareVerdict(verdict as Awaited<ReturnType<typeof trust.check>>, {
+              confirm: true,
+              reason: 'unrequested',
+            });
+            assert.equal(asked.length, 1);
+            assert.deepEqual(reasked(), []);
+            await finish(turn.turnId, 'cancelled');
+          }
+
+          const nightly = await scheduled();
+          sequence(background, read);
+          const accepted = await check(nightly, 'GMAIL_LIST_THREADS', list);
+          compareVerdict(accepted.verdict as Awaited<ReturnType<typeof trust.check>>, {
+            confirm: false,
+            basis: { kind: 'read' },
+          });
+          assert.equal(accepted.asked.length, 2);
+          assert.deepEqual(accepted.asked[0]!.validSources, ['read', 'schedule:1']);
+          assert.deepEqual(reasked(), [
+            { name: 'TrustCheckReask', code: 'accepted', reason: 'unlisted_source' },
+          ]);
+          await finish(nightly.turnId, 'cancelled');
+          for (const [answers, asked] of [
+            [[background, cronEdit], 2],
+            [[untermed, untermed], 2],
+            [[failure], 1],
+          ] as const) {
+            const turn = await scheduled();
+            sequence(...answers);
+            const outcome = await check(turn, 'GMAIL_LIST_THREADS', list);
+            assert.ok(outcome.verdict instanceof Error);
+            assert.match(outcome.verdict.message, /couldn't decide this action/);
+            assert.equal(outcome.asked.length, asked);
+            await finish(turn.turnId, 'cancelled');
+          }
+          const refused = await scheduled();
+          sequence(declined);
+          const outcome = await check(refused, 'GMAIL_LIST_THREADS', list);
+          compareVerdict(outcome.verdict as Awaited<ReturnType<typeof trust.check>>, {
+            confirm: true,
+            reason: 'schedule',
+          });
+          assert.equal(outcome.asked.length, 1);
+          await finish(refused.turnId, 'cancelled');
+
+          const changing = await begin('Email Ana the synthetic invoice.');
+          const args = email('ana@example.test');
+          sequence(untermed, sourced);
+          duringReview = async () => {
+            if (reviews.at(-1)?.correction) args.recipient_email = 'unreviewed@example.test';
+          };
+          const changed = await check(changing, 'GMAIL_SEND_EMAIL', args);
+          assert.ok(changed.verdict instanceof Error);
+          assert.match(changed.verdict.message, /changed while it was being checked/);
+          assert.equal(changed.asked.length, 2);
+          await finish(changing.turnId, 'cancelled');
+
+          const stopping = await begin('Email Ana the synthetic invoice.');
+          const stop = new AbortController();
+          sequence(untermed, sourced);
+          duringReview = async () => {
+            if (reviews.at(-1)?.correction) stop.abort();
+          };
+          await assert.rejects(
+            trust.check(stopping, 'GMAIL_SEND_EMAIL', email('ana@example.test'), stop.signal),
+          );
+          await finish(stopping.turnId, 'cancelled');
+        },
+      );
+
+      await t.test(
         'an unquoted web retry keeps the request of the latest task even across channels (LAB-1467)',
         async (t) => {
           const website = 'https://calendar.example.test';
