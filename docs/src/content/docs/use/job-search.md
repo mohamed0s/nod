@@ -1,6 +1,6 @@
 ---
 title: Job search
-description: Keep your CVs and job profile in Nod, find and score jobs from scans, Telegram channels and alert emails, follow the companies and the people you invited, get a referral message for each accept, pace invites in waves, read accepts and replies from your job mail, follow up, get a weekly report, pair a browser helper, mark a company no luck, and see what stays private. This page describes a fork of Nod.
+description: Keep your CVs and job profile in Nod, find and score jobs from scans, Telegram channels and alert emails, follow the companies and the people you invited, get a referral message for each accept, pace invites in waves, pair a browser helper, mark a company no luck, and see what stays private. This page describes a fork of Nod.
 sidebar:
   order: 10
 ---
@@ -47,7 +47,7 @@ Nod tailors a CV only when it applies on a company's own application form, and a
 
 ## The profile
 
-The **Profile** tab shows what Nod drafted from your main CV: the name and one-line introduction it uses in messages, your location, target roles, regions, languages, programmes and tracks, work authorization and links. It also holds how many invites a day and a week to send, after how many days without an accepted invite or a reply someone has had their chance, after how many days without a reply a [follow-up](#follow-ups) is due (3 by default), and the [waves](#waves-and-limits): how many people to invite at a company at a time, and at most.
+The **Profile** tab shows what Nod drafted from your main CV: the name and one-line introduction it uses in messages, your location, target roles, regions, languages, programmes and tracks, work authorization and links. It also holds how many invites a day and a week to send, after how many days without an accepted invite or a reply someone has had their chance, and the [waves](#waves-and-limits): how many people to invite at a company at a time, and at most.
 
 Nothing here is required. Change a field and select **Save profile**, or tell Nod in chat. If the profile changed since you opened it, Nod doesn't save your version and asks you to reload it.
 
@@ -222,7 +222,7 @@ On Telegram or WhatsApp, in the chat where you last wrote to Nod, you get one me
 
 ## Follow-ups
 
-When someone you asked for a referral hasn't replied after 3 days (change it on the **Profile** tab), **Follow-up due** shows on them, on their company and in the Job radar. It comes due once per person. After you follow up on LinkedIn, select **Followed up**, or **Dismiss** if you won't. Nod has no follow-up template: write it yourself, or ask Nod in chat for a draft based on your referral message.
+When someone you asked for a referral hasn't replied after 3 days (change **Follow up after days without a reply** on the **Profile** tab), **Follow-up due** shows on them, on their company and in the Job radar. It comes due once per person. After you follow up on LinkedIn, select **Followed up**, or **Dismiss** if you won't. Nod has no follow-up template: write it yourself, or ask Nod in chat for a draft based on your referral message.
 
 ## The weekly report
 
@@ -246,8 +246,6 @@ Nod makes the page from your records, so its numbers are counted, not estimated.
 | Telegram channels and scanner switches             | Nod, only in work that started from your message                                                      |
 | People you invited and their status                | Nod, only in work that started from your message. A browser helper you paired                         |
 | Referral messages                                  | Nod makes one when someone accepts. Nod in chat, only in work that started from your message          |
-| Accepts and replies from job mail                  | Nod, only in your Job mail schedule or in work that started from your message                         |
-| The job mail account, follow-ups done or dismissed | You. Nod, only in work that started from your message                                                 |
 | No luck, apply here                                | You, on the Jobs page or through a browser helper you paired                                          |
 
 These records are your own private data, so most changes skip the [trust check](/trust/). Invite limits, no-luck days and waves go through it like Nod's other settings, because they decide how much Nod does on its own later.

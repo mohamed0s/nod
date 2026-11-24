@@ -18,12 +18,12 @@ export const cvMimeTypes = {
 
 const text = (max: number) => z.string().trim().max(max);
 const item = (max: number) => z.string().trim().min(1).max(max);
-const followUpDays = z.int().min(1).max(30);
 export const languageTag = z
   .string()
   .trim()
   .regex(/^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/, 'Use a language tag such as en or fr-CA.');
 
+const followUpDays = z.int().min(1).max(30);
 export const jobProfileFields = {
   name: text(120),
   intro: text(600),

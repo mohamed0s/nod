@@ -679,12 +679,12 @@ test(
       turnLock = false,
       extra: {
         curator?: MemoryCurator;
+        mailboxes?: () => Promise<Array<{ id: string; address: string }>>;
         timeZone?: () => Promise<string>;
         notify?: (
           client: Pick<pg.PoolClient, 'query'>,
           notice: { text: string; literal?: string; fallback: string },
         ) => Promise<boolean>;
-        mailboxes?: () => Promise<Array<{ id: string; address: string }>>;
       } = {},
     ) => {
       const artifacts = createArtifactService({ database: db.pool, ownerId, localRoot: root });
@@ -2958,7 +2958,6 @@ test(
           await admin.query(`DROP SCHEMA ${legacy} CASCADE`);
         }
       });
-      await Promise.allSettled([f.app.close(), g.app.close()]);
 
       const { createSchedules } = await import('../src/server/schedules.ts');
       await createSchedules({
@@ -3845,6 +3844,7 @@ test(
         }
       });
       await Promise.allSettled([m.app.close(), n.app.close()]);
+      await Promise.allSettled([f.app.close(), g.app.close()]);
 
       await t.test(
         'a paired browser helper reaches only its own routes, over 127.0.0.1, with requests sealed by a key Nod paired',

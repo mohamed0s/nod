@@ -1249,8 +1249,6 @@ async function initializeApplication(
       withTurnLock(signal ? { turnId, signal } : turnId, operation),
     telegram: createTelegramChannels(),
     curator,
-    notify: async (client, notice) => (channels ? channels.notice(client, notice) : false),
-    timeZone: async () => (await getPreferences()).timeZone,
     mailboxes: async () =>
       (await integrations.list(ownerId, { refresh: false })).flatMap((entry) =>
         entry.slug === 'gmail' && entry.connectionId && entry.status === 'connected'
@@ -1262,6 +1260,8 @@ async function initializeApplication(
             ]
           : [],
       ),
+    notify: async (client, notice) => (channels ? channels.notice(client, notice) : false),
+    timeZone: async () => (await getPreferences()).timeZone,
     signal: closing.signal,
     changed: () => jobsChanged(ownerId),
   });

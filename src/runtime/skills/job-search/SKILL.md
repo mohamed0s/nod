@@ -38,7 +38,7 @@ The owner's job search lives in Nod. Postgres holds the records, and the `jobs` 
 - Finding jobs, importing them, the Telegram channels, alert emails or the Job radar: read [references/scan.md](references/scan.md).
 - Checking or scoring a job: read [references/evaluate.md](references/evaluate.md).
 - Making or sending a CV PDF: read [references/cv-pdf.md](references/cv-pdf.md).
-- Job mail, accepts or replies by email, the Job mail schedule, the mailbox linked to LinkedIn, or follow-ups: read [references/mail.md](references/mail.md).
-- The weekly job report or what leads to replies: read [references/weekly.md](references/weekly.md).
 - People the owner invited or talked to, the companies list, no luck, or a chat that starts "Apply for the company I marked no luck": read [references/companies.md](references/companies.md).
 - A referral message, its language, or how many people to invite at a company: read [references/referral.md](references/referral.md).
+- Job mail, accepts or replies by email, the Job mail schedule, the mailbox linked to LinkedIn, or follow-ups: read [references/mail.md](references/mail.md).
+- The weekly job report or what leads to replies: read [references/weekly.md](references/weekly.md).

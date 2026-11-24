@@ -73,8 +73,8 @@ export const jobTables = `
   ${jobPostingTables}
   ${jobCompanyTables}
   ${jobDraftTables}
-  ${jobHelperTables}
   ${jobMailTables}
+  ${jobHelperTables}
 `;
 
 export const exampleTemplates: JobTemplate[] = [
@@ -324,9 +324,9 @@ export function createJobs(options: {
   ) => Promise<T>;
   telegram?: TelegramChannels;
   curator?: MemoryCurator;
+  mailboxes?: () => Promise<Array<{ id: string; address: string }>>;
   notify?: (client: Query, notice: DraftNotice) => Promise<boolean>;
   timeZone?: () => Promise<string | null | undefined>;
-  mailboxes?: () => Promise<Array<{ id: string; address: string }>>;
   signal?: AbortSignal;
   changed?: () => void;
 }) {
@@ -1008,9 +1008,9 @@ export function createJobs(options: {
       reviewLimits?: (input: JobLimits, current: JobLimitValues) => Promise<unknown>;
     } = {},
   ) {
+    if (mail.handles(raw)) return mail.execute(turn, raw, context.signal);
     if (postings.handles(raw)) return postings.execute(turn, raw, context.signal);
     if (companies.handles(raw)) return companies.execute(turn, raw, context.signal);
-    if (mail.handles(raw)) return mail.execute(turn, raw, context.signal);
     const request = parse(toolInput, raw, 'The jobs request');
     const result = async (): Promise<unknown> => {
       switch (request.action) {
