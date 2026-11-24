@@ -26,6 +26,7 @@ export const jobApplyTables = `
   ALTER TABLE job_companies ADD COLUMN IF NOT EXISTS apply_by text CHECK (apply_by IN ('owner','rule'));
   UPDATE job_companies SET apply_by='owner' WHERE apply_by IS NULL AND apply_session_id IS NOT NULL;
   ALTER TABLE job_companies ADD COLUMN IF NOT EXISTS apply_origins text[] NOT NULL DEFAULT '{}';
+  ALTER TABLE job_companies ADD COLUMN IF NOT EXISTS apply_resume_at timestamptz;
   CREATE INDEX IF NOT EXISTS job_companies_apply_chat ON job_companies(owner_id,apply_session_id)
     WHERE apply_session_id IS NOT NULL;
 `;

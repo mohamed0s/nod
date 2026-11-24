@@ -329,7 +329,7 @@ export function createJobs(options: {
     remove?(threadId: string, path: string, signal?: AbortSignal): Promise<void>;
   };
   startChat?: (text: string, attachments: Artifact[], sessionId: string) => Promise<unknown>;
-  continueChat?: (text: string, sessionId: string) => Promise<boolean>;
+  continueChat?: (text: string, sessionId: string) => Promise<'sent' | 'waiting' | 'empty'>;
   withTurnLock?: <T>(
     turnId: string,
     operation: (client: PoolClient) => Promise<T>,

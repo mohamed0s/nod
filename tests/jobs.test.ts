@@ -751,7 +751,7 @@ test(
           notice: { text: string; literal?: string; fallback: string },
         ) => Promise<boolean>;
         automatic?: Automatic;
-        continueChat?: (text: string, sessionId: string) => Promise<boolean>;
+        continueChat?: (text: string, sessionId: string) => Promise<'sent' | 'waiting' | 'empty'>;
       } = {},
     ) => {
       const artifacts = createArtifactService({ database: db.pool, ownerId, localRoot: root });
@@ -3535,12 +3535,13 @@ test(
         async () => {
           await pastStarts();
           const continued: Array<{ text: string; sessionId: string }> = [];
-          let answered = true;
+          let outcome: 'sent' | 'empty' = 'sent';
           const ticker = owner(a.ownerId, true, {
             automatic,
             continueChat: async (text, sessionId) => {
               continued.push({ text, sessionId });
-              return answered;
+              await new Promise((resolve) => setTimeout(resolve, 100));
+              return outcome;
             },
           });
           await ticker.app.ready();
@@ -3549,12 +3550,43 @@ test(
           const { apply_session_id: session } = await chatOf(tau.id);
           const tick = () =>
             request(ticker, 'PUT', `/api/jobs/companies/${tau.id}/no-luck`, { noLuck: true });
-          answered = false;
+          outcome = 'empty';
           assert.deepEqual((await tick()).json().apply, { state: 'reused' });
           assert.equal((await chatOf(tau.id)).apply_by, 'rule');
-          answered = true;
+          outcome = 'sent';
+          const work = (
+            await db.pool.query<{ id: string; thread_id: string }>(
+              'SELECT id,thread_id FROM turns WHERE owner_id=$1 AND session_id=$2',
+              [a.ownerId, session],
+            )
+          ).rows[0]!;
+          const pending = randomUUID();
+          await db.pool.query(
+            `INSERT INTO approvals(id,owner_id,thread_id,turn_id,action,args,status)
+             VALUES($1,$2,$3,$4,'NOD_browser','{}','pending')`,
+            [pending, a.ownerId, work.thread_id, work.id],
+          );
+          const asking = continued.length;
+          assert.deepEqual((await tick()).json().apply, { state: 'needs_you' });
+          await db.pool.query('DELETE FROM approvals WHERE id=$1', [pending]);
+          await db.pool.query(
+            "UPDATE turns SET status='waiting',waiting_reason='question' WHERE id=$1",
+            [work.id],
+          );
+          assert.deepEqual((await tick()).json().apply, { state: 'needs_you' });
+          await db.pool.query("UPDATE turns SET status='queued',waiting_reason=NULL WHERE id=$1", [
+            work.id,
+          ]);
+          assert.equal(continued.length, asking);
+          assert.equal((await chatOf(tau.id)).apply_by, 'rule');
           const before = chats.length;
-          assert.deepEqual((await tick()).json().apply, { state: 'resumed' });
+          const together = await Promise.all([tick(), tick(), tick()]);
+          assert.deepEqual(together.map((response) => response.json().apply.state).sort(), [
+            'resumed',
+            'reused',
+            'reused',
+          ]);
+          assert.equal(continued.length, asking + 1);
           assert.deepEqual(continued.at(-1), { text: applyRequest(tau.id), sessionId: session });
           assert.equal((await chatOf(tau.id)).apply_by, 'owner');
           const count = continued.length;

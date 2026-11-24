@@ -230,6 +230,7 @@ import { createTriage, getPreferences } from './triage.ts';
 import { createTasks } from './tasks.ts';
 import { createJobs, jobLimitsInput } from './jobs.ts';
 import { applySiteAction } from './job-apply.ts';
+import { chatWaiting } from './jobs-shared.ts';
 import { createPages } from './pages.ts';
 import { createActivity, createActivityLine } from './activity.ts';
 import {
@@ -1253,6 +1254,7 @@ async function initializeApplication(
     notify: async (client, notice) => (channels ? channels.notice(client, notice) : false),
     timeZone: async () => (await getPreferences()).timeZone,
     continueChat: async (text, sessionId) => {
+      if (await chatWaiting(pool, ownerId, sessionId)) return 'waiting';
       const latest = (
         await pool.query<{ id: string }>(
           `SELECT m.id FROM messages m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
@@ -1261,9 +1263,9 @@ async function initializeApplication(
           [ownerId, sessionId],
         )
       ).rows[0];
-      if (!latest) return false;
+      if (!latest) return 'empty';
       await userMessages.submit(text, [], { channel: 'web', replyToMessageId: latest.id });
-      return true;
+      return 'sent';
     },
     automatic: {
       start: tasks.startWork,

@@ -25,6 +25,16 @@ export function companyLabel(name: string) {
   return [...text].slice(0, 40).join('').trim() || 'this company';
 }
 
+export async function chatWaiting(client: Query, ownerId: string, sessionId: string) {
+  const { rowCount } = await client.query(
+    `SELECT 1 FROM turns w WHERE w.owner_id=$1 AND w.session_id=$2 AND w.status='waiting'
+     UNION ALL SELECT 1 FROM approvals a JOIN turns t ON t.id=a.turn_id AND t.owner_id=a.owner_id
+       WHERE a.owner_id=$1 AND t.session_id=$2 AND a.status='pending' LIMIT 1`,
+    [ownerId, sessionId],
+  );
+  return Boolean(rowCount);
+}
+
 export async function applyChatOf(client: Query, ownerId: string, turn: TurnRef) {
   const { rows } = await client.query<{ company_id: string; session_id: string }>(
     `SELECT c.id AS company_id,u.session_id FROM turns u
