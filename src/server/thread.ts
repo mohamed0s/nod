@@ -142,6 +142,7 @@ interface SubmitUserMessageOptions {
   chatClearedAt?: string | null;
   threadId?: string;
   sessionId?: string;
+  chatModel?: ModelSelection;
   sourceId?: string;
   channel?: string;
   client?: PoolClient;
@@ -781,7 +782,14 @@ type TaskReply = (
 >;
 type StartChat = (
   client: PoolClient,
-  chat: { turnId: string; sessionId: string; messageId: string; text: string; live: boolean },
+  chat: {
+    turnId: string;
+    sessionId: string;
+    messageId: string;
+    text: string;
+    live: boolean;
+    model?: ModelSelection;
+  },
 ) => Promise<void>;
 
 export async function submitUserMessage(
@@ -806,6 +814,8 @@ export async function submitUserMessage(
       options.approvalAnswer)
   )
     throw httpError('A new chat starts without a reply. Send it as a new message.', 400);
+  if (options.chatModel && !newChat)
+    throw httpError('Only a new chat can start with its own model.', 400);
   const confirmation = {
     text,
     displayText: options.displayText,
@@ -1022,6 +1032,7 @@ export async function submitUserMessage(
         messageId,
         text: options.prompt ?? text,
         live: queued,
+        ...(options.chatModel ? { model: options.chatModel } : {}),
       });
     if (queued) await sendDrain(client, thread.id);
     markInserted();

@@ -366,12 +366,20 @@ export function createTasks(options: {
 
   async function startChat(
     client: PoolClient,
-    chat: { turnId: string; sessionId: string; messageId: string; text: string; live: boolean },
+    chat: {
+      turnId: string;
+      sessionId: string;
+      messageId: string;
+      text: string;
+      live: boolean;
+      model?: ModelSelection;
+    },
   ) {
     const title = chat.text.trim().split('\n')[0]!.trim().slice(0, 160) || 'New chat';
+    const model = chat.model && validateModel(chat.model);
     await client.query(
-      `INSERT INTO tasks(id,owner_id,turn_id,session_id,source_message_id,title,done_when,brief,now_text,state,closed_at,title_by)
-       VALUES($1,$2,$3,$1,$4,$5,'',$6,'',$7,CASE WHEN $7='cancelled' THEN now() END,'line')`,
+      `INSERT INTO tasks(id,owner_id,turn_id,session_id,source_message_id,title,done_when,brief,now_text,state,closed_at,title_by,model)
+       VALUES($1,$2,$3,$1,$4,$5,'',$6,'',$7,CASE WHEN $7='cancelled' THEN now() END,'line',$8::jsonb)`,
       [
         chat.sessionId,
         ownerId,
@@ -380,6 +388,7 @@ export function createTasks(options: {
         title,
         chat.text,
         chat.live ? 'open' : 'cancelled',
+        model ? JSON.stringify(model) : null,
       ],
     );
     await client.query('UPDATE turns SET task_id=$1,task_revision=1 WHERE id=$2 AND owner_id=$3', [

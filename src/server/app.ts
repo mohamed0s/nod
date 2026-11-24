@@ -659,6 +659,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
         questionAnswer: input.questionAnswer,
         approvalAnswer: input.approvalAnswer,
         ...(input.newChat ? { sessionId: randomUUID() } : {}),
+        ...(input.chatModel ? { chatModel: input.chatModel } : {}),
         stopSignal: arrival,
       },
     );
