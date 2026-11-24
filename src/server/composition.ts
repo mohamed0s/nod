@@ -1251,6 +1251,17 @@ async function initializeApplication(
     curator,
     notify: async (client, notice) => (channels ? channels.notice(client, notice) : false),
     timeZone: async () => (await getPreferences()).timeZone,
+    mailboxes: async () =>
+      (await integrations.list(ownerId, { refresh: false })).flatMap((entry) =>
+        entry.slug === 'gmail' && entry.connectionId && entry.status === 'connected'
+          ? [
+              {
+                id: entry.connectionId,
+                address: entry.accountEmail ?? entry.accountName ?? 'Gmail',
+              },
+            ]
+          : [],
+      ),
     signal: closing.signal,
     changed: () => jobsChanged(ownerId),
   });

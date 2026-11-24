@@ -18,6 +18,7 @@ export const cvMimeTypes = {
 
 const text = (max: number) => z.string().trim().max(max);
 const item = (max: number) => z.string().trim().min(1).max(max);
+const followUpDays = z.int().min(1).max(30);
 export const languageTag = z
   .string()
   .trim()
@@ -44,6 +45,7 @@ export const jobProfileFields = {
     .max(50),
   workAuthorization: text(400),
   links: z.array(z.object({ label: item(60), url: z.url().max(500) }).strict()).max(20),
+  followUpDays: followUpDays.default(3),
   inviteLimits: z
     .object({ daily: z.int().min(0).max(100), weekly: z.int().min(0).max(500) })
     .strict(),
@@ -64,6 +66,7 @@ export const defaultJobProfile: JobProfile = {
   programmes: [],
   workAuthorization: '',
   links: [],
+  followUpDays: 3,
   inviteLimits: { daily: 15, weekly: 80 },
   noLuck: { noAcceptDays: 7, noReplyDays: 5 },
   waves: { size: 5, max: 10 },
@@ -75,6 +78,7 @@ export const jobProfilePatch = z
   .object({
     ...jobProfileFields,
     languageRule: jobProfileFields.languageRule.partial(),
+    followUpDays,
     inviteLimits: jobProfileFields.inviteLimits.partial(),
     noLuck: jobProfileFields.noLuck.partial(),
     waves: jobProfileFields.waves.partial(),
