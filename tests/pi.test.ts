@@ -1,6 +1,6 @@
 import { lightestEffort, type ModelSelection } from '../src/shared/models.ts';
 import type { Context, UserMessage } from '@earendil-works/pi-ai';
-import type { ModelAccess } from '../src/ports/models.ts';
+import { ModelAuthError, type ModelAccess } from '../src/ports/models.ts';
 import { createPiModelBackend, createPiModelRuntime } from '../src/providers/pi/models.ts';
 import type { Presentation } from '../src/shared/presentation.ts';
 import assert from 'node:assert/strict';
@@ -998,7 +998,7 @@ test('direct image results save over-budget images in the workspace', async (t) 
 });
 
 test('codemode app calls keep untrusted output and stop after an approval', async (t) => {
-  for (const mode of ['read', 'approval', 'parallel'] as const)
+  for (const mode of ['read', 'approval', 'parallel', 'parallel-read'] as const)
     await t.test(mode, async () => {
       const held = mode !== 'read';
       const directory = await mkdtemp(join(tmpdir(), 'nod-script-app-'));
@@ -1022,9 +1022,39 @@ test('codemode app calls keep untrusted output and stop after an approval', asyn
             result.session.agent.streamFunction = (_model, request) => {
               requests.push(JSON.stringify(request.messages));
               const first = round++ === 0;
+              const script = (id: string, source: string) => ({
+                type: 'toolCall' as const,
+                id,
+                name: 'codemode',
+                arguments: { code: source },
+              });
               const message = fauxAssistantMessage(
                 first
-                  ? [{ type: 'toolCall', id: 'script', name: 'codemode', arguments: { code } }]
+                  ? mode === 'parallel-read'
+                    ? [
+                        {
+                          type: 'toolCall' as const,
+                          id: 'send',
+                          name: 'apps',
+                          arguments: {
+                            action: 'SYNTHETIC_SEND',
+                            args: { to: 'outside@example.test' },
+                          },
+                        },
+                        {
+                          type: 'toolCall' as const,
+                          id: 'read',
+                          name: 'apps',
+                          arguments: { action: 'SYNTHETIC_READ', args: {} },
+                        },
+                        {
+                          type: 'toolCall' as const,
+                          id: 'late',
+                          name: 'apps',
+                          arguments: { action: 'LATE_WRITE', args: {} },
+                        },
+                      ]
+                    : [script('script', code)]
                   : 'Checked the synthetic items.',
                 { stopReason: first ? 'toolUse' : 'stop' },
               );
@@ -1045,7 +1075,7 @@ test('codemode app calls keep untrusted output and stop after an approval', asyn
         turnId: randomUUID(),
         prompt: 'Read the synthetic items.',
         integration: async (action, _args, _signal, admit) => {
-          await admit?.(action !== 'SYNTHETIC_READ');
+          await admit?.(action !== 'SYNTHETIC_READ', action === 'SYNTHETIC_READ');
           calls.push(action);
           if (action === 'SYNTHETIC_SEND')
             return { [appConfirmation]: 'Synthetic approval question.' };
@@ -1055,12 +1085,14 @@ test('codemode app calls keep untrusted output and stop after an approval', asyn
         },
       });
       assert.deepEqual(
-        calls,
+        mode === 'parallel-read' ? calls.sort() : calls,
         mode === 'parallel'
           ? ['SYNTHETIC_SEND']
-          : held
+          : mode === 'parallel-read'
             ? ['SYNTHETIC_READ', 'SYNTHETIC_SEND']
-            : ['SYNTHETIC_READ'],
+            : held
+              ? ['SYNTHETIC_READ', 'SYNTHETIC_SEND']
+              : ['SYNTHETIC_READ'],
       );
       assert.equal(result.status, held ? 'waiting_user' : 'succeeded');
       if (held) assert.equal(result.waitingFor, 'approval');
@@ -8989,6 +9021,39 @@ test('model discovery names why it failed instead of a generic retry message', a
         error.message,
       ) && !/didn’t accept|fixture-xai-key/.test(error.message),
   );
+});
+
+test('Mistral model discovery preserves detail reasons and redacts the connection key', async () => {
+  const key = 'fixture-mistral-key';
+  for (const [body, reason] of [
+    [{ detail: 'Invalid API Key' }, 'Invalid API Key'],
+    [
+      { detail: `Invalid API Key: ${key}`, input: 'private-extra-field' },
+      'Invalid API Key: [redacted]',
+    ],
+    [{ message: 'Account disabled', detail: 'Secondary reason' }, 'Account disabled'],
+    [{ detail: { input: 'private-extra-field' } }, undefined],
+  ] as const) {
+    const backend = createPiModelBackend({
+      fetch: async (input, init) => {
+        assert.equal(String(input), 'https://api.mistral.ai/v1/models');
+        assert.equal(new Headers(init?.headers).get('authorization'), `Bearer ${key}`);
+        return Response.json(body, { status: 401 });
+      },
+    });
+    await assert.rejects(
+      backend.catalog('mistral', 'api_key', { type: 'api_key', key }),
+      (error: unknown) => {
+        assert.ok(error instanceof ModelAuthError);
+        assert.match(error.message, /Mistral model discovery failed.*HTTP 401/);
+        if (reason) assert.ok(error.message.includes(reason));
+        assert.ok(!error.message.includes(key));
+        assert.ok(!error.message.includes('private-extra-field'));
+        assert.ok(!error.message.includes('Secondary reason'));
+        return true;
+      },
+    );
+  }
 });
 
 test('native account catalogs never send a provider key to a different service or accept a failed listing', async () => {

@@ -3136,7 +3136,7 @@ async function initializeApplication(
           }
           const prepared = await computerUse.prepare(turn, action, args, options.signal);
           if (!computerUse.needsCheck(action, prepared)) {
-            await options.admit?.(false);
+            await options.admit?.(false, action !== 'COMPUTER_FOCUS');
             return computerUse.execute(turn, action, prepared, options.signal);
           }
           const verdict = await trust.check(
@@ -3170,7 +3170,7 @@ async function initializeApplication(
         }
         const readWork = (await turnOrigin(turn.turnId))?.source === 'user' ? 'read' : 'background';
         if (action === 'SEARCH_TOOLS') {
-          await options.admit?.(false);
+          await options.admit?.(false, true);
           const result = await integrations.execute(
             ownerId,
             action,

@@ -1,3 +1,4 @@
+import { laterSupersedingTurnSql } from './turn-chain.ts';
 import { presentationSchema, presentationText } from '../shared/presentation.ts';
 import { answerChoicesSchema, questionWithChoices } from '../shared/answer-choices.ts';
 import { createHash, randomUUID } from 'node:crypto';
@@ -1440,6 +1441,38 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       ON CONFLICT(message_id) DO NOTHING`,
       [ownerId],
     );
+    const approvals = Boolean(
+      (await pool.query("SELECT to_regclass('approvals') AS name")).rows[0]?.name,
+    );
+    await pool.query(
+      `INSERT INTO channel_outbox(message_id,source_id)
+      SELECT DISTINCT ON (m.id) m.id,i.source_id FROM messages m
+      JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id AND u.channel='web'
+      CROSS JOIN LATERAL (SELECT lu.channel FROM messages lm
+          JOIN turns lu ON lu.id=lm.turn_id AND lu.owner_id=lm.owner_id
+          WHERE lm.owner_id=m.owner_id AND lm.thread_id=m.thread_id AND lm.role='user'
+            AND lm.created_at<=m.created_at
+          ORDER BY lm.created_at DESC,lm.id DESC LIMIT 1) owner
+      JOIN channel_inbox i ON i.channel=owner.channel AND i.owner_id=m.owner_id AND i.created_at<=m.created_at
+      WHERE m.role='assistant' AND m.owner_id=$1 AND m.hidden_at IS NULL AND i.state='submitted'
+        AND owner.channel<>'web'
+        AND (m.id IN (SELECT q.id FROM turns u CROSS JOIN LATERAL (SELECT q.id FROM messages q
+              WHERE q.turn_id=u.id AND q.owner_id=u.owner_id AND q.role='assistant'
+              ORDER BY q.created_at DESC,q.id DESC LIMIT 1) q
+            WHERE u.owner_id=$1 AND u.thread_id IN (SELECT th.id FROM threads th
+                WHERE th.owner_id=$1 AND th.archived_at IS NULL)
+              AND u.status='waiting' AND u.waiting_reason='question' AND u.handoff_browser_id IS NULL
+              AND u.channel='web' AND NOT ${laterSupersedingTurnSql})${
+                approvals
+                  ? ` OR m.id IN (SELECT a.confirmation_message_id FROM approvals a
+              WHERE a.owner_id=$1 AND a.status='pending')`
+                  : ''
+              })
+        AND NOT EXISTS (SELECT 1 FROM channel_outbox q WHERE q.message_id=m.id)
+      ORDER BY m.id,i.received_at DESC,i.source_id
+      ON CONFLICT(message_id) DO NOTHING`,
+      [ownerId],
+    );
     if (!transport.topics) return;
     const mirrored = `FROM messages m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
       WHERE m.owner_id=$1 AND m.created_at>now()-interval '10 minutes' AND m.role='assistant'
@@ -1781,7 +1814,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       return true;
     }
     let postStarted = false;
-    let topicId: string | undefined;
+    let topicId: string | null | undefined;
     try {
       let topicFailure: unknown;
       topicId = await topicFor(row).catch((cause) => {
@@ -1818,7 +1851,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
         return true;
       }
       sendRetry.delete(row.message_id);
-      if (row.web && !topicId) {
+      if (row.web && (topicId === null || topicFailure !== undefined)) {
         await block(
           !retryable ? 'topic_unavailable' : silent ? 'copy_expired' : 'topic_unreachable',
           'sending',
@@ -1982,7 +2015,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       signal: AbortSignal.any([receiving.signal, AbortSignal.timeout(30_000)]),
     };
     const mode = await topicMode(row, target.signal);
-    if (!mode.enabled) return undefined;
+    if (!mode.enabled) return row.web && !(await waitsForAnswer(row.message_id)) ? null : undefined;
     if (!row.turn_id) return wanted ?? undefined;
     const task = wanted
       ? await pool.query<{ title: string; topic_id: string | null; name: string | null }>(
@@ -1993,7 +2026,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
         )
       : undefined;
     const found = task?.rows[0];
-    if (!found) return row.web ? undefined : mainTopicFor(row, mode.ownerTopics, target.signal);
+    if (!found) return mainTopicFor(row, mode.ownerTopics, target.signal);
     if (found.topic_id) {
       if (found.name !== found.title)
         await nameTopic(row, found.topic_id, found.title, found.name === null, target.signal);
@@ -2002,7 +2035,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     const key = JSON.stringify([row.provider, row.account_id, row.sender_id, wanted]);
     let topicId = createdTopics.get(key);
     if (!topicId && !transport.createTopic)
-      return row.web ? undefined : mainTopicFor(row, mode.ownerTopics, target.signal);
+      return row.web ? null : mainTopicFor(row, mode.ownerTopics, target.signal);
     if (!topicId)
       try {
         topicId = await transport.createTopic!({
@@ -2025,6 +2058,25 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     );
     createdTopics.delete(key);
     return saved.rows[0]?.topic_id ?? topicId;
+  }
+
+  async function waitsForAnswer(messageId: string) {
+    const approvals = Boolean(
+      (await pool.query("SELECT to_regclass('approvals') AS name")).rows[0]?.name,
+    );
+    const waiting = await pool.query(
+      `SELECT 1 FROM messages m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
+       WHERE m.id=$1 AND m.owner_id=$2 AND ((u.status='waiting' AND u.waiting_reason='question'
+         AND m.id=(SELECT q.id FROM messages q WHERE q.turn_id=u.id AND q.owner_id=u.owner_id
+           AND q.role='assistant' ORDER BY q.created_at DESC,q.id DESC LIMIT 1))${
+             approvals
+               ? ` OR EXISTS (SELECT 1 FROM approvals a WHERE a.confirmation_message_id=m.id
+           AND a.owner_id=m.owner_id AND a.status='pending')`
+               : ''
+           })`,
+      [messageId, ownerId],
+    );
+    return Boolean(waiting.rowCount);
   }
 
   async function mainTopicFor(row: OutboxRow, ownerTopics: boolean, signal: AbortSignal) {

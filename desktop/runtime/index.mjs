@@ -178,11 +178,16 @@ export function execute(command, args, { env, signal, timeout = 120_000, input }
         Object.assign(new Error(message), facts, {
           details: [spawnError?.stack, output].filter(Boolean).join('\n'),
         });
+      if (timedOut)
+        return reject(
+          failure('Nod runtime setup took too long. Please retry.', { name: 'TimeoutError' }),
+        );
       if (spawnError)
         return reject(
-          failure(`Nod could not launch its bundled runtime (${spawnError.code || 'unknown'}).`),
+          failure(`Nod could not launch its bundled runtime (${spawnError.code || 'unknown'}).`, {
+            errno: spawnError.code,
+          }),
         );
-      if (timedOut) return reject(failure('Nod runtime setup took too long. Please retry.'));
       if (code !== 0) {
         const detail = output.replace(/\s+/g, ' ');
         return reject(
@@ -227,13 +232,14 @@ export async function waitFor(operation, { signal, attempts = 240, interval = 25
   throw failure;
 }
 
-async function prepare(options, onComputerStart) {
+async function prepare(options, onComputerStart, progress = {}) {
   if (process.platform === 'win32' && process.arch === 'x64') {
     const { prepareWindowsRuntime } = await import('./windows.mjs');
     return prepareWindowsRuntime(options, onComputerStart);
   }
   if (!['darwin', 'linux'].includes(process.platform) || !['arm64', 'x64'].includes(process.arch))
     throw new Error('This Nod build requires a Mac or a 64-bit Linux computer.');
+  progress.step = 'check';
   if (process.platform === 'linux')
     await access('/dev/kvm', constants.R_OK | constants.W_OK).catch(() => {
       throw Object.assign(
@@ -247,6 +253,7 @@ async function prepare(options, onComputerStart) {
   const resourcesPath = resolve(options.resourcesPath || options.resources);
   const onStatus = options.onStatus || options.onProgress || (() => {});
   const signal = options.signal;
+  progress.step = 'assets';
   await mkdir(dataRoot, { recursive: true, mode: 0o700 });
   const controlRoot = join(dataRoot, 'desktop-runtime');
   await mkdir(controlRoot, { recursive: true, mode: 0o700 });
@@ -259,6 +266,7 @@ async function prepare(options, onComputerStart) {
   let downloading = runtimeAssets.paths.length > 0;
   let waiting;
   const status = (phase, message, stage = 'computer') => {
+    if (stage !== 'computer') progress.step = stage;
     const value = { phase, message, stage };
     if (downloading) waiting = value;
     else onStatus(value);
@@ -369,6 +377,7 @@ async function prepare(options, onComputerStart) {
     execute(docker, args, { env: dockerEnvironment, signal, ...extra });
   const runLima = (args, extra = {}) =>
     execute(lima, args, { env: hostEnvironment, signal, ...extra });
+  progress.step = 'check';
   let exists = false;
   try {
     await access(join(limaHome, vm, 'lima.yaml'));
@@ -394,6 +403,7 @@ async function prepare(options, onComputerStart) {
     }
   }
   if (saved.initializing) {
+    progress.step = 'create';
     status('preparing', 'Replacing your unfinished private computer…');
     if (exists) await runLima(['delete', '--force', vm], { timeout: 120_000 });
     else await rm(join(limaHome, vm), { recursive: true, force: true });
@@ -411,6 +421,7 @@ async function prepare(options, onComputerStart) {
         if (error.code !== 'ENOENT') throw error;
       });
     }
+    progress.step = 'create';
     status('preparing', 'Preparing your private computer…');
     saved.initializing = true;
     await saveState();
@@ -441,6 +452,7 @@ async function prepare(options, onComputerStart) {
     if (config.mounts[0].location !== assets) {
       const currentStatus = await runLima(['list', '--format', '{{.Status}}', vm]);
       if (currentStatus.trim() !== 'Stopped') {
+        progress.step = 'update';
         status('preparing', 'Stopping your local computer for the update…');
         await runLima(['stop', '--tty=false', vm], { timeout: 90_000 });
         signal?.throwIfAborted();
@@ -492,6 +504,7 @@ async function prepare(options, onComputerStart) {
       );
     }
   }
+  progress.step = 'start';
   status('starting', 'Starting your private computer…');
   onComputerStart();
   await runLima(['start', '--tty=false', vm], { timeout: 600_000 });
@@ -1044,6 +1057,7 @@ export function prepareRuntime(options) {
   const key = resolve(options.dataRoot || options.root);
   if (!preparing.has(key)) {
     let computerMayBeRunning = false;
+    const progress = {};
     preparing.set(
       key,
       prepare(
@@ -1061,8 +1075,10 @@ export function prepareRuntime(options) {
         () => {
           computerMayBeRunning = true;
         },
+        progress,
       )
         .catch(async (error) => {
+          if (error && typeof error === 'object') error.step ??= progress.step;
           if (computerMayBeRunning && !storageReady.has(key)) {
             try {
               await stopRuntime(options);
@@ -1073,6 +1089,7 @@ export function prepareRuntime(options) {
                 }),
                 {
                   code: cleanupError.code,
+                  step: error.step,
                   details: [
                     error.stack || error.message,
                     error.details,

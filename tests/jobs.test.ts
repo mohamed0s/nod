@@ -68,14 +68,14 @@ test('job search limits count as an owner setting in the trust check', async () 
     action,
   };
   const others = { ...words, userMessages: [] };
-  assert.equal(trustBasis({ run: true, because: 'read' }, words), undefined);
-  assert.equal(trustBasis({ run: true, because: 'schedule approval' }, words), undefined);
-  assert.equal(trustBasis({ run: true, because: quote, source: 'standing' }, words), undefined);
-  assert.equal(trustBasis({ run: true, because: quote, source: 'rules' }, words), undefined);
-  assert.equal(trustBasis({ run: true, because: quote }, others), undefined);
+  assert.equal(trustBasis({ run: true, source: 'read' }, words), undefined);
+  assert.equal(trustBasis({ run: true, source: 'scheduleApproval' }, words), undefined);
+  assert.equal(trustBasis({ run: true, source: 'standing', terms: [] }, words), undefined);
+  assert.equal(trustBasis({ run: true, source: 'rules', terms: [] }, words)?.kind, 'rule');
+  assert.equal(trustBasis({ run: true, source: 'message:0', terms: [] }, others), undefined);
   assert.equal(
     trustBasis(
-      { run: true, because: quote, source: 'standing' },
+      { run: true, source: 'standing', terms: [] },
       {
         ...words,
         action: { name: 'SYNTHETIC_ACTION' },
@@ -83,10 +83,10 @@ test('job search limits count as an owner setting in the trust check', async () 
     )?.kind,
     'standing',
   );
-  assert.deepEqual(trustBasis({ run: true, because: quote, source: 'message:0' }, words), {
+  assert.deepEqual(trustBasis({ run: true, source: 'message:0', terms: [] }, words), {
     kind: 'message',
     messageId: 'message',
-    quote,
+    quote: `Please ${quote}.`,
   });
   const model = {
     provider: 'openrouter',

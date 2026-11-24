@@ -19,6 +19,7 @@ import { Agent, Dispatcher1Wrapper } from 'undici';
 import { z } from 'zod';
 import { createRemoteJWKSet, customFetch, jwtVerify } from 'jose';
 import { logFailure } from '../../ports/failure-log.ts';
+import { nodFetch, nodIdentity } from '../attribution.ts';
 import {
   ModelAuthError,
   ModelCatalogError,
@@ -221,7 +222,7 @@ function lmStudioModel(model: z.infer<typeof lmStudioModelSchema>) {
 }
 
 export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): ModelBackend {
-  const request = options.fetch ?? fetch;
+  const request = options.fetch ?? nodFetch;
   let catalogRuntime: Promise<ModelRuntime> | undefined;
   const runtime = () =>
     (catalogRuntime ??= ModelRuntime.create({
@@ -1274,6 +1275,7 @@ export async function createPiModelRuntime(
     const output = Math.min(options?.maxTokens ?? target.maxTokens, target.maxTokens);
     const upstream = stream(target, replay, {
       ...options,
+      identity: nodIdentity,
       signal: options?.signal ? AbortSignal.any([options.signal, silence.signal]) : silence.signal,
       maxTokens: output,
       maxRetries: 0,
@@ -1314,7 +1316,7 @@ export async function createPiModelRuntime(
               if (headers.get('authorization') === `Bearer ${keyless}`)
                 headers.delete('authorization');
               phase = 'request';
-              const response = await (options?.fetch ?? fetch)(input, {
+              const response = await (options?.fetch ?? nodFetch)(input, {
                 ...init,
                 ...(guardedFetch ? { headers, redirect: 'error' } : {}),
                 ...(access.provider === 'compatible'

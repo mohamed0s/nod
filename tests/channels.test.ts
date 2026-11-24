@@ -7248,6 +7248,11 @@ test(
     await service.drain();
     for (const id of skipped) assert.equal(await outbox(id), undefined);
     assert.equal(created.length, 3);
+    const webMain = await turn('web', null, 'waiting');
+    await approve(webMain, await say(webMain, 'Approve the synthetic web refund?'));
+    await service.drain();
+    assert.equal(delivery('Approve the synthetic web refund?').message_thread_id, 701);
+    assert.equal(created.length, 3);
 
     creating = 'refused';
     const refused = await chat('Synthetic refused chat', 'waiting');
@@ -7280,6 +7285,13 @@ test(
     await service.drain();
     assert.equal(await outbox(quietNote), 'blocked');
     never('Synthetic note before topics go off');
+    const offTopics = await turn('web', quiet.id, 'waiting');
+    await approve(offTopics, await say(offTopics, 'Approve the synthetic refund without topics?'));
+    await service.drain();
+    assert.equal(
+      delivery('Approve the synthetic refund without topics?').message_thread_id,
+      undefined,
+    );
     topicsOn = true;
     await service.replaceTransport(createChatSdkTransport(pool, fixtureEnv));
     await service.drain();
