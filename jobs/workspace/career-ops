@@ -5,7 +5,8 @@ usage() {
   printf '%s\n' 'Usage: career-ops <command> [arguments]' \
     'Commands: doctor, pdf, cv:html, cv:templates, cv:verify-facts, cv:verify-ats, sync-check, scan, scan:full.' \
     'scan takes --dry-run, --json, --quiet, --company <name>, --since <days>, --posted-after <date>, --posted-before <date>.' \
-    'scan:full takes --dry-run, --json, --verbose, --since <days>, --limit <n>, --ats <list>, --include-undated, --shuffle, --resume.' \
+    'scan:full takes --dry-run, --json, --verbose, --since <days>, --limit <n>, --ats <greenhouse,lever,ashby>, --include-undated, --shuffle, --resume.' \
+    'scan and scan:full also write data/scan-new.tsv: the postings they added in the last 30 days.' \
     'Files live in /workspace/<this workspace>/shared/career-ops.'
 }
 
@@ -14,32 +15,66 @@ refuse() {
   exit 2
 }
 
+listed() {
+  word=$1
+  shift
+  for item in "$@"; do
+    [ "$item" = "$word" ] && return 0
+  done
+  return 1
+}
+
+sweeps() {
+  case "$1" in
+    '' | *[!a-z,]*) refuse "career-ops scan:full --ats takes one or more of greenhouse, lever and ashby, separated by commas." ;;
+  esac
+  saved=$IFS
+  IFS=,
+  for item in $1; do
+    case "$item" in
+      greenhouse | lever | ashby) ;;
+      *)
+        IFS=$saved
+        refuse "career-ops scan:full sweeps only greenhouse, lever and ashby in Nod's workspace, not $item."
+        ;;
+    esac
+  done
+  IFS=$saved
+}
+
+ats=''
 flags() {
   plain=$1
   valued=$2
   shift 2
   while [ $# -gt 0 ]; do
     flag=${1%%=*}
-    case " $plain $valued " in
-      *" $flag "*) ;;
-      *)
-        case "$flag" in
-          --verify | --headed-fallback | --throttle | --rediscover-404 | --liveness)
-            refuse "career-ops $name $flag opens posting pages in a browser or through LinkedIn's guest pages, so Nod never runs it. Check a posting with Nod's own browser instead."
-            ;;
-        esac
-        refuse "career-ops $name doesn't take $1 in Nod's workspace. Run career-ops help for the arguments it takes."
-        ;;
+    if listed "$1" $plain; then
+      shift
+      continue
+    fi
+    if ! listed "$flag" $valued; then
+      case "$flag" in
+        --verify | --headed-fallback | --throttle | --rediscover-404 | --liveness)
+          refuse "career-ops $name $flag opens posting pages in a browser or through LinkedIn's guest pages, so Nod never runs it. Check a posting with Nod's own browser instead."
+          ;;
+      esac
+      refuse "career-ops $name doesn't take $1 in Nod's workspace. Run career-ops help for the arguments it takes."
+    fi
+    if [ "$1" = "$flag" ]; then
+      [ $# -ge 2 ] || refuse "career-ops $name $1 needs a value."
+      value=$2
+      shift
+    else
+      value=${1#*=}
+    fi
+    case "$value" in
+      -*) refuse "career-ops $name $flag needs a value, not $value." ;;
     esac
-    case " $valued " in
-      *" $1 "*)
-        [ $# -ge 2 ] || refuse "career-ops $name $1 needs a value."
-        case "$2" in
-          -*) refuse "career-ops $name $1 needs a value, not $2." ;;
-        esac
-        shift
-        ;;
-    esac
+    if [ "$flag" = --ats ]; then
+      sweeps "$value"
+      ats=$value
+    fi
     shift
   done
 }
@@ -69,6 +104,7 @@ case "$name" in
   scan:full)
     script=scan-ats-full
     flags '--dry-run --json --verbose --include-undated --shuffle --resume' '--since --limit --ats' "$@"
+    [ -n "$ats" ] || set -- "$@" --ats greenhouse,lever,ashby
     ;;
   openai-eval | gemini-eval | openrouter-runner | ollama-eval | batch-evaluate-gemini | openai-tailor | scan:hn)
     refuse "career-ops $name calls a model API. Nod never runs it in the workspace; do this step yourself."
@@ -104,5 +140,20 @@ for variable in $(env | sed -n 's/^\(CAREER_OPS_[A-Za-z0-9_]*\)=.*/\1/p'); do
   unset "$variable"
 done
 export CAREER_OPS_DATA_DIR="/workspace/$thread/shared/career-ops"
+for file in .env config/plugins.yml; do
+  [ ! -e "$CAREER_OPS_DATA_DIR/$file" ] || refuse "career-ops won't run while shared/career-ops/$file exists: it can change which files career-ops reads and which sites it contacts. Nod never writes it; remove it first."
+done
 mkdir -p "$CAREER_OPS_DATA_DIR"
-exec node "/opt/career-ops/$script.mjs" "$@"
+case "$name" in
+  scan | scan:full) ;;
+  *) exec node "/opt/career-ops/$script.mjs" "$@" ;;
+esac
+
+status=0
+node "/opt/career-ops/$script.mjs" "$@" || status=$?
+history="$CAREER_OPS_DATA_DIR/data/scan-history.tsv"
+if [ -f "$history" ]; then
+  since=$(date -u -d '30 days ago' +%F)
+  awk -F '\t' -v since="$since" '$6 == "added" && $2 >= since' "$history" >"$CAREER_OPS_DATA_DIR/data/scan-new.tsv"
+fi
+exit "$status"
