@@ -6,6 +6,7 @@ import { composioActivity } from './activity.ts';
 import { integrationServices, type IntegrationServiceInfo } from '../../shared/integrations.ts';
 import { createComposioFiles } from './downloads.ts';
 import type { createComposioProxy } from './proxy.ts';
+import { jobMailReader } from './job-mail.ts';
 import { readInboxSnippets, readInboxThreads, readSentEmails } from './sent-email.ts';
 import { readVerificationEmails } from './verification-email.ts';
 import {
@@ -747,6 +748,7 @@ export function createComposioProvider(options: {
     sentEmails: (accountId, signal) => readSentEmails(client.tools, accountId, signal),
     inboxSnippets: (accountId, signal) => readInboxSnippets(client.tools, accountId, signal),
     inboxThreads: (accountId, signal) => readInboxThreads(client.tools, accountId, signal),
+    jobMail: jobMailReader(client.tools),
     activity: composioActivity(client.tools),
     async pollInbox(accountId, cursor, signal) {
       const deadline = AbortSignal.timeout(25_000);

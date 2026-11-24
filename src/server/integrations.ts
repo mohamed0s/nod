@@ -1255,6 +1255,15 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
     }
   }
 
+  async function jobMailAccount(connectionId: string, signal: AbortSignal) {
+    signal.throwIfAborted();
+    const row = await selectConnection(configuredOwner, 'gmail', connectionId);
+    const reader = rowProvider(row)?.jobMail;
+    if (!reader || !row.account_id)
+      throw new IntegrationError("This Gmail account can't be read for job mail here.", 409);
+    return { reader, accountId: row.account_id };
+  }
+
   async function emailAccount(id: string, expected: EmailAccount, signal: AbortSignal) {
     signal.throwIfAborted();
     const current = await selectConnection(configuredOwner, 'gmail', id);
@@ -3034,6 +3043,16 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
     prepare,
     emailCode,
     inboxSnippets,
+    jobMail: {
+      async list(connectionId: string, query: string, max: number, signal: AbortSignal) {
+        const { reader, accountId } = await jobMailAccount(connectionId, signal);
+        return reader.list(accountId, query, max, signal);
+      },
+      async read(connectionId: string, ids: string[], signal: AbortSignal) {
+        const { reader, accountId } = await jobMailAccount(connectionId, signal);
+        return reader.read(accountId, ids, signal);
+      },
+    },
     list,
     catalog,
     connectedApps,

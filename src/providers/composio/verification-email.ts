@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { parse } from 'tldts';
 import type { VerificationEmail, VerificationEmailQuery } from '../../ports/integrations.ts';
 
-function withoutComments(value: string) {
+export function withoutComments(value: string) {
   let plain = '';
   let depth = 0;
   for (let index = 0; index < value.length; index++) {

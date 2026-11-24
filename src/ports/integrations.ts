@@ -1,5 +1,6 @@
 import type { IntegrationService, IntegrationServiceInfo } from '../shared/integrations.ts';
 import type { Connection } from '../shared/contracts.ts';
+import type { JobMailReader } from './job-mail.ts';
 import type { ObservationBatch, ObservationQuery } from './proactivity.ts';
 export type { IntegrationService, IntegrationServiceInfo } from '../shared/integrations.ts';
 export interface IntegrationConnectionBrowser {
@@ -356,6 +357,7 @@ export interface IntegrationProvider {
   sentEmails?(accountId: string, signal: AbortSignal): Promise<SentEmail[]>;
   inboxSnippets?(accountId: string, signal: AbortSignal): Promise<InboxSnippet[]>;
   inboxThreads?(accountId: string, signal: AbortSignal): Promise<InboxThread[]>;
+  jobMail?: JobMailReader;
   activity?: Readonly<Record<string, ActivityReader>>;
   pollInbox?(
     accountId: string,

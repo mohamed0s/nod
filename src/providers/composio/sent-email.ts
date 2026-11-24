@@ -32,7 +32,7 @@ const displayName = (value: string) =>
   /^\s*"?([^"<]*?)"?\s*<[^<>]+>\s*$/.exec(value)?.[1]?.trim() ?? '';
 const sent = (message: Message) => message.labelIds?.includes('SENT') ?? false;
 
-function gmail(client: Client, accountId: string, signal: AbortSignal) {
+export function gmail(client: Client, accountId: string, signal: AbortSignal) {
   return async (path: string, parameters: Array<[string, string | number]>) => {
     signal.throwIfAborted();
     const response = await client.proxyExecute(

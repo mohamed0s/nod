@@ -1260,6 +1260,11 @@ async function initializeApplication(
             ]
           : [],
       ),
+    mail: {
+      list: (...args) => integrations.jobMail.list(...args),
+      read: (...args) => integrations.jobMail.read(...args),
+    },
+    mailCheck,
     notify: async (client, notice) => (channels ? channels.notice(client, notice) : false),
     timeZone: async () => (await getPreferences()).timeZone,
     signal: closing.signal,
