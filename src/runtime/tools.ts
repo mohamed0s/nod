@@ -1294,7 +1294,10 @@ export function nodTools(
                 ))
                   throw error;
               }
-            const checked = commits(step) ? await check(step) : { binding: {} };
+            const checked =
+              commits(step) || (context.checkTyping && ['fill', 'type'].includes(step.action))
+                ? await check(step)
+                : { binding: {} };
             if ('output' in checked) return checked.output;
             const page = await computer.act(browserId, { ...step, ...checked.binding }, signal);
             if ('record' in checked) await checked.record?.();

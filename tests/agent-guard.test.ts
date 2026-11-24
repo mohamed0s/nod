@@ -2491,6 +2491,46 @@ test('links navigate without a check unless they send a known form', async () =>
   assert.deepEqual(seen, ['@form-link', '@button']);
 });
 
+test('typing reaches the step check only in work that asks for it', async () => {
+  const url = 'https://careers.example.test/apply';
+  for (const checkTyping of [false, true]) {
+    const seen: string[] = [];
+    const acted: string[] = [];
+    await taskFixture(
+      async (tools) => {
+        await call(tools, 'browser', { action: 'open', url });
+        await call(tools, 'browser', { action: 'fill', selector: '@name', text: 'Sam Example' });
+        await call(tools, 'browser', {
+          action: 'type',
+          selector: '@email',
+          text: 'sam@example.test',
+        });
+      },
+      {
+        ...(checkTyping ? { checkTyping } : {}),
+        browserStep: async ({ step }) => {
+          seen.push(`${step.action} ${step.selector}`);
+          return step.selector === '@email' ? { result: 'Synthetic site question' } : 'run';
+        },
+      },
+      {
+        computer: fakeComputer({
+          currentPage: async () => ({ origin: new URL(url).origin, url }),
+          act: async (_id, step) => {
+            if (step.action !== 'open') {
+              acted.push(`${step.action} ${step.selector}`);
+              assert.equal(step.expectUrl, checkTyping ? url : undefined);
+            }
+            return { url, text: 'Synthetic form' };
+          },
+        }),
+      },
+    );
+    assert.deepEqual(seen, checkTyping ? ['fill @name', 'type @email'] : []);
+    assert.deepEqual(acted, checkTyping ? ['fill @name'] : ['fill @name', 'type @email']);
+  }
+});
+
 test('browser handoff requires a live page, binds its session and stops further work without a link', async () => {
   const sessionId = randomUUID();
   let opened = false;

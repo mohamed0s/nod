@@ -6,7 +6,16 @@ import { untrustedBlock } from '../shared/untrusted.ts';
 import type { ArtifactService } from './artifacts.ts';
 import { logFailure } from './failure-log.ts';
 import type { StartWork } from './job-companies.ts';
-import { applyChatOf, failure, parse, rootedIn, type Query, type TurnRef } from './jobs-shared.ts';
+import { companyKey } from './job-urls.ts';
+import {
+  applyChatOf,
+  companyLabel,
+  failure,
+  parse,
+  rootedIn,
+  type Query,
+  type TurnRef,
+} from './jobs-shared.ts';
 import { afterCommit, transaction } from './transaction.ts';
 
 export const jobApplyTables = `
@@ -16,7 +25,12 @@ export const jobApplyTables = `
   ALTER TABLE job_postings ADD COLUMN IF NOT EXISTS apply_session_id uuid;
   ALTER TABLE job_companies ADD COLUMN IF NOT EXISTS apply_by text CHECK (apply_by IN ('owner','rule'));
   UPDATE job_companies SET apply_by='owner' WHERE apply_by IS NULL AND apply_session_id IS NOT NULL;
+  ALTER TABLE job_companies ADD COLUMN IF NOT EXISTS apply_origins text[] NOT NULL DEFAULT '{}';
+  CREATE INDEX IF NOT EXISTS job_companies_apply_chat ON job_companies(owner_id,apply_session_id)
+    WHERE apply_session_id IS NOT NULL;
 `;
+
+export const applySiteAction = 'NOD_job_apply_site';
 
 export const applyActions = new Set(['cv_tailored']);
 
@@ -24,6 +38,13 @@ export type Automatic = {
   start: StartWork;
   lock: (client: PoolClient) => Promise<unknown>;
   ready?: () => boolean;
+  paused?: () => Promise<boolean>;
+};
+
+type SiteStep = {
+  step: { action: string };
+  page: { origin: string; url: string };
+  subagent: boolean;
 };
 
 const folder = 'shared/career-ops';
@@ -31,6 +52,41 @@ const tailoredPath = (postingId: string) => `${folder}/output/tailored-${posting
 const checkEvery = 10 * 60_000;
 const settle = 3_000;
 const toolInput = z.object({ action: z.literal('cv_tailored'), postingId: z.uuid() }).strict();
+const sharedHosts = new Set([
+  'jobs.lever.co',
+  'jobs.eu.lever.co',
+  'boards.greenhouse.io',
+  'job-boards.greenhouse.io',
+  'job-boards.eu.greenhouse.io',
+  'jobs.ashbyhq.com',
+  'apply.workable.com',
+  'jobs.smartrecruiters.com',
+  'careers.smartrecruiters.com',
+  'jobs.jobvite.com',
+]);
+const siteInput = z
+  .object({
+    companyId: z.uuid(),
+    site: z
+      .string()
+      .max(300)
+      .regex(/^https?:\/\/[^/\s`]+(?:\/[^/\s`]+)?$/),
+  })
+  .strict();
+
+export function applySite(url: string) {
+  let page: URL;
+  try {
+    page = new URL(url);
+  } catch {
+    return null;
+  }
+  if (page.protocol !== 'https:' && page.protocol !== 'http:') return null;
+  const first = page.pathname.split('/').find(Boolean);
+  return sharedHosts.has(page.hostname.toLowerCase()) && first
+    ? `${page.origin}/${first.toLowerCase()}`
+    : page.origin;
+}
 
 function plainName(value: string) {
   return value
@@ -48,6 +104,7 @@ export function createJobApply(options: {
   startAutomatic: (client: PoolClient, start: StartWork) => Promise<string[]>;
   posting: (client: Query, id: string) => Promise<JobPosting>;
   profileName: (client: Query) => Promise<string>;
+  portals: (client: Query) => Promise<Record<string, unknown>>;
   artifacts: Pick<ArtifactService, 'retainArtifacts' | 'storeArtifact'>;
   workspace?: {
     write(threadId: string, path: string, bytes: Uint8Array, signal?: AbortSignal): Promise<void>;
@@ -191,6 +248,89 @@ export function createJobApply(options: {
     return { posting: saved, uploadFile: `/workspace/${turn.threadId}/${upload}` };
   }
 
+  async function trackedSites(client: Query, key: string) {
+    const tracked = (await options.portals(client)).tracked_companies;
+    return (Array.isArray(tracked) ? tracked : []).flatMap((entry: unknown) => {
+      const item = (entry ?? {}) as { name?: unknown; careers_url?: unknown };
+      if (typeof item.name !== 'string' || typeof item.careers_url !== 'string') return [];
+      if (companyKey(item.name) !== key) return [];
+      const site = applySite(item.careers_url);
+      return site ? [site] : [];
+    });
+  }
+
+  async function siteStep(
+    turn: TurnRef,
+    request: SiteStep,
+    ask: (args: { companyId: string; site: string }) => Promise<unknown>,
+  ) {
+    const chat = await applyChatOf(pool, ownerId, turn);
+    if (!chat) return undefined;
+    const company = (
+      await pool.query<{ name: string; key: string; apply_origins: string[] }>(
+        'SELECT name,key,apply_origins FROM job_companies WHERE owner_id=$1 AND id=$2',
+        [ownerId, chat.companyId],
+      )
+    ).rows[0];
+    if (!company) return undefined;
+    const site = applySite(request.page.url) ?? request.page.origin;
+    if (
+      company.apply_origins.includes(site) ||
+      (await trackedSites(pool, company.key)).includes(site)
+    )
+      return undefined;
+    const declined = await pool.query(
+      `SELECT 1 FROM approvals a JOIN turns u ON u.id=a.turn_id AND u.owner_id=a.owner_id
+       WHERE a.owner_id=$1 AND u.session_id=$2 AND a.action=$3 AND a.status='declined'
+         AND a.args->>'companyId'=$4 AND a.args->>'site'=$5 LIMIT 1`,
+      [ownerId, chat.sessionId, applySiteAction, chat.companyId, site],
+    );
+    if (declined.rowCount)
+      throw failure(
+        `The owner said no to applying at ${companyLabel(company.name)} on ${site}. Enter nothing on that site for this company: find the job on the company's own careers site, or stop and say why.`,
+        403,
+      );
+    if (request.subagent) return 'refused' as const;
+    return ask({ companyId: chat.companyId, site });
+  }
+
+  async function siteQuestion(raw: unknown) {
+    const { companyId, site } = parse(siteInput, raw, 'The careers site');
+    const name = (
+      await pool.query<{ name: string }>(
+        'SELECT name FROM job_companies WHERE owner_id=$1 AND id=$2',
+        [ownerId, companyId],
+      )
+    ).rows[0]?.name;
+    if (name === undefined) throw failure('Company not found.', 404);
+    const company = companyLabel(name);
+    return {
+      question: `Apply at ${company} on \`${site}\`? Nod would enter your details and upload your CV on that site. Say yes only if it is ${company}'s own careers site.`,
+      action: 'Apply on this site',
+    };
+  }
+
+  async function approveSite(raw: unknown, turn: TurnRef, client: PoolClient) {
+    const { companyId, site } = parse(siteInput, raw, 'The careers site');
+    await options.lock(client);
+    const chat = await applyChatOf(client, ownerId, turn);
+    if (chat?.companyId !== companyId)
+      throw Object.assign(
+        failure("Only this company's own apply chat can approve a careers site for it.", 403),
+        { notRun: true },
+      );
+    await client.query(
+      `UPDATE job_companies SET apply_origins=CASE WHEN $3=ANY(apply_origins) THEN apply_origins
+         ELSE array_append(apply_origins,$3) END,updated_at=now() WHERE owner_id=$1 AND id=$2`,
+      [ownerId, companyId, site],
+    );
+    afterCommit(client, options.changed);
+    return {
+      approved: site,
+      next: 'The owner approved this site for this company. Do the step again; it still goes through the trust check.',
+    };
+  }
+
   function handles(raw: unknown) {
     const action =
       raw && typeof raw === 'object' ? (raw as { action?: unknown }).action : undefined;
@@ -204,5 +344,17 @@ export function createJobApply(options: {
     return untrustedBlock('job search records', JSON.stringify(value));
   }
 
-  return { detect, soon, watch, handles, execute };
+  const isApplyChat = async (turn: TurnRef) => Boolean(await applyChatOf(pool, ownerId, turn));
+
+  return {
+    detect,
+    soon,
+    watch,
+    handles,
+    execute,
+    isApplyChat,
+    siteStep,
+    siteQuestion,
+    approveSite,
+  };
 }

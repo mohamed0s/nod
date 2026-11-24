@@ -182,6 +182,7 @@ export interface RuntimeContext {
   credentialRequests?: Array<
     Pick<CredentialRequest, 'turnId' | 'origin' | 'label' | 'kind' | 'status' | 'notEntered'>
   >;
+  checkTyping?: boolean;
   taskContext?: {
     id: string;
     title: string;

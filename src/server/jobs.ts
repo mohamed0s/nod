@@ -423,6 +423,7 @@ export function createJobs(options: {
     startAutomatic: companies.startAutomatic,
     posting: postings.one,
     profileName: async (client) => (await profileState(client)).profile.name,
+    portals: async (client) => (await profileState(client)).portals,
     artifacts: options.artifacts,
     ...(options.workspace ? { workspace: options.workspace } : {}),
     turnWrite,
@@ -1307,7 +1308,13 @@ export function createJobs(options: {
     helperAccess: helper.exempt,
     setup: () => setup(pool),
     drafts: { idle: drafts.idle },
-    apply: { detect: apply.detect },
+    apply: {
+      detect: apply.detect,
+      isApplyChat: apply.isApplyChat,
+      siteStep: apply.siteStep,
+      siteQuestion: apply.siteQuestion,
+      approveSite: apply.approveSite,
+    },
     initialize: async () => {
       await drafts
         .initialize()

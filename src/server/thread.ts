@@ -253,6 +253,7 @@ export interface ThreadDependencies {
     priorHandoff?: boolean,
   ) => Promise<unknown>;
   taskContext?: (turn: TurnRef) => Promise<RuntimeContext['taskContext']>;
+  checkTyping?: (turn: TurnRef) => Promise<boolean>;
   settleTask?: (turn: TurnRef, result: string) => Promise<void>;
   taskLedger?: (threadId: string) => Promise<NonNullable<RuntimeContext['tasks']>>;
   startTurn?: (turn: TurnRef) => Promise<void>;
@@ -2332,6 +2333,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     await dependencies.startTurn?.(ref);
     const taskContext = await dependencies.taskContext?.(ref);
     if (taskContext?.messageId) ref.taskMessageId = taskContext.messageId;
+    const checkTyping = Boolean(taskContext && (await dependencies.checkTyping?.(ref)));
     const tasks = await dependencies.taskLedger?.(threadId);
     const workspacePath = join(dataRoot, 'workspaces', threadId);
     await mkdir(workspacePath, { recursive: true });
@@ -2535,6 +2537,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       speech,
       ...(proactivity ? { proactivity } : {}),
       taskContext,
+      ...(checkTyping ? { checkTyping } : {}),
       tasks,
       ...(checkIn ? { checkIn } : {}),
       ...(limit ? { spendingLimitReached: { monthlyUsd: limit.monthlyUsd } } : {}),

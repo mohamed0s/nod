@@ -229,6 +229,7 @@ import type { VaultActivityReason } from '../shared/contracts.ts';
 import { createTriage, getPreferences } from './triage.ts';
 import { createTasks } from './tasks.ts';
 import { createJobs, jobLimitsInput } from './jobs.ts';
+import { applySiteAction } from './job-apply.ts';
 import { createPages } from './pages.ts';
 import { createActivity, createActivityLine } from './activity.ts';
 import {
@@ -1678,9 +1679,12 @@ async function initializeApplication(
         action === 'NOD_model_select' ||
         action.startsWith('NOD_memory_') ||
         action === 'NOD_notification_preferences_update';
-      if (action === 'NOD_jobs_limits_update') {
-        const result = await withTurnLock(turnLock, (client) =>
-          jobs.applyLimits(args, client, provenance.details?.current),
+      if (action === 'NOD_jobs_limits_update' || action === applySiteAction) {
+        const turn = { threadId: provenance.threadId, turnId: provenance.turnId };
+        const result = await withTurnLock<unknown>(turnLock, (client) =>
+          action === applySiteAction
+            ? jobs.apply.approveSite(args, turn, client)
+            : jobs.applyLimits(args, client, provenance.details?.current),
         );
         await ledger.action(
           provenance.turnId,
@@ -2042,6 +2046,7 @@ async function initializeApplication(
         return;
       if (action === 'NOD_limits_update') limitsInput.parse(args);
       else if (action === 'NOD_jobs_limits_update') jobLimitsInput.parse(args);
+      else if (action === applySiteAction) await jobs.apply.siteQuestion(args);
       else if (action.startsWith('NOD_')) {
         if (
           ['NOD_schedule_update', 'NOD_schedule_pause', 'NOD_schedule_cancel'].includes(action) &&
@@ -2054,7 +2059,10 @@ async function initializeApplication(
       } else await integrations.prepare(ownerId, action, args, undefined, undefined, false, client);
     },
     (reply) => ledger.forOwner(() => trust.answer(reply)),
-    communication.describe,
+    (proposal, signal) =>
+      proposal.action === applySiteAction
+        ? jobs.apply.siteQuestion(proposal.args)
+        : communication.describe(proposal, signal),
     captureAnalytics,
     createErrorRedactor(secrets),
     (input, signal) => ledger.forOwner(() => trust.classifyRepeatedAction(input, signal)),
@@ -2633,6 +2641,7 @@ async function initializeApplication(
       recall: personal.recall,
       learnedSkills: learnedSkills.index,
       taskContext: tasks.context,
+      checkTyping: jobs.apply.isApplyChat,
       settleTask: tasks.settle,
       taskLedger: tasks.read,
       task: async (turn, raw, sourceMessageId, priorMessageId, priorHandoff) => {
@@ -2702,8 +2711,25 @@ async function initializeApplication(
         }
       },
       browserStep: async (turn, request, signal) => {
+        const site = async () => {
+          const asked = await jobs.apply.siteStep(turn, request, (target) =>
+            approvals.request(turn, applySiteAction, target, { signal }),
+          );
+          return asked === undefined || asked === 'refused'
+            ? asked
+            : asked && typeof asked === 'object' && appConfirmation in asked
+              ? (asked as { [appConfirmation]: string })
+              : { result: asked };
+        };
+        const step = request.step;
+        if (step.action === 'fill' || (step.action === 'type' && !/[\r\n]/.test(step.text ?? '')))
+          return (await site()) ?? 'run';
         const args = browserStepArgs(request);
         const verdict = await trust.check(turn, 'NOD_browser', args, signal);
+        if (verdict.confirm || verdict.basis.kind !== 'read' || step.action === 'upload') {
+          const asked = await site();
+          if (asked !== undefined) return asked;
+        }
         const prepareConfirmation = async () => {
           const control = request.page.controls?.[0];
           const namedControl =

@@ -17,6 +17,14 @@ export function parse<T extends z.ZodType>(schema: T, value: unknown, what: stri
   throw failure(`${what}${path ? ` (${path})` : ''}: ${issue.message}`);
 }
 
+export function companyLabel(name: string) {
+  const text = name
+    .replace(/[^\p{L}\p{N} .,&'()-]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return [...text].slice(0, 40).join('').trim() || 'this company';
+}
+
 export async function applyChatOf(client: Query, ownerId: string, turn: TurnRef) {
   const { rows } = await client.query<{ company_id: string; session_id: string }>(
     `SELECT c.id AS company_id,u.session_id FROM turns u
