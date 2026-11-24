@@ -456,7 +456,7 @@ function PersonCard({
 function noLuckText(company: JobCompany, limits: Limits, format: ReturnType<typeof useDateFormat>) {
   const since = company.noLuck.since ? formatDateTime(company.noLuck.since, format) : '';
   const rule = `you invited ${plural(limits.waves.max, 'person', 'people')} there and none of them helped: nobody accepted within ${plural(limits.noAcceptDays, 'day')}, or replied within ${plural(limits.noReplyDays, 'day')} of being asked`;
-  const applies = `opens one chat to apply on the company's own careers site, for at most ${plural(limits.apply.daily, 'company', 'companies')} a day, and submits nothing without your yes unless your rules say otherwise`;
+  const applies = `opens one chat to apply on the company's own careers site, for at most ${plural(limits.apply.daily, 'company', 'companies')} a day, and asks you before each final Submit while your rule says so`;
   if (company.noLuck.choice === 'no_luck')
     return `You marked it no luck${since ? ` on ${since}` : ''}. Nod opens one chat to apply on the company's own careers site.`;
   if (company.noLuck.choice === 'keep_trying')

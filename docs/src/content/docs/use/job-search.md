@@ -169,7 +169,7 @@ A chat Nod starts by itself carries no words from you, so only your [rules](/tru
 
 > When a company is marked no luck, apply to its matching jobs on its own careers site with a tailored CV. Ask me before the final Submit.
 
-With the rule, Nod fills in the forms on the company's own site and asks you before each final Submit. Without it, a chat Nod started by itself only chooses the postings and checks for an earlier application, which costs little, tells you once what the rule would let it do, and stops. Reply in that chat, or tick **No luck, apply here**, to let it continue there. In a chat you ticked, your tick asks Nod to apply at that company, and the [trust check](/trust/approvals/) asks you about any step it doesn't cover.
+With the rule, Nod fills in the forms on the company's own site and asks you before each final Submit, because the rule says so. If you change your rule, the trust check follows the new wording: keep "Ask me before the final Submit" in it unless you want Nod to submit by itself. Without it, a chat Nod started by itself only chooses the postings and checks for an earlier application, which costs little, tells you once what the rule would let it do, and stops. Reply in that chat, or tick **No luck, apply here**, to let it continue there. In a chat you ticked, your tick asks Nod to apply at that company, and the [trust check](/trust/approvals/) asks you about any step it doesn't cover.
 
 ### What Nod does
 
@@ -181,12 +181,12 @@ For each posting, at most 2 at a company (**Applications a company, at most**):
 4. **Makes a tailored CV** from your main CV, which must pass career-ops' fact and ATS checks. Your main CV doesn't change.
 5. **Prepares an answer sheet** from your CV and profile. An answer your files don't give stays blank, and Nod lists it for you.
 6. **Signs in or creates an account** only through [Vault](/trust/vault/) and the trust check. A CAPTCHA is handed to you in Nod's browser.
-7. **Fills in the form and stops before the final Submit.** Nod shows you in the chat what it will send: the posting, the form page's exact address, each field, the blanks and the CV file. Your yes to the question that follows submits it, once. After a no, it stays unsent.
+7. **Fills in the form and stops before the final Submit.** Nod shows you in the chat what it will send: the posting, the form page's exact address, each field, the blanks and the CV file. While your rule or your tick asks for it, as the rule above and the tick do, Nod asks you, and your yes to that question submits it, once. After a no, it stays unsent.
 8. **Records it.** After a confirmed submit, the posting shows **Applied on** with its date, the site's reference and the tailored CV. A submit that failed or was interrupted may still have gone through, so Nod never repeats it: it looks for a confirmation on the site or in your email instead.
 
 ### What Nod asks you first
 
-- Every final Submit.
+- Every final Submit, while your rule or your tick says so, as the rule above and the tick do.
 - The first time it enters anything on a site for a company, as [What Nod does](#what-nod-does) lists.
 - Creating an account on a careers site, unless your rule or your words say Nod may.
 - A required answer your CV and profile don't give.
@@ -195,7 +195,7 @@ For each posting, at most 2 at a company (**Applications a company, at most**):
 ### What Nod never does
 
 - Open LinkedIn, or use Easy Apply or a job board's own apply button.
-- Apply to every matching posting at once: each submission is its own decision, and Nod's guide keeps to your limit for each company. Nothing on the server counts it; your yes to each final Submit is what holds it.
+- Apply to every matching posting at once: each submission is its own decision, and Nod's guide keeps to your limit for each company. Nothing on the server counts it; while your rule asks before each final Submit, your yes is what holds it.
 - Guess a legal answer: work authorization or sponsorship, willingness to relocate, salary, legal declarations, accommodation choices, or disability, veteran and demographic questions. It keeps pay period, currency and base versus total pay apart, and notes when "remote" has a country or time-zone limit.
 - Submit the same application twice.
 

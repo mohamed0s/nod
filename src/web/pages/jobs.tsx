@@ -651,8 +651,8 @@ function Profile() {
       </div>
       <p className="field-hint">
         When a company counts as no luck, Nod opens one chat to apply on its own careers site, at
-        most this many a day in your time zone, and 0 turns this off. It submits nothing without
-        your yes, unless your rules say otherwise.
+        most this many a day in your time zone, and 0 turns this off. It asks you before each final
+        Submit while your rule says so, as the rule in the job search help does.
       </p>
       {message && <Notice kind={message.kind}>{message.text}</Notice>}
       <div className="jobs-actions">
