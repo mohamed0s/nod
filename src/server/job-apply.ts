@@ -122,10 +122,11 @@ export function createJobApply(options: {
   let chain: Promise<unknown> = Promise.resolve();
   let watching = false;
   let pending: ReturnType<typeof setTimeout> | undefined;
+  let failing: string | undefined;
 
   async function pass() {
     const automatic = options.automatic;
-    if (!automatic || !(automatic.ready?.() ?? true)) return [];
+    if (!automatic || !(automatic.ready?.() ?? true) || (await automatic.paused?.())) return [];
     return transaction(async (client) => {
       await automatic.lock(client);
       await options.lock(client);
@@ -141,12 +142,25 @@ export function createJobApply(options: {
     return run;
   }
 
+  function attempt() {
+    detect().then(
+      () => {
+        failing = undefined;
+      },
+      (error: unknown) => {
+        const reason = error instanceof Error ? error.message : String(error);
+        if (reason !== failing) logFailure('job_apply_start_failed', error);
+        failing = reason;
+      },
+    );
+  }
+
   function soon() {
-    if (!watching || options.signal?.aborted) return;
+    if (!watching || failing !== undefined || options.signal?.aborted) return;
     if (pending) clearTimeout(pending);
     pending = setTimeout(() => {
       pending = undefined;
-      detect().catch((error: unknown) => logFailure('job_apply_start_failed', error));
+      attempt();
     }, settle);
     pending.unref?.();
   }
@@ -154,7 +168,9 @@ export function createJobApply(options: {
   function watch() {
     if (watching || !options.automatic || options.signal?.aborted) return;
     watching = true;
-    const timer = setInterval(soon, checkEvery);
+    const timer = setInterval(() => {
+      if (!options.signal?.aborted) attempt();
+    }, checkEvery);
     timer.unref?.();
     options.signal?.addEventListener(
       'abort',

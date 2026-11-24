@@ -1256,6 +1256,7 @@ async function initializeApplication(
       start: tasks.startWork,
       lock: (client) => lockThread(client),
       ready: () => adapters.model.configured,
+      paused: async () => (await getPreferences()).proactivePaused,
     },
     signal: closing.signal,
     changed: () => jobsChanged(ownerId),
