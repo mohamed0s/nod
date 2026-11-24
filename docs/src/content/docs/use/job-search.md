@@ -155,6 +155,37 @@ Tick **No luck, apply here** on a company to give up on referrals there. Nod ope
 
 Applying on a company's own site comes in a later update. For now that chat lists the company's open postings with their scores and links, and Nod asks you before anything is submitted.
 
+## A paired browser helper
+
+A browser helper is a companion you install separately; it isn't part of Nod or of this fork. Once paired, it reaches Nod through a few routes of its own, only on this computer, and can:
+
+- log people you invited, under their company;
+- add the LinkedIn member ID of someone you invited who has none yet, so **Message** can open a chat;
+- mark people you invited as accepted, from a list of their profile links;
+- show a company's people, and the invites you sent in the last day and the last 7 days against the invite limits on the **Profile** tab;
+- show who accepted and is waiting for your message, with the prepared message, its language, what Nod changed and why, and the company's wave;
+- switch the language of a person's message, which makes it again, unless you edited it;
+- make the message for someone who accepted before Nod prepared messages;
+- download your main CV;
+- change a person's status, and tick **No luck, apply here**, which works like the box on the **Companies** tab.
+
+Its key opens nothing else in Nod.
+
+### Pair a helper
+
+1. On the **Jobs** page, open **Helper** and select **Pair a helper**. Nod shows a one-time code and copies it.
+2. Run the helper's own pairing script, as its instructions say. It proves it has the code without sending it, and Nod sends the helper's key back encrypted under the code, so a program pretending to be Nod learns neither.
+
+A code works once, for 10 minutes, and five wrong codes cancel it. Pairing the same helper again replaces its old key. The **Helper** tab lists paired helpers with when each was last used, and **Revoke** cuts one off at once.
+
+A helper works only with a Nod that listens only on this computer, and reaches it only at `127.0.0.1`: the desktop app, or a source run whose server listens on `127.0.0.1` itself. A server in a container, or a self-hosted server with a public address or a server token, can't use one. The desktop app uses port `4310` when it's free, so a helper finds Nod after every restart, and writes its port, process ID and program path to `engine-port.json` in its profile at each start, so a pairing script can check that it's talking to the app. If Nod had to take another port, pair the helper again.
+
+### What Nod accepts from a helper
+
+Nod treats everything a helper sends as data, never as your words. Names and headlines are saved as plain text, profile links must be `https://www.linkedin.com/in/…`, and anything too long or shaped differently is refused. Someone Nod already has keeps their status and company. A helper never replaces a member ID Nod already has or joins two people into one; Nod refuses it and keeps both as they are. A list of profile links marks only people you invited as accepted; nobody else is saved.
+
+Each paired helper can start at most 5 apply chats and add at most 30 new companies in a day. Past that, Nod answers with the time until the limit frees up. To save an invite at a new company sooner, or to start another apply chat, use the **Companies** tab or tell Nod in chat.
+
 ## Job mail
 
 Nod can read the job mail in your Gmail and keep the **Companies** tab current for you: who accepted your invite, who replied on LinkedIn, and which companies answered your application. It reads three kinds of email:
@@ -202,37 +233,6 @@ Once you asked someone for a referral, Nod offers the **Weekly job report** once
 - what leads to replies: everyone you invited so far, by how far they got, with each step's rate, overall and by template version, message language and company.
 
 Nod makes the page from your records, so its numbers are counted, not estimated.
-
-## A paired browser helper
-
-A browser helper is a companion you install separately; it isn't part of Nod or of this fork. Once paired, it reaches Nod through a few routes of its own, only on this computer, and can:
-
-- log people you invited, under their company;
-- add the LinkedIn member ID of someone you invited who has none yet, so **Message** can open a chat;
-- mark people you invited as accepted, from a list of their profile links;
-- show a company's people, and the invites you sent in the last day and the last 7 days against the invite limits on the **Profile** tab;
-- show who accepted and is waiting for your message, with the prepared message, its language, what Nod changed and why, and the company's wave;
-- switch the language of a person's message, which makes it again, unless you edited it;
-- make the message for someone who accepted before Nod prepared messages;
-- download your main CV;
-- change a person's status, and tick **No luck, apply here**, which works like the box on the **Companies** tab.
-
-Its key opens nothing else in Nod.
-
-### Pair a helper
-
-1. On the **Jobs** page, open **Helper** and select **Pair a helper**. Nod shows a one-time code and copies it.
-2. Run the helper's own pairing script, as its instructions say. It proves it has the code without sending it, and Nod sends the helper's key back encrypted under the code, so a program pretending to be Nod learns neither.
-
-A code works once, for 10 minutes, and five wrong codes cancel it. Pairing the same helper again replaces its old key. The **Helper** tab lists paired helpers with when each was last used, and **Revoke** cuts one off at once.
-
-A helper works only with a Nod that listens only on this computer, and reaches it only at `127.0.0.1`: the desktop app, or a source run whose server listens on `127.0.0.1` itself. A server in a container, or a self-hosted server with a public address or a server token, can't use one. The desktop app uses port `4310` when it's free, so a helper finds Nod after every restart, and writes its port, process ID and program path to `engine-port.json` in its profile at each start, so a pairing script can check that it's talking to the app. If Nod had to take another port, pair the helper again.
-
-### What Nod accepts from a helper
-
-Nod treats everything a helper sends as data, never as your words. Names and headlines are saved as plain text, profile links must be `https://www.linkedin.com/in/…`, and anything too long or shaped differently is refused. Someone Nod already has keeps their status and company. A helper never replaces a member ID Nod already has or joins two people into one; Nod refuses it and keeps both as they are. A list of profile links marks only people you invited as accepted; nobody else is saved.
-
-Each paired helper can start at most 5 apply chats and add at most 30 new companies in a day. Past that, Nod answers with the time until the limit frees up. To save an invite at a new company sooner, or to start another apply chat, use the **Companies** tab or tell Nod in chat.
 
 ## Who can change job records
 
