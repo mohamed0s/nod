@@ -201,7 +201,7 @@ let setupWindowLoaded;
 let engineWindow;
 let engineFocusRequested = false;
 let resumeWindow;
-let resumePort;
+let resumePort = 4310;
 let pendingFeedback = false;
 let startupFeedbackOpen = false;
 let engine;
@@ -2954,6 +2954,11 @@ async function startEngine({ runtime, signal, pending = false }) {
     if (engine === child && message?.type === 'nod-ready' && message.port === port) {
       engineBound = true;
       deadline = Date.now() + 120_000;
+      void writeFile(
+        join(profileRoot, 'engine-port.json'),
+        JSON.stringify({ port, pid: child.pid, executable: process.execPath }),
+        { mode: 0o600 },
+      ).catch(() => {});
     }
     if (engine === child && message?.type === 'nod-starting') {
       const next = startupEventFacts(undefined, { step: message.step }).step;

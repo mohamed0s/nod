@@ -21,10 +21,11 @@ import { subscribeAppEvents } from '../lib/app-events';
 import { pageDataCache } from '../lib/page-data-cache';
 import { formatDateTime, useDateFormat } from '../lib/date-format';
 import { Companies, refreshCompanies } from './jobs-companies';
+import { Helper, helperPath } from './jobs-helper';
 import { Postings, refreshPostings, Sources } from './jobs-postings';
 import './jobs.css';
 
-type View = 'postings' | 'companies' | 'cvs' | 'profile' | 'templates' | 'sources';
+type View = 'postings' | 'companies' | 'cvs' | 'profile' | 'templates' | 'sources' | 'helper';
 type Message = { kind: 'info' | 'success' | 'error'; text: string } | null;
 
 const checklist: Record<JobSetup['items'][number]['key'], string> = {
@@ -36,7 +37,13 @@ const checklist: Record<JobSetup['items'][number]['key'], string> = {
 const send = <T,>(path: string, method: string, body?: unknown) =>
   api<T>(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 
-const jobPaths = ['/api/jobs/setup', '/api/jobs/cvs', '/api/jobs/profile', '/api/jobs/templates'];
+const jobPaths = [
+  '/api/jobs/setup',
+  '/api/jobs/cvs',
+  '/api/jobs/profile',
+  '/api/jobs/templates',
+  helperPath,
+];
 const refreshAll = () => {
   for (const path of jobPaths) void pageDataCache.refresh(path, true);
   refreshPostings();
@@ -932,6 +939,7 @@ export function Jobs() {
           { value: 'profile', label: 'Profile' },
           { value: 'templates', label: 'Templates' },
           { value: 'sources', label: 'Sources' },
+          { value: 'helper', label: 'Helper' },
         ]}
         onValueChange={setView}
       />
@@ -942,6 +950,7 @@ export function Jobs() {
         {view === 'postings' && <Postings />}
         {view === 'companies' && <Companies />}
         {view === 'sources' && <Sources />}
+        {view === 'helper' && <Helper />}
       </div>
     </div>
   );

@@ -2,6 +2,7 @@ import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmod, link, lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { loopbackHost } from '../shared/loopback.ts';
 
 const token = /^[A-Za-z0-9_-]{43}$/;
 
@@ -37,7 +38,13 @@ export const accessCookie = (port: number) => `nod-access-${port}`;
 export function registerLocalAccess(
   app: FastifyInstance,
   port: number,
-  access: { key: string; desktop?: boolean; origin?: string; bearer?: boolean },
+  access: {
+    key: string;
+    desktop?: boolean;
+    origin?: string;
+    bearer?: boolean;
+    helper?: (request: FastifyRequest) => Promise<boolean>;
+  },
 ) {
   const desktop = access.desktop === true;
   const origin = access.origin ? new URL(access.origin) : undefined;
@@ -48,6 +55,10 @@ export function registerLocalAccess(
         ? [origin.host]
         : ['localhost', '127.0.0.1', '[::1]'].map((name) => new URL(`http://${name}:${port}`).host),
   );
+  const helper =
+    desktop || (!access.bearer && (!origin || loopbackHost(origin.hostname)))
+      ? access.helper
+      : undefined;
   const expected = Buffer.from(access.key);
   const cookie = accessCookie(port);
   const matches = (value: unknown) => {
@@ -94,6 +105,7 @@ export function registerLocalAccess(
     const path = request.url.split('?')[0];
     if (!hosts.has(request.headers.host || ''))
       return reply.code(403).send({ error: 'This host is not permitted.' });
+    if (await helper?.(request)) return;
     if (
       !desktop &&
       request.method === 'POST' &&

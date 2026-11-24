@@ -15,7 +15,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import Fastify from 'fastify';
+import Fastify, { type FastifyRequest } from 'fastify';
 import { parseFragment, type DefaultTreeAdapterMap } from 'parse5';
 import pg from 'pg';
 import { createElement } from 'react';
@@ -1507,6 +1507,55 @@ test('localhost access requires the owner key and rejects foreign Host, Origin a
   } finally {
     await app.close();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a helper hook skips the owner key only on a loopback server, after the host check', async (t) => {
+  const key = randomBytes(32).toString('base64url');
+  const helper = async (request: FastifyRequest) => {
+    const kind = (request.routeOptions.config as { helper?: string } | undefined)?.helper;
+    if (!kind) return false;
+    if (request.headers['x-synthetic-helper'] !== 'paired')
+      throw Object.assign(new Error('Pair the helper again.'), { statusCode: 401 });
+    return true;
+  };
+  for (const [name, access, host, owner, open] of [
+    ['desktop', { desktop: true }, '127.0.0.1:4310', { 'x-nod-desktop-token': key }, true],
+    ['local', {}, 'localhost:4310', { cookie: `${accessCookie(4310)}=${key}` }, true],
+    [
+      'local container',
+      { origin: 'http://localhost:4310' },
+      'localhost:4310',
+      { cookie: `${accessCookie(4310)}=${key}` },
+      true,
+    ],
+    [
+      'public',
+      { origin: 'https://nod.example', bearer: true },
+      'nod.example',
+      { authorization: `Bearer ${key}` },
+      false,
+    ],
+    ['server token', { bearer: true }, 'localhost:4310', { authorization: `Bearer ${key}` }, false],
+  ] as const) {
+    const app = Fastify();
+    t.after(() => app.close());
+    registerLocalAccess(app, 4310, { key, helper, ...access });
+    app.post('/api/helper/fixture', { config: { helper: 'paired' } }, async () => ({ ok: true }));
+    app.post('/api/helper-pairing/start', { config: { helper: 'pairing' } }, async () => ({
+      ok: true,
+    }));
+    app.post('/api/helper/unflagged', async () => ({ ok: true }));
+    const post = async (url: string, headers: Record<string, string>) =>
+      (await app.inject({ method: 'POST', url, headers })).statusCode;
+    const paired = { host, 'x-synthetic-helper': 'paired' };
+    for (const url of ['/api/helper/fixture', '/api/helper-pairing/start']) {
+      assert.equal(await post(url, paired), open ? 200 : 401, `${name} ${url}`);
+      assert.equal(await post(url, { host }), 401, `${name} ${url}`);
+      assert.equal(await post(url, { ...paired, host: 'attacker.example:4310' }), 403, name);
+    }
+    assert.equal(await post('/api/helper/unflagged', paired), 401, name);
+    assert.equal(await post('/api/helper/unflagged', { host, ...owner }), 200, name);
   }
 });
 

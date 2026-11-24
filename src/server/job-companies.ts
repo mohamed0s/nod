@@ -277,6 +277,8 @@ const personEntry = z
     message: 'Give company or companyId, not both.',
   });
 type PersonEntry = z.infer<typeof personEntry>;
+type LinkedInCompany = { slug?: string; name?: string };
+type SeenPerson = { profileUrl: string; memberUrn?: string; name: string; headline: string };
 
 const toolInput = z.discriminatedUnion('action', [
   z
@@ -847,6 +849,189 @@ export function createJobCompanies(options: {
     return { company: await company(pool, id), apply };
   }
 
+  function updatePerson(
+    id: string,
+    next: Parameters<typeof change>[2],
+    revision: number,
+  ): Promise<JobPerson> {
+    return options.owned(async (client) => {
+      const current = await onePerson(client, id);
+      if (current.revision !== revision)
+        throw failure(
+          'This person changed since you loaded the company. Reload it, then make your change again.',
+          409,
+        );
+      return personView(await change(client, current, next, 'The person'));
+    });
+  }
+
+  async function seenPerson(client: Query, key: string, urn: string | null, label: string) {
+    const { rows } = await client.query<PersonRow>(
+      `SELECT * FROM job_people WHERE owner_id=$1
+         AND (profile_key=$2 OR ($3::text IS NOT NULL AND (member_urn=$3 OR profile_key=$3)))
+       ORDER BY created_at,id FOR UPDATE`,
+      [ownerId, key, urn],
+    );
+    if (rows.length > 1)
+      throw failure(
+        `${label}: the profile ${key} and the member id ${urn} belong to different people in the job search, so Nod changed neither.`,
+        409,
+      );
+    const person = rows[0];
+    if (!person) return undefined;
+    if (urn && person.member_urn && person.member_urn !== urn)
+      throw failure(
+        `${label}: ${person.profile_key} already has another member id, so Nod kept it.`,
+        409,
+      );
+    if (!memberId.test(key) && !memberId.test(person.profile_key) && person.profile_key !== key)
+      throw failure(
+        `${label}: the member id ${urn} belongs to ${person.profile_key}, not ${key}, so Nod changed neither.`,
+        409,
+      );
+    return person;
+  }
+
+  async function onLinkedIn(client: Query, page: LinkedInCompany) {
+    const bySlug = page.slug
+      ? (
+          await client.query<{ id: string }>(
+            'SELECT id FROM job_companies WHERE owner_id=$1 AND linkedin_slug=$2',
+            [ownerId, page.slug],
+          )
+        ).rows[0]?.id
+      : undefined;
+    if (bySlug) return bySlug;
+    const key = page.name ? keyOf(page.name) : '';
+    if (!key) return null;
+    return (
+      (
+        await client.query<{ id: string }>(
+          'SELECT id FROM job_companies WHERE owner_id=$1 AND key=$2',
+          [ownerId, key],
+        )
+      ).rows[0]?.id ?? null
+    );
+  }
+
+  async function pageCompany(client: Query, page: LinkedInCompany) {
+    const id = await onLinkedIn(client, page);
+    if (!id) return null;
+    const { postings: _postings, ...view } = await company(client, id);
+    return view;
+  }
+
+  async function logInvites(
+    client: Query,
+    page: LinkedInCompany & { name: string },
+    people: SeenPerson[],
+  ) {
+    const companyId =
+      (await onLinkedIn(client, page)) ?? (await ensureCompany(client, ownerId, page.name));
+    if (!companyId)
+      throw failure(`"${page.name}" isn't a company name Nod can use, so the invite wasn't saved.`);
+    if (page.slug)
+      await client.query(
+        `UPDATE job_companies SET linkedin_slug=$3 WHERE owner_id=$1 AND id=$2 AND linkedin_slug IS NULL
+           AND NOT EXISTS (SELECT 1 FROM job_companies o WHERE o.owner_id=$1 AND o.linkedin_slug=$3)`,
+        [ownerId, companyId, page.slug],
+      );
+    const saved = [];
+    for (const [index, person] of people.entries()) {
+      const profile = linkedInPerson(person.profileUrl);
+      if (!profile) throw failure(`people.${index}: profileUrl isn't a LinkedIn profile link.`);
+      const urn = person.memberUrn ?? profile.urn;
+      const known = await seenPerson(client, profile.key, urn, `people.${index}`);
+      const { created, row } = await savePerson(
+        client,
+        known
+          ? {
+              id: known.id,
+              profileUrl: person.profileUrl,
+              ...(urn ? { memberUrn: urn } : {}),
+              ...(known.name ? {} : { name: person.name }),
+              ...(known.headline ? {} : { headline: person.headline }),
+            }
+          : {
+              profileUrl: person.profileUrl,
+              ...(urn ? { memberUrn: urn } : {}),
+              name: person.name,
+              headline: person.headline,
+              companyId,
+              status: 'invited',
+            },
+        `people.${index}`,
+      );
+      saved.push({ id: row.id, created, status: row.status, companyId: row.company_id });
+    }
+    return { companyId, saved };
+  }
+
+  async function acceptedPeople(client: Query) {
+    const { rows } = await client.query<PersonRow & { company_name: string }>(
+      `SELECT p.*,c.name AS company_name FROM job_people p
+       JOIN job_companies c ON c.owner_id=p.owner_id AND c.id=p.company_id
+       WHERE p.owner_id=$1 AND p.status='accepted'
+       ORDER BY p.accepted_at DESC NULLS LAST,p.id LIMIT 50`,
+      [ownerId],
+    );
+    return rows.map((row) => ({ ...personView(row), company: row.company_name }));
+  }
+
+  async function inviteCounts(client: Query) {
+    const { rows } = await client.query<{ today: number; week: number }>(
+      `SELECT count(*) FILTER (WHERE invited_at>now()-interval '1 day')::int AS today,
+         count(*) FILTER (WHERE invited_at>now()-interval '7 days')::int AS week
+       FROM job_people WHERE owner_id=$1`,
+      [ownerId],
+    );
+    return rows[0] ?? { today: 0, week: 0 };
+  }
+
+  async function profileTracked(client: Query, profileUrl: string, urn: string) {
+    const profile = linkedInPerson(profileUrl);
+    if (!profile || profile.urn)
+      throw failure(
+        'profileUrl needs the readable profile link, such as https://www.linkedin.com/in/example-name.',
+      );
+    return seenPerson(client, profile.key, urn, 'The profile');
+  }
+
+  async function pairProfile(client: Query, profileUrl: string, urn: string) {
+    const known = await profileTracked(client, profileUrl, urn);
+    if (!known) return null;
+    const { row } = await savePerson(
+      client,
+      { id: known.id, profileUrl, memberUrn: urn },
+      'The profile',
+    );
+    return row.id;
+  }
+
+  async function markAccepted(client: Query, profileUrls: string[], at?: string) {
+    const keys = [
+      ...new Set(
+        profileUrls.flatMap((url) => {
+          const profile = linkedInPerson(url);
+          return profile ? [profile.key] : [];
+        }),
+      ),
+    ];
+    if (!keys.length) return [];
+    const { rows } = await client.query<PersonRow>(
+      `SELECT * FROM job_people WHERE owner_id=$1 AND status='invited'
+         AND (profile_key=ANY($2::text[]) OR member_urn=ANY($2::text[]))
+       ORDER BY created_at,id FOR UPDATE`,
+      [ownerId, keys],
+    );
+    const accepted: string[] = [];
+    for (const row of rows)
+      accepted.push(
+        (await change(client, row, { status: 'accepted', ...(at ? { at } : {}) }, 'The person')).id,
+      );
+    return accepted;
+  }
+
   function handles(raw: unknown) {
     const action =
       raw && typeof raw === 'object' ? (raw as { action?: unknown }).action : undefined;
@@ -929,19 +1114,27 @@ export function createJobCompanies(options: {
         request.body,
         'The person change',
       );
-      return personView(
-        await options.owned(async (client) => {
-          const current = await onePerson(client, request.params.id);
-          if (current.revision !== revision)
-            throw failure(
-              'This person changed since you loaded the company. Reload it, then make your change again.',
-              409,
-            );
-          return change(client, current, next, 'The person');
-        }),
-      );
+      return updatePerson(request.params.id, next, revision);
     });
   }
 
-  return { handles, execute, registerRoutes };
+  return {
+    handles,
+    execute,
+    registerRoutes,
+    helper: {
+      find: onLinkedIn,
+      company: pageCompany,
+      invites: logInvites,
+      accepted: acceptedPeople,
+      inviteCounts,
+      updatePerson,
+      markNoLuck,
+      profileTracked,
+      pairProfile,
+      markAccepted,
+    },
+  };
 }
+
+export type JobCompaniesHelper = ReturnType<typeof createJobCompanies>['helper'];

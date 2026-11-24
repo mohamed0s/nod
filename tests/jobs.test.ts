@@ -1,13 +1,23 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  createHmac,
+  pbkdf2Sync,
+  randomBytes,
+  randomUUID,
+} from 'node:crypto';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import rateLimit from '@fastify/rate-limit';
 import Fastify from 'fastify';
 import pg from 'pg';
 import { appConfirmation } from '../src/ports/agent.ts';
+import { registerLocalAccess } from '../src/server/access.ts';
 import { runJobsTool } from '../src/runtime/jobs-tool.ts';
 import type { TelegramPost } from '../src/ports/job-sources.ts';
 import { telegramChannelPosts } from '../src/providers/public-web/telegram-channel.ts';
@@ -409,6 +419,581 @@ test(
       ['scan:full', '--since', '7', '--ats', 'greenhouse,lever,ashby'],
     ])
       assert.match(run(...args).stderr, /only inside a Nod workspace/, args.join(' '));
+  },
+);
+
+const helperFolder = join(import.meta.dirname, '..', 'extensions', 'linkedin-helper');
+const memberA = 'ACoAASyntheticMemberAAAA01';
+const memberB = 'ACoAASyntheticMemberBBBB02';
+const peopleTab = (second: string) => `<main>
+  <h1>Synthetic Example Co</h1>
+  <ul>
+    <li><section>
+      <div class="artdeco-entity-lockup__title"><a aria-label="View Sam Example’s profile" href="https://www.linkedin.com/in/sam-example/?miniProfileUrn=urn%3Ali%3Afs_miniProfile%3A${memberA}"><span class="visually-hidden">View Sam Example’s profile</span><div>Sam Example</div></a></div>
+      <div class="artdeco-entity-lockup__subtitle"><div>Synthetic engineer</div></div>
+      <button aria-label="Invite Sam Example to connect"><span>Connect</span></button>
+    </section></li>
+    <li><section>
+      <a href="/in/${memberB}"><img alt="Kim Example"></a>
+      <button id="kim"><span>${second}</span></button>
+    </section></li>
+    <li><section><div class="artdeco-entity-lockup__title">LinkedIn Member</div><button>Connect</button></section></li>
+  </ul>
+</main>`;
+
+const plain = (value: unknown) => JSON.parse(JSON.stringify(value ?? null));
+
+async function linkedInPage(url: string, body: string) {
+  const { JSDOM } = await import('jsdom');
+  const dom = new JSDOM(
+    `<!doctype html><title>(3) Synthetic Example Co | LinkedIn</title>${body}`,
+    {
+      url,
+      runScripts: 'outside-only',
+    },
+  );
+  const window = dom.window as unknown as Window & {
+    eval(source: string): unknown;
+    nodLinkedInReaders: Record<string, (...args: unknown[]) => unknown>;
+  };
+  window.eval(await readFile(join(helperFolder, 'readers.js'), 'utf8'));
+  return { dom, window, readers: window.nodLinkedInReaders };
+}
+
+test('the Edge helper reads synthetic LinkedIn markup without acting on the page', async () => {
+  const company = await linkedInPage(
+    'https://www.linkedin.com/company/synthetic-example/people/',
+    peopleTab('Pending'),
+  );
+  const { readers, window } = company;
+  assert.deepEqual(plain(readers.companyContext(window.document, window.location)), {
+    slug: 'synthetic-example',
+    name: 'Synthetic Example Co',
+  });
+  assert.equal(plain(readers.onPeopleTab(window.location)), true);
+  assert.deepEqual(plain(readers.peopleCards(window.document)), [
+    {
+      person: {
+        profileUrl: 'https://www.linkedin.com/in/sam-example/',
+        memberUrn: memberA,
+        name: 'Sam Example',
+        headline: 'Synthetic engineer',
+      },
+      pending: false,
+    },
+    {
+      person: {
+        profileUrl: `https://www.linkedin.com/in/${memberB}/`,
+        memberUrn: memberB,
+        name: 'Kim Example',
+        headline: '',
+      },
+      pending: true,
+    },
+  ]);
+  for (const href of [
+    'https://evil.example/in/sam-example',
+    'https://www.linkedin.com/in/sam-example/details/experience/',
+    'javascript:alert(1)',
+    'https://www.linkedin.com.evil.example/in/sam-example',
+  ])
+    assert.equal(plain(readers.profileLink(href)), null, href);
+
+  const profile = await linkedInPage(
+    'https://www.linkedin.com/in/sam-example/',
+    `<main><section><h1>Sam Example</h1>
+      <a href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3A${memberA}&recipient=${memberA}&screenContext=NON_SELF_PROFILE_VIEW">Message</a>
+      <a href="https://evil.example/messaging/compose/?recipient=${memberB}">Website</a>
+      <a href="/search/results/people/?recipient=${memberB}">Mutual connections</a>
+      <a href="/redir/redirect?url=https%3A%2F%2Fwww.linkedin.com%2Fmessaging%2Fcompose%2F%3Frecipient%3D${memberB}">Link</a>
+      <a href="/in/kim-example/?miniProfileUrn=urn%3Ali%3Afs_miniProfile%3A${memberB}">Kim Example</a>
+    </section><aside><a href="/messaging/compose/?recipient=${memberB}">Message</a></aside></main>`,
+  );
+  assert.deepEqual(
+    plain(profile.readers.profileIdentity(profile.window.document, profile.window.location)),
+    {
+      profileUrl: 'https://www.linkedin.com/in/sam-example/',
+      memberUrn: memberA,
+    },
+  );
+  const unclear = await linkedInPage(
+    'https://www.linkedin.com/in/sam-example/',
+    `<main><section><h1>Sam Example</h1>
+      <a href="/messaging/compose/?recipient=${memberA}">Message</a>
+      <a href="/messaging/compose/?recipient=${memberB}">Message</a></section></main>`,
+  );
+  assert.equal(
+    plain(unclear.readers.profileIdentity(unclear.window.document, unclear.window.location)),
+    null,
+  );
+
+  const list = await linkedInPage(
+    'https://www.linkedin.com/mynetwork/invite-connect/connections/',
+    `<header><a href="/in/owner-example/">Me</a></header><main><ul>
+      <li><a href="/in/sam-example/">Sam Example</a><a href="/in/sam-example/">Message</a></li>
+      <li><a href="https://www.linkedin.com/in/lee-example">Lee Example</a></li></ul></main>`,
+  );
+  assert.equal(plain(list.readers.onConnections(list.window.location)), true);
+  assert.deepEqual(plain(list.readers.connections(list.window.document)), [
+    { profileUrl: 'https://www.linkedin.com/in/sam-example/' },
+    { profileUrl: 'https://www.linkedin.com/in/lee-example/' },
+  ]);
+
+  const watched = await linkedInPage(
+    'https://www.linkedin.com/company/synthetic-example/people/',
+    peopleTab('Pending'),
+  );
+  const sent: unknown[] = [];
+  const acted: string[] = [];
+  const page = watched.window as unknown as Record<string, unknown> & typeof watched.window;
+  page.chrome = {
+    runtime: {
+      id: 'synthetic',
+      sendMessage: async (message: unknown) => {
+        sent.push(message);
+      },
+      onMessage: { addListener() {} },
+    },
+  };
+  for (const name of ['fetch', 'open', 'XMLHttpRequest']) page[name] = () => acted.push(name);
+  const element = watched.dom.window.HTMLElement.prototype as unknown as Record<string, unknown>;
+  for (const name of ['click', 'focus', 'scrollIntoView']) element[name] = () => acted.push(name);
+  watched.window.eval(await readFile(join(helperFolder, 'content.js'), 'utf8'));
+  const settle = () => new Promise((accept) => setTimeout(accept, 600));
+  await settle();
+  assert.deepEqual(plain(sent), []);
+  const sam = watched.window.document.querySelector(
+    '[aria-label="Invite Sam Example to connect"]',
+  )!;
+  sam.setAttribute('aria-label', 'Pending, click to withdraw invitation sent to Sam Example');
+  sam.querySelector('span')!.textContent = 'Pending';
+  await settle();
+  sam.querySelector('span')!.textContent = 'Pending ';
+  await settle();
+  assert.deepEqual(plain(sent), [
+    {
+      type: 'invite',
+      company: { slug: 'synthetic-example', name: 'Synthetic Example Co' },
+      person: {
+        profileUrl: 'https://www.linkedin.com/in/sam-example/',
+        memberUrn: memberA,
+        name: 'Sam Example',
+        headline: 'Synthetic engineer',
+      },
+    },
+  ]);
+  assert.deepEqual(acted, []);
+});
+
+const panelSender = {
+  id: 'synthetic-extension',
+  url: 'chrome-extension://synthetic-extension/sidepanel.html',
+};
+const pageSender = {
+  id: 'synthetic-extension',
+  tab: { id: 1 },
+  frameId: 0,
+  url: 'https://www.linkedin.com/company/synthetic-example/people/',
+};
+
+async function helperWorker(fetch: (url: string, init?: RequestInit) => Promise<Response>) {
+  const { compileFunction } = await import('node:vm');
+  const listeners: Array<
+    (message: unknown, sender: unknown, reply: (value: unknown) => void) => boolean
+  > = [];
+  const storage = new Map<string, unknown>();
+  const downloads: unknown[] = [];
+  const chrome = {
+    runtime: {
+      id: 'synthetic-extension',
+      getURL: (path: string) => `chrome-extension://synthetic-extension/${path}`,
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: {
+        addListener: (listener: (typeof listeners)[number]) => listeners.push(listener),
+      },
+      sendMessage: async () => {},
+    },
+    sidePanel: { setPanelBehavior: async () => {} },
+    downloads: { download: async (item: unknown) => downloads.push(item) },
+    storage: {
+      local: {
+        get: async (keys: string | Record<string, unknown>) =>
+          typeof keys === 'string'
+            ? storage.has(keys)
+              ? { [keys]: structuredClone(storage.get(keys)) }
+              : {}
+            : Object.fromEntries(
+                Object.entries(keys).map(([name, fallback]) => [
+                  name,
+                  storage.has(name) ? structuredClone(storage.get(name)) : fallback,
+                ]),
+              ),
+        set: async (values: Record<string, unknown>) => {
+          for (const [name, value] of Object.entries(values))
+            storage.set(name, structuredClone(value));
+        },
+        remove: async (name: string) => {
+          storage.delete(name);
+        },
+      },
+    },
+  };
+  compileFunction(await readFile(join(helperFolder, 'service-worker.js'), 'utf8'), [
+    'chrome',
+    'fetch',
+  ])(chrome, fetch);
+  const ask = (message: unknown, sender: unknown) =>
+    new Promise<unknown>((accept) => {
+      if (!listeners[0]!(message, sender, accept)) accept('ignored');
+    });
+  return { ask, storage, downloads };
+}
+
+test('the Edge helper worker takes commands only from its own side panel', async () => {
+  const calls: string[] = [];
+  const worker = await helperWorker(async (url) => {
+    calls.push(String(url));
+    return new Response('', { status: 404 });
+  });
+  const person = '00000000-0000-4000-8000-000000000001';
+  for (const message of [
+    { type: 'noLuck', id: person, noLuck: true },
+    { type: 'status', id: person, status: 'asked', revision: 1 },
+    { type: 'cv' },
+    { type: 'state', page: null },
+    { type: 'settings', connections: false },
+    { type: 'dismiss' },
+  ])
+    assert.deepEqual(await worker.ask(message, pageSender), { ok: true, value: null });
+  for (const sender of [
+    { ...pageSender, url: 'https://evil.example/' },
+    { ...pageSender, frameId: 3 },
+    { ...panelSender, id: 'other-extension' },
+    { ...panelSender, tab: { id: 2 } },
+  ])
+    assert.equal(await worker.ask({ type: 'cv' }, sender), 'ignored');
+  assert.deepEqual(calls, []);
+  assert.equal(worker.storage.has('connections'), false);
+  const state = (await worker.ask({ type: 'state', page: null }, panelSender)) as {
+    value: { status: string };
+  };
+  assert.equal(state.value.status, 'unpaired');
+  assert.deepEqual(calls, ['chrome-extension://synthetic-extension/.pairing.json']);
+});
+
+function helperCrypto(token: string) {
+  const base = createHash('sha256').update(token).digest();
+  const derived = (label: string) => createHmac('sha256', base).update(label).digest();
+  const macKey = derived('nod-helper-mac');
+  const encryptKey = derived('nod-helper-encrypt');
+  return {
+    sha: (value: string | Buffer) => createHash('sha256').update(value).digest('hex'),
+    hmac: (text: string) => createHmac('sha256', macKey).update(text).digest('base64url'),
+    seal(plainText: Buffer, context: string) {
+      const iv = randomBytes(12);
+      const cipher = createCipheriv('aes-256-gcm', encryptKey, iv);
+      cipher.setAAD(Buffer.from(context));
+      const data = Buffer.concat([cipher.update(plainText), cipher.final(), cipher.getAuthTag()]);
+      return JSON.stringify({ iv: iv.toString('base64url'), data: data.toString('base64url') });
+    },
+    open(text: string, context: string) {
+      const { iv, data } = JSON.parse(text) as { iv: string; data: string };
+      const bytes = Buffer.from(data, 'base64url');
+      const decipher = createDecipheriv('aes-256-gcm', encryptKey, Buffer.from(iv, 'base64url'));
+      decipher.setAAD(Buffer.from(context));
+      decipher.setAuthTag(bytes.subarray(bytes.length - 16));
+      return Buffer.concat([
+        decipher.update(bytes.subarray(0, bytes.length - 16)),
+        decipher.final(),
+      ]);
+    },
+  };
+}
+
+test('the Edge helper worker sends only encrypted data to a Nod that signs its answers and keeps invites it could not deliver', async () => {
+  const token = randomBytes(32).toString('base64url');
+  const id = randomUUID();
+  const keys = helperCrypto(token);
+  let address = 'http://localhost:4310';
+  let mode: 'squatter' | 'tampered' | 'busy' | 'refused' | 'conflict' | 'capped' | 'nod' = 'nod';
+  const requests: Array<{ path: string; raw: string; body: unknown }> = [];
+  const worker = await helperWorker(async (url, init) => {
+    if (String(url).endsWith('/.pairing.json')) return Response.json({ nod: address, id, token });
+    const target = new URL(String(url));
+    const headers = init!.headers as Record<string, string>;
+    const raw = String(init!.body);
+    const context = [
+      'nod-helper-request',
+      'POST',
+      target.host,
+      target.pathname,
+      headers['x-nod-time'],
+    ].join('\n');
+    assert.equal(headers['x-nod-helper'], id);
+    assert.equal(headers['x-nod-signature'], keys.hmac(`${context}\n${keys.sha(raw)}`));
+    assert.equal(JSON.stringify(init).includes(token), false);
+    const body = JSON.parse(keys.open(raw, context).toString());
+    requests.push({ path: target.pathname, raw, body });
+    const invites = target.pathname === '/api/helper/invites';
+    const refusal: Record<string, [number, string, string]> = {
+      busy: [503, 'Nod is updating.', ''],
+      refused: [400, 'The invites (people.0.name): is too long for a name', ''],
+      conflict: [409, 'people.0: the profile and member id belong to different people.', ''],
+      capped: [429, 'The panel added 30 new companies in the last day.', '3600'],
+    };
+    const [status, answer, retryAfter] =
+      invites && refusal[mode]
+        ? [refusal[mode][0], { error: refusal[mode][1] }, refusal[mode][2]]
+        : [
+            200,
+            target.pathname === '/api/helper/company'
+              ? { company: null, invites: { today: 0, week: 0, daily: 15, weekly: 80 } }
+              : target.pathname === '/api/helper/accepted'
+                ? { people: [] }
+                : target.pathname === '/api/helper/profile'
+                  ? { person: null }
+                  : invites
+                    ? { saved: [] }
+                    : { ok: true },
+            '',
+          ];
+    const sealed = keys.seal(
+      Buffer.from(
+        JSON.stringify({
+          type: 'application/json; charset=utf-8',
+          disposition: '',
+          retryAfter,
+          body: Buffer.from(JSON.stringify(answer)).toString('base64'),
+        }),
+      ),
+      `nod-helper-response\n${headers['x-nod-signature']}`,
+    );
+    const signature = keys.hmac(
+      ['nod-helper-response', headers['x-nod-signature'], String(status), keys.sha(sealed)].join(
+        '\n',
+      ),
+    );
+    return new Response(mode === 'tampered' ? sealed.replace('"data":"', '"data":"AAAA') : sealed, {
+      status,
+      headers: {
+        'content-type': 'application/json',
+        ...(mode === 'squatter' ? {} : { 'x-nod-signature': signature }),
+      },
+    });
+  });
+  const invite = (name: string) => ({
+    type: 'invite',
+    company: { slug: 'synthetic-example', name: 'Synthetic Example Co' },
+    person: { profileUrl: `https://www.linkedin.com/in/${name}/`, name, headline: 'Synthetic' },
+  });
+  const queue = () =>
+    (worker.storage.get('queue') ?? []) as Array<{ tries: number; next: number; invite: unknown }>;
+  const state = async () =>
+    (
+      (await worker.ask({ type: 'state', page: null }, panelSender)) as {
+        value: { status: string };
+      }
+    ).value.status;
+  const problem = () =>
+    String((worker.storage.get('problem') as { text: string } | undefined)?.text);
+
+  assert.equal(await state(), 'unpaired');
+  assert.equal(requests.length, 0);
+  address = 'http://127.0.0.1:4310';
+  assert.equal(await state(), 'ready');
+  mode = 'squatter';
+  const profile = {
+    type: 'profile',
+    profileUrl: 'https://www.linkedin.com/in/synthetic-private-person/',
+    memberUrn: 'ACoAASyntheticPrivateMember1',
+  };
+  const restarted = (await worker.ask(profile, pageSender)) as { ok: boolean; kind: string };
+  assert.deepEqual([restarted.ok, restarted.kind], [false, 'unverified']);
+  const leaked = requests.at(-1)!;
+  assert.equal(leaked.path, '/api/helper/profile');
+  assert.equal(leaked.raw.includes('synthetic-private-person'), false);
+  assert.equal(leaked.raw.includes('ACoAASyntheticPrivateMember1'), false);
+  const sent = requests.length;
+  await worker.ask(invite('sam-example'), pageSender);
+  assert.equal(await state(), 'unverified');
+  mode = 'tampered';
+  assert.equal(await state(), 'unverified');
+  assert.deepEqual(
+    new Set(requests.slice(sent).map((request) => request.path)),
+    new Set(['/api/helper/hello']),
+  );
+  assert.equal(queue().length, 1);
+
+  mode = 'busy';
+  assert.equal(await state(), 'ready');
+  assert.deepEqual(
+    queue().map((entry) => entry.tries),
+    [1],
+  );
+  assert.ok(queue()[0]!.next > Date.now());
+  mode = 'refused';
+  await worker.ask(invite('kim-example'), pageSender);
+  assert.equal(queue().length, 1);
+  assert.match(problem(), /kim-example/);
+  mode = 'conflict';
+  await worker.ask(invite('lee-example'), pageSender);
+  assert.equal(queue().length, 1);
+  assert.match(problem(), /lee-example.*different people/);
+  mode = 'capped';
+  worker.storage.set(
+    'queue',
+    queue().map((entry) => ({ ...entry, next: 0 })),
+  );
+  assert.equal(await state(), 'ready');
+  assert.equal(queue()[0]!.tries, 1);
+  assert.ok(Math.abs(queue()[0]!.next - (Date.now() + 3_600_000)) < 60_000);
+  mode = 'nod';
+  worker.storage.set(
+    'queue',
+    queue().map((entry) => ({ ...entry, next: 0 })),
+  );
+  assert.equal(await state(), 'ready');
+  assert.deepEqual(queue(), []);
+  assert.ok(
+    requests.some(
+      (request) =>
+        request.path === '/api/helper/invites' &&
+        JSON.stringify(request.body).includes('sam-example') &&
+        !request.raw.includes('sam-example'),
+    ),
+  );
+});
+
+test('the Edge helper never acts on a page, and only its worker loads anything', async () => {
+  const { readdir } = await import('node:fs/promises');
+  const forbidden = [
+    /\.click\(/,
+    /\.focus\(/,
+    /dispatchEvent/,
+    /\.submit\(/,
+    /\.requestSubmit\(/,
+    /\bscroll(?:To|By|IntoView)\b/,
+    /\blocation\s*(?:\.\s*(?:href|hash|pathname|search)\s*)?=[^=]/,
+    /\blocation\.(?:assign|replace|reload)\b/,
+    /\bhistory\.(?:pushState|replaceState|back|forward|go)\b/,
+    /chrome\.tabs\.(?:create|update|reload|executeScript|duplicate)/,
+    /chrome\.scripting/,
+    /chrome\.windows\.create/,
+    /\bopen\(/,
+    /XMLHttpRequest|sendBeacon|WebSocket|EventSource/,
+    /innerHTML|outerHTML|insertAdjacentHTML|document\.write/,
+    /\beval\(|new Function/,
+    /importScripts/,
+    /localhost/,
+  ];
+  const files = (await readdir(helperFolder)).filter((name) => name.endsWith('.js'));
+  assert.deepEqual(files.sort(), ['content.js', 'readers.js', 'service-worker.js', 'sidepanel.js']);
+  for (const name of files) {
+    const source = await readFile(join(helperFolder, name), 'utf8');
+    for (const pattern of forbidden) assert.doesNotMatch(source, pattern, `${name}: ${pattern}`);
+    if (name !== 'service-worker.js') assert.doesNotMatch(source, /\bfetch\(/, name);
+  }
+  const manifest = JSON.parse(await readFile(join(helperFolder, 'manifest.json'), 'utf8'));
+  assert.deepEqual(manifest.permissions, ['sidePanel', 'storage', 'downloads']);
+  assert.deepEqual(manifest.host_permissions, ['http://127.0.0.1/*', 'https://www.linkedin.com/*']);
+  assert.match(
+    manifest.content_security_policy.extension_pages,
+    /connect-src 'self' http:\/\/127\.0\.0\.1:\*;/,
+  );
+  assert.equal(manifest.web_accessible_resources, undefined);
+});
+
+test(
+  'pair-helper.ps1 talks only to the recorded Nod process and checks the answer before opening it',
+  { skip: process.platform !== 'win32', timeout: 120_000 },
+  async (t) => {
+    const { createServer } = await import('node:http');
+    const { spawn } = await import('node:child_process');
+    const { mkdir, utimes, writeFile } = await import('node:fs/promises');
+    const requests: Array<{ path: string; body: string }> = [];
+    const server = createServer((request, response) => {
+      let body = '';
+      request.on('data', (chunk) => (body += chunk));
+      request.on('end', () => {
+        requests.push({ path: request.url ?? '', body });
+        response.setHeader('content-type', 'application/json');
+        response.end(
+          request.url === '/api/helper-pairing/start'
+            ? JSON.stringify({ serverNonce: randomBytes(32).toString('base64url') })
+            : JSON.stringify({
+                iv: randomBytes(16).toString('base64'),
+                sealed: randomBytes(64).toString('base64'),
+                mac: randomBytes(32).toString('base64url'),
+              }),
+        );
+      });
+    });
+    await new Promise<void>((accept) => server.listen(0, '127.0.0.1', accept));
+    t.after(() => server.close());
+    const port = (server.address() as { port: number }).port;
+    const folder = await mkdtemp(join(tmpdir(), 'nod-pair-'));
+    t.after(() => rm(folder, { recursive: true, force: true }));
+    const portFile = join(folder, 'profiles', 'local', 'engine-port.json');
+    await mkdir(join(folder, 'profiles', 'local'), { recursive: true });
+    const keyFile = join(helperFolder, '.pairing.json');
+    const before = await readFile(keyFile, 'utf8').catch(() => null);
+    const pairScript = (...args: string[]) =>
+      new Promise<{ code: number | null; output: string }>((accept) => {
+        const child = spawn(
+          'powershell',
+          [
+            '-NoProfile',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-File',
+            join(import.meta.dirname, '..', 'scripts', 'windows', 'pair-helper.ps1'),
+            '-Code',
+            'ABCD-2345',
+            ...args,
+          ],
+          { windowsHide: true },
+        );
+        let output = '';
+        child.stdout.on('data', (chunk) => (output += chunk));
+        child.stderr.on('data', (chunk) => (output += chunk));
+        child.on('close', (code) => accept({ code, output: output.replace(/\s+/g, ' ') }));
+      });
+    const record = (values: Record<string, unknown>) =>
+      writeFile(
+        portFile,
+        JSON.stringify({ port, pid: process.pid, executable: process.execPath, ...values }),
+      );
+
+    await record({ pid: 4 });
+    let run = await pairScript('-UserData', folder);
+    assert.notEqual(run.code, 0);
+    assert.match(run.output, /Another program \(process \d+\) holds 127\.0\.0\.1/);
+    await record({ executable: 'C:\\nowhere\\Nod.exe' });
+    run = await pairScript('-UserData', folder);
+    assert.match(run.output, /isn't the Nod desktop app that recorded it/);
+    await record({});
+    const old = new Date(Date.now() - 24 * 3_600_000);
+    await utimes(portFile, old, old);
+    run = await pairScript('-UserData', folder);
+    assert.match(run.output, /started after Nod recorded its address/);
+    run = await pairScript('-Nod', `http://localhost:${port}`);
+    assert.match(run.output, /must look like http:\/\/127\.0\.0\.1:4310/);
+    assert.equal(requests.length, 0);
+
+    await record({});
+    run = await pairScript('-UserData', folder);
+    assert.notEqual(run.code, 0);
+    assert.match(run.output, /wasn't made with your pairing code/);
+    assert.deepEqual(
+      requests.map((request) => request.path),
+      ['/api/helper-pairing/start', '/api/helper-pairing/finish'],
+    );
+    assert.equal(
+      requests.some((request) => /ABCD-?2345/i.test(request.body)),
+      false,
+    );
+    assert.equal(await readFile(keyFile, 'utf8').catch(() => null), before);
   },
 );
 
@@ -1873,6 +2458,781 @@ test(
             error.message.includes(lee.id),
         );
       });
+      await t.test(
+        'the Edge helper reaches only its own routes, over 127.0.0.1, with requests sealed by a key Nod paired',
+        async (h) => {
+          const { request: httpRequest } = await import('node:http');
+          const net = await import('node:net');
+          const key = randomBytes(32).toString('base64url');
+          const freePort = () =>
+            new Promise<number>((accept, reject) => {
+              const probe = net.createServer();
+              probe.once('error', reject);
+              probe.listen(0, '127.0.0.1', () => {
+                const { port } = probe.address() as { port: number };
+                probe.close(() => accept(port));
+              });
+            });
+          const served = async (side: Side, desktop = true, listen = '127.0.0.1') => {
+            const port = await freePort();
+            const app = Fastify();
+            h.after(() => app.close());
+            await app.register(rateLimit, { global: false, keyGenerator: () => side.ownerId });
+            registerLocalAccess(
+              app,
+              port,
+              desktop
+                ? { key, desktop: true, helper: side.jobs.helperAccess }
+                : { key, helper: side.jobs.helperAccess },
+            );
+            side.jobs.registerRoutes(app);
+            await app.listen({ port, host: listen });
+            return {
+              port,
+              host: `127.0.0.1:${port}`,
+              inject: (options: {
+                method: 'GET' | 'POST' | 'DELETE';
+                url: string;
+                headers: Record<string, string>;
+                payload?: string;
+              }) => app.inject(options),
+            };
+          };
+          type Wire = { statusCode: number; headers: Record<string, unknown>; raw: Buffer };
+          const wire = (
+            port: number,
+            path: string,
+            headers: Record<string, string>,
+            body: string,
+            address = '127.0.0.1',
+          ) =>
+            new Promise<Wire>((accept, reject) => {
+              const outgoing = httpRequest(
+                {
+                  host: address,
+                  port,
+                  path,
+                  method: 'POST',
+                  headers: { ...headers, 'content-length': String(Buffer.byteLength(body)) },
+                },
+                (incoming) => {
+                  const chunks: Buffer[] = [];
+                  incoming.on('data', (chunk: Buffer) => chunks.push(chunk));
+                  incoming.on('end', () =>
+                    accept({
+                      statusCode: incoming.statusCode ?? 0,
+                      headers: incoming.headers,
+                      raw: Buffer.concat(chunks),
+                    }),
+                  );
+                },
+              );
+              outgoing.on('error', reject);
+              outgoing.end(body);
+            });
+          const d = owner('synthetic-owner-d');
+          const e = owner('synthetic-owner-e');
+          const [dApp, eApp] = [await served(d), await served(e)];
+          type App = typeof dApp;
+          const asOwner = (app: App) => ({ host: app.host, 'x-nod-desktop-token': key });
+          const call = (app: App, method: string, url: string, headers: Record<string, string>) =>
+            app.inject({ method: method as 'POST', url, headers });
+          const id = 'abcdefghijklmnopabcdefghijklmnop';
+          const origin = `chrome-extension://${id}`;
+          const newCode = async (app: App) =>
+            (await call(app, 'POST', '/api/jobs/helper/pairing', asOwner(app))).json()
+              .code as string;
+          const json = (response: Wire) => JSON.parse(response.raw.toString());
+          const pairingCall = (app: App, step: string, body: unknown, headers = {}) =>
+            wire(
+              app.port,
+              `/api/helper-pairing/${step}`,
+              { host: app.host, 'content-type': 'application/json', ...headers },
+              JSON.stringify(body),
+            );
+          const challenge = async (app: App, code: string, extensionId = id) => {
+            const clientNonce = randomBytes(32).toString('base64url');
+            const start = await pairingCall(app, 'start', { extensionId, clientNonce });
+            if (start.statusCode !== 200) return { start };
+            const { serverNonce } = json(start) as { serverNonce: string };
+            const root = pbkdf2Sync(
+              code.toUpperCase().replace(/[\s-]/g, ''),
+              `nod-helper-pairing\n${clientNonce}\n${serverNonce}`,
+              210_000,
+              32,
+              'sha256',
+            );
+            const derived = (label: string) => createHmac('sha256', root).update(label).digest();
+            const proof = createHmac('sha256', derived('proof'))
+              .update([extensionId, clientNonce, serverNonce].join('\n'))
+              .digest('base64url');
+            return { start, derived, finish: { extensionId, clientNonce, serverNonce, proof } };
+          };
+          const pair = async (app: App, code: string, extensionId = id) => {
+            const ready = await challenge(app, code, extensionId);
+            if (!ready.finish) return { response: ready.start };
+            const response = await pairingCall(app, 'finish', ready.finish);
+            if (response.statusCode !== 200) return { response, finish: ready.finish };
+            const { iv, sealed, mac } = json(response) as Record<string, string>;
+            assert.equal(
+              mac,
+              createHmac('sha256', ready.derived!('mac'))
+                .update([extensionId, iv, sealed].join('\n'))
+                .digest('base64url'),
+            );
+            const decipher = createDecipheriv(
+              'aes-256-cbc',
+              ready.derived!('encrypt'),
+              Buffer.from(iv!, 'base64'),
+            );
+            const opened = JSON.parse(
+              Buffer.concat([
+                decipher.update(Buffer.from(sealed!, 'base64')),
+                decipher.final(),
+              ]).toString(),
+            ) as { id: string; token: string };
+            return { response, finish: ready.finish, paired: opened };
+          };
+          const pairedOn = async (app: App) => {
+            const result = await pair(app, await newCode(app));
+            assert.equal(result.response.statusCode, 200, result.response.raw.toString());
+            return result.paired!;
+          };
+          type Paired = { id: string; token: string };
+          const signed = async (
+            app: App,
+            path: string,
+            body: unknown,
+            paired: Paired,
+            change: {
+              origin?: string;
+              host?: string;
+              signedHost?: string;
+              signedBody?: string;
+              raw?: string;
+              time?: string;
+              secret?: Buffer;
+              headers?: Record<string, string>;
+              port?: number;
+              address?: string;
+            } = {},
+          ) => {
+            const keys = helperCrypto(paired.token);
+            const time = change.time ?? String(Date.now());
+            const url = `/api/helper/${path}`;
+            const context = [
+              'nod-helper-request',
+              'POST',
+              change.signedHost ?? app.host,
+              url,
+              time,
+            ].join('\n');
+            const text = change.raw ?? keys.seal(Buffer.from(JSON.stringify(body)), context);
+            const signedText = `${context}\n${keys.sha(change.signedBody ?? text)}`;
+            const signature = change.secret
+              ? createHmac('sha256', change.secret).update(signedText).digest('base64url')
+              : keys.hmac(signedText);
+            const headers = {
+              host: change.host ?? app.host,
+              origin: change.origin ?? origin,
+              'content-type': 'application/json',
+              'x-nod-helper': paired.id,
+              'x-nod-time': time,
+              'x-nod-signature': signature,
+              ...change.headers,
+            };
+            const response = await wire(
+              change.port ?? app.port,
+              url,
+              headers,
+              text,
+              change.address,
+            );
+            const genuine =
+              response.headers['x-nod-signature'] ===
+              keys.hmac(
+                [
+                  'nod-helper-response',
+                  signature,
+                  String(response.statusCode),
+                  keys.sha(response.raw),
+                ].join('\n'),
+              );
+            const opened = genuine
+              ? (JSON.parse(
+                  keys
+                    .open(response.raw.toString(), `nod-helper-response\n${signature}`)
+                    .toString(),
+                ) as { type: string; disposition: string; retryAfter: string; body: string })
+              : null;
+            const content = opened ? Buffer.from(opened.body, 'base64') : response.raw;
+            return {
+              statusCode: response.statusCode,
+              headers: response.headers,
+              genuine,
+              opened,
+              raw: response.raw,
+              sent: { headers, text },
+              body: content.toString(),
+              json: () => JSON.parse(content.toString()),
+            };
+          };
+
+          const code = await newCode(dApp);
+          assert.equal((await pair(eApp, code)).response.statusCode, 410);
+          const first = await pair(dApp, code);
+          assert.equal(first.response.statusCode, 200, first.response.raw.toString());
+          const paired = first.paired!;
+          assert.equal((await pairingCall(dApp, 'finish', first.finish)).statusCode, 410);
+          for (const headers of [{ origin }, { 'sec-fetch-site': 'cross-site' }])
+            assert.equal(
+              (
+                await pairingCall(
+                  dApp,
+                  'start',
+                  { extensionId: id, clientNonce: randomBytes(32).toString('base64url') },
+                  headers,
+                )
+              ).statusCode,
+              403,
+            );
+          const racing = await newCode(dApp);
+          const ready = await challenge(dApp, racing);
+          const finishing = pairingCall(dApp, 'finish', ready.finish);
+          await new Promise((accept) => setTimeout(accept, 20));
+          await newCode(dApp);
+          assert.equal((await finishing).statusCode, 410);
+          await call(dApp, 'DELETE', '/api/jobs/helper/pairing', asOwner(dApp));
+          const stored = (
+            await db.pool.query(
+              'SELECT id,token_hash,origin FROM job_helper_tokens WHERE owner_id=$1',
+              [d.ownerId],
+            )
+          ).rows;
+          assert.deepEqual(stored, [
+            {
+              id: paired.id,
+              token_hash: createHash('sha256').update(paired.token).digest('hex'),
+              origin,
+            },
+          ]);
+
+          const hello = await signed(dApp, 'hello', {}, paired);
+          assert.equal(hello.statusCode, 200, hello.body);
+          assert.equal(hello.genuine, true);
+          assert.equal(hello.raw.toString().includes('"ok"'), false);
+          assert.deepEqual(hello.json(), { ok: true });
+          for (const [change, status] of [
+            [{ origin: `chrome-extension://${'b'.repeat(32)}` }, 401],
+            [{ origin: 'https://www.linkedin.com' }, 403],
+            [{ secret: randomBytes(32) }, 401],
+            [{ signedBody: '{"other":true}' }, 401],
+            [{ signedHost: '127.0.0.1:4311' }, 401],
+            [{ host: `localhost:${dApp.port}`, signedHost: `localhost:${dApp.port}` }, 403],
+            [{ time: String(Date.now() - 120_000) }, 401],
+            [{ headers: { 'x-nod-signature': 'short' } }, 401],
+          ] as const) {
+            const refused = await signed(dApp, 'hello', {}, paired, change);
+            assert.equal(refused.statusCode, status, JSON.stringify(change));
+            assert.equal(refused.headers['x-nod-signature'], undefined);
+          }
+          const once = await signed(dApp, 'hello', {}, paired);
+          const replayed = await wire(
+            dApp.port,
+            '/api/helper/hello',
+            once.sent.headers,
+            once.sent.text,
+          );
+          assert.equal(once.statusCode, 200);
+          assert.equal(replayed.statusCode, 401);
+          assert.notEqual(replayed.headers['x-nod-signature'], undefined);
+          const unreadable = await signed(dApp, 'company', { name: 'Null \u0000 Example' }, paired);
+          assert.equal(unreadable.statusCode, 400);
+          assert.equal(unreadable.genuine, true);
+          assert.match(unreadable.json().message, /null character/);
+          for (const headers of [
+            { host: dApp.host, origin, authorization: `Bearer ${paired.token}` },
+            { host: dApp.host, origin, 'x-nod-desktop-token': key },
+            { host: dApp.host, 'x-nod-desktop-token': key },
+          ] as Record<string, string>[])
+            assert.notEqual(
+              (await wire(dApp.port, '/api/helper/hello', headers, '{}')).statusCode,
+              200,
+            );
+          assert.equal((await signed(eApp, 'hello', {}, paired)).statusCode, 401);
+          for (const [headers, status] of [
+            [{ host: dApp.host, origin }, 403],
+            [{ host: dApp.host }, 401],
+            [asOwner(dApp), 200],
+          ] as const)
+            assert.equal(
+              (await call(dApp, 'GET', '/api/jobs/companies', headers)).statusCode,
+              status,
+            );
+          const viaInject = await dApp.inject({
+            method: 'POST',
+            url: '/api/helper/hello',
+            headers: once.sent.headers,
+            payload: once.sent.text,
+          });
+          assert.equal(viaInject.statusCode, 403);
+
+          const local = await served(d, false);
+          assert.equal((await signed(local, 'hello', {}, paired)).statusCode, 200);
+          assert.equal(
+            (
+              await signed(local, 'hello', {}, paired, {
+                host: `localhost:${local.port}`,
+                signedHost: `localhost:${local.port}`,
+              })
+            ).statusCode,
+            403,
+          );
+          const relayed: Buffer[] = [];
+          const relay = net.createServer((socket) => {
+            const upstream = net.connect(local.port, '127.0.0.1');
+            socket.on('data', (chunk: Buffer) => relayed.push(chunk));
+            socket.pipe(upstream).pipe(socket);
+            socket.on('error', () => upstream.destroy());
+            upstream.on('error', () => socket.destroy());
+          });
+          const relaying = await new Promise<boolean>((accept) => {
+            relay.once('error', () => accept(false));
+            relay.listen(local.port, '::1', () => accept(true));
+          });
+          h.after(() => relay.close());
+          if (relaying) {
+            const throughRelay = await signed(
+              local,
+              'invites',
+              {
+                company: { slug: 'relay-example', name: 'Relay Example Co' },
+                people: [
+                  {
+                    profileUrl: 'https://www.linkedin.com/in/relay-private-person/',
+                    name: 'Relay Private Person',
+                    headline: '',
+                  },
+                ],
+              },
+              paired,
+              {
+                address: '::1',
+                host: `localhost:${local.port}`,
+                signedHost: `localhost:${local.port}`,
+              },
+            );
+            assert.equal(throughRelay.statusCode, 403);
+            assert.equal(throughRelay.genuine, false);
+            const seen = Buffer.concat(relayed).toString();
+            assert.match(seen, /POST \/api\/helper\/invites/);
+            assert.equal(/relay-private-person|Relay Private Person/.test(seen), false);
+          }
+
+          const dual = await served(d, false, '::').catch(() => null);
+          if (dual)
+            assert.equal(
+              (await signed(dual, 'hello', {}, paired, { address: '::1' })).statusCode,
+              403,
+            );
+
+          const flaggedLater = Fastify();
+          h.after(() => flaggedLater.close());
+          d.jobs.registerRoutes(flaggedLater);
+          let refusedAtStart = false;
+          try {
+            flaggedLater.post(
+              '/api/elsewhere',
+              { config: { helper: 'paired' } },
+              async () => 'reached',
+            );
+            await flaggedLater.ready();
+          } catch (error) {
+            refusedAtStart = /Only the job search helper/.test(String(error));
+          }
+          assert.equal(refusedAtStart, true);
+          const flaggedFirst = Fastify();
+          h.after(() => flaggedFirst.close());
+          const firstPort = await freePort();
+          registerLocalAccess(flaggedFirst, firstPort, {
+            key,
+            desktop: true,
+            helper: d.jobs.helperAccess,
+          });
+          flaggedFirst.post(
+            '/api/elsewhere',
+            { config: { helper: 'paired' } },
+            async () => 'reached',
+          );
+          await flaggedFirst.listen({ port: firstPort, host: '127.0.0.1' });
+          assert.equal(
+            (
+              await wire(
+                firstPort,
+                '/api/elsewhere',
+                {
+                  host: `127.0.0.1:${firstPort}`,
+                  origin,
+                  'content-type': 'application/json',
+                  'x-nod-helper': paired.id,
+                  'x-nod-time': String(Date.now()),
+                  'x-nod-signature': 'A'.repeat(43),
+                },
+                '{}',
+              )
+            ).statusCode,
+            403,
+          );
+
+          const page = { slug: 'helper-example', name: 'Helper Example Co' };
+          const sam = {
+            profileUrl: 'https://www.linkedin.com/in/sam-helper/',
+            name: 'Sam Helper',
+            headline: 'Synthetic analyst',
+          };
+          const kim = {
+            profileUrl: `https://www.linkedin.com/in/${memberB}/`,
+            memberUrn: memberB,
+            name: 'Kim Helper',
+            headline: '',
+          };
+          const send = (path: string, body: unknown) => signed(dApp, path, body, paired);
+          const invited = await send('invites', { company: page, people: [sam, kim] });
+          assert.equal(invited.statusCode, 200, invited.body);
+          assert.equal(invited.genuine, true);
+          assert.equal(invited.sent.text.includes('sam-helper'), false);
+          assert.equal(invited.raw.toString().includes('sam-helper'), false);
+          const [samId, kimId] = invited.json().saved.map((entry: { id: string }) => entry.id);
+          const again = await send('invites', {
+            company: page,
+            people: [{ ...sam, name: 'Renamed By Page' }],
+          });
+          assert.deepEqual(
+            again
+              .json()
+              .saved.map((entry: { id: string; created: boolean }) => [entry.id, entry.created]),
+            [[samId, false]],
+          );
+          await d.jobs.execute(await turn(d, 'user'), {
+            action: 'person_update',
+            people: [
+              {
+                profileUrl: 'https://www.linkedin.com/in/lee-helper',
+                name: 'Lee Helper',
+                company: 'Other Helper Example',
+                status: 'accepted',
+              },
+            ],
+          });
+          const lee = await send('invites', {
+            company: page,
+            people: [
+              {
+                profileUrl: 'https://www.linkedin.com/in/lee-helper/',
+                name: 'Lee Helper',
+                headline: '',
+              },
+            ],
+          });
+          assert.deepEqual(
+            lee
+              .json()
+              .saved.map((entry: { created: boolean; status: string }) => [
+                entry.created,
+                entry.status,
+              ]),
+            [[false, 'accepted']],
+          );
+          const people = async () =>
+            (
+              await db.pool.query(
+                `SELECT p.name,p.status,p.profile_key,p.member_urn,c.name AS company,c.linkedin_slug
+                 FROM job_people p JOIN job_companies c ON c.id=p.company_id
+                 WHERE p.owner_id=$1 ORDER BY p.name`,
+                [d.ownerId],
+              )
+            ).rows;
+          const saved = await people();
+          assert.deepEqual(saved, [
+            {
+              name: 'Kim Helper',
+              status: 'invited',
+              profile_key: memberB,
+              member_urn: memberB,
+              company: page.name,
+              linkedin_slug: page.slug,
+            },
+            {
+              name: 'Lee Helper',
+              status: 'accepted',
+              profile_key: 'lee-helper',
+              member_urn: null,
+              company: 'Other Helper Example',
+              linkedin_slug: null,
+            },
+            {
+              name: 'Sam Helper',
+              status: 'invited',
+              profile_key: 'sam-helper',
+              member_urn: null,
+              company: page.name,
+              linkedin_slug: page.slug,
+            },
+          ]);
+          for (const list of [
+            [{ ...sam, name: 'x'.repeat(201) }],
+            [{ ...sam, name: '   ' }],
+            [{ ...sam, headline: 'x'.repeat(401) }],
+            [{ ...sam, profileUrl: 'https://evil.example/in/sam-helper/' }],
+            [{ ...sam, profileUrl: 'https://www.linkedin.com/in/sam-helper/?trk=synthetic' }],
+            [{ ...sam, profileUrl: 'https://www.linkedin.com/company/helper-example/' }],
+            [{ ...sam, profileUrl: 'http://www.linkedin.com/in/sam-helper/' }],
+            [{ ...sam, memberUrn: 'urn:li:member:1' }],
+            [{ ...sam, extra: true }],
+            Array.from({ length: 21 }, (_, n) => ({
+              ...sam,
+              profileUrl: `https://www.linkedin.com/in/bulk-helper-${n}/`,
+            })),
+          ]) {
+            const refused = await send('invites', { company: page, people: list });
+            assert.equal(refused.statusCode, 400);
+            assert.equal(refused.genuine, true);
+          }
+          for (const company of [
+            { ...page, slug: 'helper/example' },
+            { ...page, slug: 'x'.repeat(101) },
+            { slug: page.slug },
+            { ...page, name: 'x'.repeat(201) },
+          ])
+            assert.equal((await send('invites', { company, people: [sam] })).statusCode, 400);
+          assert.deepEqual(await people(), saved);
+
+          const view = (await send('company', { slug: page.slug })).json();
+          assert.equal(view.company.name, page.name);
+          assert.deepEqual(
+            view.company.people.map((person: { name: string }) => person.name).sort(),
+            ['Kim Helper', 'Sam Helper'],
+          );
+          assert.deepEqual(view.invites, { today: 2, week: 2, daily: 15, weekly: 80 });
+          assert.equal((await send('company', { slug: 'unknown-helper' })).json().company, null);
+
+          const memberC = 'ACoAASyntheticMemberCCCC03';
+          const profile = (slug: string, memberUrn: string) =>
+            send('profile', { profileUrl: `https://www.linkedin.com/in/${slug}/`, memberUrn });
+          assert.deepEqual((await profile('nobody-helper', memberC)).json(), { person: null });
+          assert.equal((await profile(memberB, memberB)).statusCode, 400);
+          assert.deepEqual((await profile('kim-helper', memberB)).json(), { person: kimId });
+          assert.deepEqual((await profile('sam-helper', memberA)).json(), { person: samId });
+          const memberD = 'ACoAASyntheticMemberDDDD04';
+          const dee = {
+            profileUrl: `https://www.linkedin.com/in/${memberD}/`,
+            memberUrn: memberD,
+            name: 'Dee Helper',
+            headline: '',
+          };
+          assert.equal((await send('invites', { company: page, people: [dee] })).statusCode, 200);
+          const identities = await people();
+          for (const [slug, memberUrn] of [
+            ['kim-helper', memberC],
+            ['sam-helper', memberB],
+            ['kim-renamed', memberB],
+            ['lee-helper', memberD],
+          ] as const)
+            assert.equal((await profile(slug, memberUrn)).statusCode, 409, `${slug} ${memberUrn}`);
+          assert.equal(
+            (
+              await send('invites', {
+                company: page,
+                people: [
+                  {
+                    profileUrl: 'https://www.linkedin.com/in/lee-helper/',
+                    memberUrn: memberA,
+                    name: 'Lee Helper',
+                    headline: '',
+                  },
+                ],
+              })
+            ).statusCode,
+            409,
+          );
+          assert.deepEqual(await people(), identities);
+          assert.deepEqual(
+            identities
+              .filter((row) => row.member_urn)
+              .map((row) => [row.profile_key, row.member_urn]),
+            [
+              [memberD, memberD],
+              ['kim-helper', memberB],
+              ['sam-helper', memberA],
+            ],
+          );
+
+          assert.deepEqual(
+            (
+              await send('connections', {
+                people: [
+                  { profileUrl: sam.profileUrl },
+                  { profileUrl: 'https://www.linkedin.com/in/stranger-helper/' },
+                ],
+              })
+            ).json(),
+            { accepted: [samId] },
+          );
+          assert.deepEqual(
+            (await send('connections', { people: [{ profileUrl: sam.profileUrl }] })).json(),
+            { accepted: [] },
+          );
+          assert.equal(
+            (await db.pool.query("SELECT 1 FROM job_people WHERE profile_key='stranger-helper'"))
+              .rowCount,
+            0,
+          );
+          const waiting = (await send('accepted', {})).json().people as Array<{
+            id: string;
+            name: string;
+            company: string;
+            messageUrl: string | null;
+            revision: number;
+          }>;
+          assert.deepEqual(waiting.map((person) => [person.name, person.company]).sort(), [
+            ['Lee Helper', 'Other Helper Example'],
+            ['Sam Helper', page.name],
+          ]);
+          const samView = waiting.find((person) => person.id === samId)!;
+          assert.equal(
+            samView.messageUrl,
+            `https://www.linkedin.com/messaging/compose/?recipient=${memberA}`,
+          );
+          const status = (body: unknown) => send(`people/${samId}/status`, body);
+          assert.equal(
+            (await status({ status: 'asked', revision: samView.revision - 1 })).statusCode,
+            409,
+          );
+          const asked = await status({ status: 'asked', revision: samView.revision });
+          assert.equal(asked.json().status, 'asked');
+          assert.equal(
+            (await status({ status: 'hired', revision: asked.json().revision })).statusCode,
+            400,
+          );
+
+          const other = await pairedOn(eApp);
+          assert.equal(
+            (
+              await signed(
+                eApp,
+                `people/${samId}/status`,
+                { status: 'declined', revision: asked.json().revision },
+                other,
+              )
+            ).statusCode,
+            404,
+          );
+          assert.equal(
+            (await signed(eApp, 'company', { slug: page.slug }, other)).json().company,
+            null,
+          );
+
+          const useRows = (kind: string, count: number) =>
+            db.pool.query(
+              `INSERT INTO job_helper_uses(id,owner_id,token_id,kind)
+               SELECT gen_random_uuid(),$1,$2,$3 FROM generate_series(1,$4)`,
+              [d.ownerId, paired.id, kind, count],
+            );
+          await useRows('company', 28);
+          const newCompany = (n: number) =>
+            send('invites', {
+              company: { slug: `cap-helper-${n}`, name: `Cap Helper ${n}` },
+              people: [
+                {
+                  profileUrl: `https://www.linkedin.com/in/cap-helper-person-${n}/`,
+                  name: `Cap Person ${n}`,
+                  headline: '',
+                },
+              ],
+            });
+          assert.equal((await newCompany(1)).statusCode, 200);
+          const capped = await newCompany(2);
+          assert.equal(capped.statusCode, 429);
+          assert.equal(capped.genuine, true);
+          assert.match(capped.json().message, /30 new companies/);
+          const wait = Number(capped.opened!.retryAfter);
+          assert.ok(wait > 86_000 && wait <= 86_400, String(wait));
+          assert.equal((await send('invites', { company: page, people: [sam] })).statusCode, 200);
+
+          refuseChats = false;
+          const chatsBefore = chats.length;
+          const tick = (companyId: string, body: unknown) =>
+            send(`companies/${companyId}/no-luck`, body);
+          assert.equal(
+            (await tick(view.company.id, { noLuck: true })).json().apply.state,
+            'started',
+          );
+          assert.equal(
+            (await tick(view.company.id, { noLuck: true })).json().apply.state,
+            'reused',
+          );
+          assert.equal(chats.length, chatsBefore + 1);
+          assert.equal((await tick(view.company.id, { noLuck: false })).statusCode, 400);
+          await useRows('apply', 4);
+          const capCompany = (await send('company', { slug: 'cap-helper-1' })).json().company;
+          const blocked = await tick(capCompany.id, { noLuck: true });
+          assert.equal(blocked.statusCode, 429);
+          assert.match(blocked.json().message, /5 apply chats/);
+          assert.ok(Number(blocked.opened!.retryAfter) > 0);
+          assert.equal(chats.length, chatsBefore + 1);
+          assert.equal(
+            (await tick(capCompany.id, { noLuck: false, revision: capCompany.revision }))
+              .statusCode,
+            200,
+          );
+
+          assert.equal((await send('cv', {})).statusCode, 404);
+          await add(d, 'Helper Example CV.pdf', 'application/pdf');
+          const cv = await send('cv', {});
+          assert.equal(cv.statusCode, 200, cv.body);
+          assert.equal(cv.genuine, true);
+          assert.equal(cv.opened!.type, 'application/pdf');
+          assert.match(cv.opened!.disposition, /UTF-8''Helper%20Example%20CV\.pdf$/);
+          assert.equal(cv.body, 'synthetic Helper Example CV.pdf');
+          assert.equal(cv.headers['content-disposition'], undefined);
+          assert.equal(cv.raw.toString().includes('synthetic Helper Example CV'), false);
+
+          let limited = 0;
+          for (let n = 1; n <= 245 && !limited; n++) {
+            const response = await send('accepted', {});
+            if (response.statusCode === 429) {
+              limited = n;
+              assert.equal(response.genuine, true);
+            }
+          }
+          assert.ok(limited > 200 && limited <= 240, String(limited));
+
+          const listed = (await call(dApp, 'GET', '/api/jobs/helper', asOwner(dApp))).json()
+            .helpers;
+          assert.deepEqual(
+            listed.map((entry: { extensionId: string }) => entry.extensionId),
+            [id],
+          );
+          assert.notEqual(listed[0].lastUsedAt, null);
+          const renewed = await pairedOn(dApp);
+          assert.equal((await signed(dApp, 'hello', {}, paired)).statusCode, 401);
+          assert.equal((await signed(dApp, 'hello', {}, renewed)).statusCode, 200);
+          const revoke = (headers: Record<string, string>) =>
+            call(dApp, 'POST', `/api/jobs/helper/${renewed.id}/revoke`, headers);
+          assert.equal((await revoke({ host: dApp.host })).statusCode, 401);
+          assert.equal((await revoke(asOwner(dApp))).statusCode, 200);
+          assert.equal((await revoke(asOwner(dApp))).statusCode, 404);
+          assert.equal((await signed(dApp, 'hello', {}, renewed)).statusCode, 401);
+
+          const last = await newCode(dApp);
+          for (let n = 4; n >= 0; n--)
+            assert.match(
+              json((await pair(dApp, 'ZZZZ-ZZZZ')).response).message,
+              n ? new RegExp(`${n} tr(y|ies) left`) : /last try/,
+            );
+          assert.equal((await pair(dApp, last)).response.statusCode, 410);
+        },
+      );
     } finally {
       await Promise.allSettled([a.app.close(), b.app.close(), c.app.close()]);
       await db.pool.end();
