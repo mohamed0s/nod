@@ -160,6 +160,7 @@ import { localArtifacts } from './artifacts.ts';
 import { memoryFileName, memoryMarkdown } from '../shared/memory-export.ts';
 import { createChannels } from './channels.ts';
 import { createChatTitles } from './chat-titles.ts';
+import { chatModelArgs } from './chat-model.ts';
 import { createChannelSettings, managedChannelEnvironment } from './channel-settings.ts';
 import { createChannelMedia } from './channel-media.ts';
 import { createChannelSessionStore } from './channel-session.ts';
@@ -1263,7 +1264,7 @@ async function initializeApplication(
     withTurnLock,
     changed: () => pagesChanged(ownerId),
   });
-  async function describeModelChoice(input: Record<string, unknown>) {
+  async function describeModelChoice(input: Record<string, unknown>, chat?: string) {
     const models = adapters.models;
     if (!models) return undefined;
     const view = models.view();
@@ -1292,7 +1293,7 @@ async function initializeApplication(
           : 'the schedule being created'
         : scope === 'task'
           ? id
-            ? `the task "${await tasks.modelTask(id)}"`
+            ? `${id === chat ? 'this chat, ' : ''}the task "${await tasks.modelTask(id)}"`
             : 'the task being started'
           : {
               chat: 'when the owner talks to Nod',
@@ -2909,8 +2910,12 @@ async function initializeApplication(
           const prepared = action.startsWith('schedule_')
             ? await personal.prepareScheduleChange(action, args)
             : undefined;
+          const chat =
+            action === 'model_select'
+              ? await chatModelArgs(pool, ownerId, turn.turnId, args)
+              : undefined;
           const input: Record<string, unknown> =
-            prepared?.input ?? (await personal.validateReview(action, args));
+            prepared?.input ?? (await personal.validateReview(action, chat?.args ?? args));
           const current = prepared?.before ?? undefined;
           if (action === 'schedule_pause' && current?.enabled === false)
             return personal.getSchedule(String(input.id));
@@ -2922,7 +2927,7 @@ async function initializeApplication(
           const rules = 'rules' in input ? preferences?.rules : undefined;
           const targetModel =
             action === 'model_select'
-              ? await describeModelChoice(input)
+              ? await describeModelChoice(input, chat?.chat)
               : action === 'schedule_create' && input.model
                 ? await describeModelChoice({
                     scope: 'schedule',
