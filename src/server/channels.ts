@@ -1814,14 +1814,15 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       return true;
     }
     let postStarted = false;
-    let topicId: string | null | undefined;
+    let topicId: string | undefined;
     try {
       let topicFailure: unknown;
-      topicId = await topicFor(row).catch((cause) => {
+      const placed = await topicFor(row).catch((cause) => {
         logFailure('channel_topic_failed', cause);
         topicFailure = cause;
         return undefined;
       });
+      topicId = typeof placed === 'string' ? placed : undefined;
       const silent =
         row.quiet &&
         !(
@@ -1851,9 +1852,15 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
         return true;
       }
       sendRetry.delete(row.message_id);
-      if (row.web && (topicId === null || topicFailure !== undefined)) {
+      if (row.web && (typeof placed === 'object' || topicFailure !== undefined)) {
         await block(
-          !retryable ? 'topic_unavailable' : silent ? 'copy_expired' : 'topic_unreachable',
+          typeof placed === 'object'
+            ? placed.held
+            : !retryable
+              ? 'topic_unavailable'
+              : silent
+                ? 'copy_expired'
+                : 'topic_unreachable',
           'sending',
         );
         return true;
@@ -2015,7 +2022,10 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       signal: AbortSignal.any([receiving.signal, AbortSignal.timeout(30_000)]),
     };
     const mode = await topicMode(row, target.signal);
-    if (!mode.enabled) return row.web && !(await waitsForAnswer(row.message_id)) ? null : undefined;
+    if (!mode.enabled) {
+      const held = row.web ? await heldCopy(row.message_id) : undefined;
+      return held ? { held } : undefined;
+    }
     if (!row.turn_id) return wanted ?? undefined;
     const task = wanted
       ? await pool.query<{ title: string; topic_id: string | null; name: string | null }>(
@@ -2035,7 +2045,9 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     const key = JSON.stringify([row.provider, row.account_id, row.sender_id, wanted]);
     let topicId = createdTopics.get(key);
     if (!topicId && !transport.createTopic)
-      return row.web ? null : mainTopicFor(row, mode.ownerTopics, target.signal);
+      return row.web
+        ? { held: 'topic_unavailable' }
+        : mainTopicFor(row, mode.ownerTopics, target.signal);
     if (!topicId)
       try {
         topicId = await transport.createTopic!({
@@ -2060,23 +2072,29 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     return saved.rows[0]?.topic_id ?? topicId;
   }
 
-  async function waitsForAnswer(messageId: string) {
+  async function heldCopy(messageId: string) {
     const approvals = Boolean(
       (await pool.query("SELECT to_regclass('approvals') AS name")).rows[0]?.name,
     );
-    const waiting = await pool.query(
-      `SELECT 1 FROM messages m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
-       WHERE m.id=$1 AND m.owner_id=$2 AND ((u.status='waiting' AND u.waiting_reason='question'
-         AND m.id=(SELECT q.id FROM messages q WHERE q.turn_id=u.id AND q.owner_id=u.owner_id
-           AND q.role='assistant' ORDER BY q.created_at DESC,q.id DESC LIMIT 1))${
-             approvals
-               ? ` OR EXISTS (SELECT 1 FROM approvals a WHERE a.confirmation_message_id=m.id
-           AND a.owner_id=m.owner_id AND a.status='pending')`
-               : ''
-           })`,
-      [messageId, ownerId],
-    );
-    return Boolean(waiting.rowCount);
+    const state = (
+      await pool.query<{ waiting: boolean; asked: boolean }>(
+        `SELECT (u.status='waiting' AND u.waiting_reason='question' AND m.id=q.id) OR p.pending AS waiting,
+           m.answer_choices IS NOT NULL OR (u.waiting_reason IS NOT NULL AND m.id=q.id) OR p.asked AS asked
+         FROM messages m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
+         CROSS JOIN LATERAL (SELECT q.id FROM messages q WHERE q.turn_id=u.id AND q.owner_id=u.owner_id
+           AND q.role='assistant' ORDER BY q.created_at DESC,q.id DESC LIMIT 1) q
+         CROSS JOIN LATERAL (SELECT ${
+           approvals
+             ? `COALESCE(bool_or(a.status='pending'),false) AS pending,count(*)>0 AS asked FROM approvals a
+           WHERE a.confirmation_message_id=m.id AND a.owner_id=m.owner_id`
+             : 'false AS pending,false AS asked'
+         }) p
+         WHERE m.id=$1 AND m.owner_id=$2`,
+        [messageId, ownerId],
+      )
+    ).rows[0];
+    if (state?.waiting) return undefined;
+    return state?.asked ? 'question_closed' : 'topics_off';
   }
 
   async function mainTopicFor(row: OutboxRow, ownerTopics: boolean, signal: AbortSignal) {
