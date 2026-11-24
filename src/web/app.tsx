@@ -9,6 +9,7 @@ import { Channels } from './pages/channels';
 import { Credentials, Payment } from './pages/credentials';
 import { Scheduled } from './pages/tasks';
 import { Jobs } from './pages/jobs';
+import { Pages } from './pages/pages';
 import { PreparedWork } from './pages/prepared';
 import { useAppState } from './hooks/use-app-state';
 import { useChatUnread } from './hooks/use-chat-unread';
@@ -318,6 +319,7 @@ function Workspace({
               <Scheduled onAsk={askInChat} activity={connected ? state?.activity : undefined} />
             )}
             {path === '/jobs' && <Jobs />}
+            {path === '/pages' && <Pages />}
             {preparedWorkId(path) && <PreparedWork key={path} id={preparedWorkId(path)!} />}
             {settings}
             {!settingsPage(path) &&
