@@ -1,6 +1,6 @@
 ---
 title: Job search
-description: Keep your CVs and job profile in Nod, find and score jobs from scans, Telegram channels and alert emails, follow the companies and the people you invited, get a referral message for each accept, pace invites in waves, pair a browser helper, mark a company no luck, and see what stays private. This page describes a fork of Nod.
+description: Keep your CVs and job profile in Nod, find and score jobs from scans, Telegram channels and alert emails, follow the companies and the people you invited, get a referral message for each accept, pace invites in waves, pair a browser helper, apply on a company's own site when referrals don't work out, and see what stays private. This page describes a fork of Nod.
 sidebar:
   order: 10
 ---
@@ -47,7 +47,7 @@ Nod tailors a CV only when it applies on a company's own application form, and a
 
 ## The profile
 
-The **Profile** tab shows what Nod drafted from your main CV: the name and one-line introduction it uses in messages, your location, target roles, regions, languages, programmes and tracks, work authorization and links. It also holds how many invites a day and a week to send, after how many days without an accepted invite or a reply someone has had their chance, and the [waves](#waves-and-limits): how many people to invite at a company at a time, and at most.
+The **Profile** tab shows what Nod drafted from your main CV: the name and one-line introduction it uses in messages, your location, target roles, regions, languages, programmes and tracks, work authorization and links. It also holds how many invites a day and a week to send, after how many days without an accepted invite or a reply someone has had their chance, the [waves](#waves-and-limits): how many people to invite at a company at a time, and at most, and how much Nod [applies](#applying) by itself: how many apply chats it starts a day (3), and how many postings it applies to at a company (2).
 
 Nothing here is required. Change a field and select **Save profile**, or tell Nod in chat. If the profile changed since you opened it, Nod doesn't save your version and asks you to reload it.
 
@@ -85,9 +85,9 @@ Nod also suggests a few public Telegram job channels for your regions and roles.
 
 ## Postings
 
-The **Postings** tab lists the jobs Nod found, best score first. Filter by status (new, shortlisted, skipped or all), score and source. Each posting shows its score (a short check, or **full** for a full score), Nod's one-line reason and where it came from. Its title opens the job in a new tab.
+The **Postings** tab lists the jobs Nod found, best score first. Filter by status (new, shortlisted, applied, skipped or all), score and source. Each posting shows its score (a short check, or **full** for a full score), Nod's one-line reason and where it came from. Its title opens the job in a new tab. A posting Nod [applied to](#applying) shows **Applied on** with the date, the site's reference and its tailored CV, and **Apply chat** opens the chat that applied.
 
-Select **Shortlist** or **Skip**, or **Back to new**. Your choice stays: the Job radar changes the status of new postings only. If a posting changed since you loaded the list, Nod doesn't save your change and asks you to reload.
+Select **Shortlist** or **Skip**, or **Back to new**. Select **I applied** when you applied yourself, for example in your own browser. Your choice stays: the Job radar changes the status of new postings only. If a posting changed since you loaded the list, Nod doesn't save your change and asks you to reload.
 
 ## Sources
 
@@ -146,13 +146,65 @@ Nod can't stop an invite you send. Invites past your limits are still logged, an
 
 ### No luck
 
-Nod counts a company as **no luck** only when its waves are done: you invited the most people there (10 by default), each had their chance, and nobody referred you. Your tick overrides it both ways. Nod only shows that a company counts as no luck; it doesn't apply anywhere until you tick the box. Select **Keep trying** to keep a company open, and **Let Nod decide** to go back to the waves.
+Nod counts a company as **no luck** only when its waves are done: you invited the most people there (10 by default), each had their chance, and nobody referred you. Your tick overrides it both ways. When a company with open postings comes to count as no luck, Nod [applies](#applying) there by itself. Select **Keep trying** to keep a company open, and **Let Nod decide** to go back to the waves.
 
 ### No luck, apply here
 
 Tick **No luck, apply here** on a company to give up on referrals there. Nod opens one chat for it, **Apply for the company I marked no luck**, and **Open the apply chat** takes you to it. Ticking again, or from two windows at once, never opens a second chat. Unticking keeps the chat. If the chat couldn't start, or was deleted, select **Start the apply chat**.
 
-Applying on a company's own site comes in a later update. For now that chat lists the company's open postings with their scores and links, and Nod asks you before anything is submitted.
+## Applying
+
+When referrals at a company don't work out, Nod applies for you on the company's own careers site, one posting at a time, with a CV tailored to that posting.
+
+### What starts it
+
+- **Your tick.** **No luck, apply here** opens the company's apply chat at once.
+- **Nod, by itself.** When a company with open postings comes to count as [no luck](#no-luck), Nod opens its apply chat, **Apply for a company that counts as no luck**. It does so for at most 3 companies a day in your time zone (**Apply chats Nod starts by itself a day** on the **Profile** tab), never for a company where someone referred you or one you keep trying, and never twice for the same company. During your quiet hours, the chat waits until they end.
+
+A company has at most one apply chat, however it starts: a tick while Nod is opening one, or Nod finding the company again later, leads to the same chat. The company shows **Apply chat: ticked** or **started automatically**, with **working**, **needs you** or **done**.
+
+### Your rule
+
+A chat Nod starts by itself carries no words from you, so only your [rules](/trust/approvals/#your-rules) let it act there. Send Nod this rule once in chat:
+
+> When a company is marked no luck, apply to its matching jobs on its own careers site with a tailored CV. Ask me before the final Submit.
+
+With the rule, Nod fills in the forms on the company's own site and asks you before each final Submit. Without it, a chat Nod started by itself only reads and prepares: it chooses the postings and makes the tailored CVs and answer sheets, tells you once that the rule would let it go on by itself, and stops. Reply in that chat to let it continue there. In a chat you ticked, your tick asks Nod to apply at that company, and the [trust check](/trust/approvals/) asks you about any step it doesn't cover.
+
+### What Nod does
+
+For each posting, at most 2 at a company (**Applications a company, at most**):
+
+1. **Chooses** the open postings that match your target roles best, and scores a posting fully first when it has no full score.
+2. **Checks for an earlier application** at that employer for that role, in the posting's status and, when Gmail is connected, in your job email, read-only.
+3. **Finds the job on the company's own careers site** with Nod's own browser. A LinkedIn or job-board link only tells Nod which job to look for there.
+4. **Makes a tailored CV** from your main CV, which must pass career-ops' fact and ATS checks. Your main CV doesn't change.
+5. **Prepares an answer sheet** from your CV and profile. An answer your files don't give stays blank, and Nod lists it for you.
+6. **Signs in or creates an account** only through [Vault](/trust/vault/) and the trust check. A CAPTCHA is handed to you in Nod's browser.
+7. **Fills in the form and stops before the final Submit.** Nod shows you in the chat what it will send: the posting, each field, the blanks and the CV file. Your yes to the question that follows submits it, once. After a no, it stays unsent.
+8. **Records it.** After a confirmed submit, the posting shows **Applied on** with its date, the site's reference and the tailored CV. A submit that failed or was interrupted may still have gone through, so Nod never repeats it: it looks for a confirmation on the site or in your email instead.
+
+### What Nod asks you first
+
+- Every final Submit.
+- Creating an account on a careers site, unless your rule or your words say Nod may.
+- A required answer your CV and profile don't give.
+- Anything else your rules ask Nod to check with you first.
+
+### What Nod never does
+
+- Open LinkedIn, or use Easy Apply or a job board's own apply button.
+- Apply to every matching posting at once: each submission is its own decision, and Nod stops at the limit for each company.
+- Guess a legal answer: work authorization or sponsorship, willingness to relocate, salary, legal declarations, accommodation choices, or disability, veteran and demographic questions. It keeps pay period, currency and base versus total pay apart, and notes when "remote" has a country or time-zone limit.
+- Submit the same application twice.
+
+### Finish in your own browser
+
+When a site signs in only with Google or another account Nod can't use, or keeps showing a CAPTCHA, Nod stops and sends you the answer sheet and the tailored CV with the application link. Finish the application there, then select **I applied** on the posting so the Jobs page shows it.
+
+### Costs
+
+One application can use a lot of model tokens: the careers site, the score, the tailored CV and the form together often take 100,000 to 300,000. They count like any other work, so a long application can reach the [task check-in](/use/spending/#task-check-ins) and ask you before it continues. On a ChatGPT plan, the check-in counts plan usage at API prices.
 
 ## A paired browser helper
 
@@ -187,19 +239,21 @@ Each paired helper can start at most 5 apply chats and add at most 30 new compan
 
 ## Who can change job records
 
-| Change                                             | Who                                                                                                   |
-| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| Anything on the Jobs page                          | You. Your own edits need no check                                                                     |
-| A CV's text, the profile, adding a CV, the main CV | Nod, only in work that started from your message, such as the conversion chat or a task you asked for |
-| The PDF of a Word CV                               | Nod, in work you started or in a schedule                                                             |
-| Invite limits, no-luck days and waves              | Nod, only when your words ask for exactly that change; otherwise it asks you to approve it            |
-| Adding postings, their scores and their status     | Nod, in work you started or in a schedule. A schedule changes the status of new postings only         |
-| Telegram channels and scanner switches             | Nod, only in work that started from your message                                                      |
-| People you invited and their status                | Nod, only in work that started from your message. A browser helper you paired                         |
-| Referral messages                                  | Nod makes one when someone accepts. Nod in chat, only in work that started from your message          |
-| No luck, apply here                                | You, on the Jobs page or through a browser helper you paired                                          |
+| Change                                              | Who                                                                                                   |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| Anything on the Jobs page                           | You. Your own edits need no check                                                                     |
+| A CV's text, the profile, adding a CV, the main CV  | Nod, only in work that started from your message, such as the conversion chat or a task you asked for |
+| The PDF of a Word CV                                | Nod, in work you started or in a schedule                                                             |
+| Invite limits, no-luck days, waves and apply limits | Nod, only when your words ask for exactly that change; otherwise it asks you to approve it            |
+| Adding postings, their scores and their status      | Nod, in work you started or in a schedule. A schedule changes the status of new postings only         |
+| A posting applied, and its tailored CV              | You, with **I applied**. Nod, in work you started or in that company's own apply chat                 |
+| Telegram channels and scanner switches              | Nod, only in work that started from your message                                                      |
+| People you invited and their status                 | Nod, only in work that started from your message. A browser helper you paired                         |
+| Referral messages                                   | Nod makes one when someone accepts. Nod in chat, only in work that started from your message          |
+| No luck, apply here                                 | You, on the Jobs page or through a browser helper you paired                                          |
+| Opening an apply chat by itself                     | Nod's server, never a chat or a tool, within the apply limits                                         |
 
-These records are your own private data, so most changes skip the [trust check](/trust/). Invite limits, no-luck days and waves go through it like Nod's other settings, because they decide how much Nod does on its own later.
+These records are your own private data, so most changes skip the [trust check](/trust/). Invite limits, no-luck days, waves and apply limits go through it like Nod's other settings, because they decide how much Nod does on its own later. Everything Nod does on a careers site, from signing in to the final Submit, goes through the trust check.
 
 ## What stays private
 
@@ -210,4 +264,5 @@ These records are your own private data, so most changes skip the [trust check](
 - People you invited are saved in Nod's database with their name, headline, company, status and profile link. Their profile and message links are only shown for you to open; nothing Nod runs opens or fetches them, or contacts LinkedIn.
 - To tailor a referral message, Nod sends your small model your filled-in message, your language-by-country rule when you haven't chosen the person's language, and the person's name, headline and company, and nothing else. The message Nod sends you about an accept goes only to you.
 - A paired browser helper's key works only for its own requests to Nod on this computer, never for the rest of Nod.
+- A tailored CV and its answer sheet stay in Nod's database and workspace. Nod sends them only to the company's own application form, as part of that application, or to you when you finish in your own browser. Uploading the CV to a form goes through the trust check like any other upload. career-ops builds the answer sheet's form fields from your profile in the workspace, without opening a page or sending anything.
 - The job search doesn't need LinkedIn: jobs come from scans, Telegram channels, alert emails, links you share and company career pages. To make sure Nod never opens a website, add a rule in chat, such as "Never open linkedin.com, in the browser or with workspace scripts."
