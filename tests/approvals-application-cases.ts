@@ -1577,6 +1577,116 @@ export const approvalCases = inParts(
             (await put(`/api/tasks/${randomUUID()}/model`, { model: null })).statusCode,
             404,
           );
+
+          const chatModelOf = async (id: string) =>
+            (await pool.query('SELECT model FROM tasks WHERE id=$1', [id])).rows[0]?.model;
+          const latestReply = async (session: string) =>
+            (
+              await pool.query<{ id: string }>(
+                `SELECT m.id FROM messages m JOIN turns u ON u.id=m.turn_id
+                 WHERE u.session_id=$1 AND m.role='assistant' ORDER BY m.created_at DESC,m.id DESC LIMIT 1`,
+                [session],
+              )
+            ).rows[0]!.id;
+          const say = async (session: string, text: string) => {
+            const sent = await request('POST', '/api/messages', {
+              text,
+              replyToMessageId: await latestReply(session),
+              clientMessageId: randomUUID(),
+            });
+            assert.equal(sent.statusCode, 200, sent.body);
+            await waitFor(sent.json().turnId, 'succeeded');
+            return sent.json().turnId as string;
+          };
+          const retiredChat = await request('POST', '/api/messages', {
+            text: 'Synthetic chat on a retired model',
+            newChat: true,
+            clientMessageId: randomUUID(),
+            chatModel: { ...lightChoice, modelId: 'gpt-retired' },
+          });
+          assert.equal(retiredChat.statusCode, 400, retiredChat.body);
+          assert.match(retiredChat.json<{ error: string }>().error, /available text model/);
+          assert.equal(
+            (
+              await pool.query(
+                "SELECT 1 FROM messages WHERE text='Synthetic chat on a retired model'",
+              )
+            ).rowCount,
+            0,
+          );
+          assert.equal(
+            (
+              await request('POST', '/api/messages', {
+                text: 'Synthetic main message with a model',
+                chatModel: lightChoice,
+              })
+            ).statusCode,
+            400,
+          );
+          const fresh = await request('POST', '/api/messages', {
+            text: 'Synthetic chat on its own model',
+            newChat: true,
+            clientMessageId: randomUUID(),
+            chatModel: lightChoice,
+          });
+          assert.equal(fresh.statusCode, 200, fresh.body);
+          const freshTurn = fresh.json().turnId as string;
+          await waitFor(freshTurn, 'succeeded');
+          const chat = (
+            await pool.query<{ task_id: string }>('SELECT task_id FROM turns WHERE id=$1', [
+              freshTurn,
+            ])
+          ).rows[0]!.task_id;
+          assert.deepEqual(await chatModelOf(chat), lightChoice);
+          assert.deepEqual(modelsOf(freshTurn), ['gpt-6-luna']);
+          assert.equal(
+            (await request('GET', '/api/tasks')).json<Task[]>().find((item) => item.id === chat)
+              ?.work,
+            'chat',
+          );
+          assert.equal((await put(`/api/tasks/${chat}/model`, { model: null })).statusCode, 200);
+          assert.deepEqual(modelsOf(await say(chat, 'Synthetic chat on the default model')), [
+            before!.modelId,
+          ]);
+
+          const chatWords = `Use GPT-6 Luna for this chat ${randomUUID()}`;
+          asked.add(chatWords);
+          batches.set(chatWords, {
+            subagents: false,
+            sequential: true,
+            calls: [{ tool: 'nod', action: 'model_select', args: { args: lightChoice } }],
+          });
+          const checks = fallbackChecks.length;
+          const chatErrors = batchErrors.length;
+          const worded = await say(chat, chatWords);
+          assert.deepEqual(batchErrors.slice(chatErrors), []);
+          assert.deepEqual(await chatModelOf(chat), lightChoice);
+          assert.deepEqual(models.view().selection, before);
+          assert.equal((await approvalsFor(worded)).length, 0);
+          assert.ok(
+            fallbackChecks
+              .slice(checks)
+              .some((input) => JSON.stringify(input).includes('this chat, the task')),
+          );
+          assert.deepEqual(modelsOf(await say(chat, 'Synthetic chat after the words')), [
+            'gpt-6-luna',
+          ]);
+
+          const foreign = randomUUID();
+          await pool.query(
+            `INSERT INTO tasks(id,owner_id,title,done_when,now_text,session_id)
+             VALUES($1,$2,'Synthetic foreign chat','','',$1)`,
+            [foreign, `${ownerId}-other`],
+          );
+          assert.equal(
+            (await put(`/api/tasks/${foreign}/model`, { model: lightChoice })).statusCode,
+            404,
+          );
+          assert.equal(await chatModelOf(foreign), null);
+          await pool.query('DELETE FROM tasks WHERE id=$1', [foreign]);
+          await request('POST', `/api/tasks/${chat}/stop`);
+          await pool.query('UPDATE turns SET task_id=NULL WHERE task_id=$1', [chat]);
+          await pool.query('DELETE FROM tasks WHERE id=$1', [chat]);
           await request('POST', `/api/tasks/${task.id}/stop`);
           await pool.query('UPDATE turns SET task_id=NULL WHERE task_id=$1', [task.id]);
           await pool.query('DELETE FROM tasks WHERE id=$1', [task.id]);
