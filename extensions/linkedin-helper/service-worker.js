@@ -3,8 +3,13 @@
   const linkedIn = 'https://www.linkedin.com/';
   const nodAddress = /^http:\/\/(?:127\.0\.0\.1|localhost):\d{2,5}$/;
   const tokenShape = /^[A-Za-z0-9_-]{43}$/;
-  const personId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   const statuses = new Set(['invited', 'accepted', 'asked', 'replied', 'referred', 'declined']);
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const retries = 10;
+  let trusted = '';
+  let greeting = null;
 
   class Problem extends Error {
     constructor(kind, message) {
@@ -17,17 +22,114 @@
   chrome.runtime.onInstalled.addListener(setUp);
   chrome.runtime.onStartup.addListener(setUp);
 
+  const hex = (buffer) =>
+    [...new Uint8Array(buffer)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  const base64url = (buffer) =>
+    btoa(String.fromCharCode(...new Uint8Array(buffer)))
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+  const fromBase64url = (value) =>
+    Uint8Array.from(atob(value.replace(/-/g, '+').replace(/_/g, '/')), (letter) =>
+      letter.charCodeAt(0),
+    );
+  const digest = async (bytes) => hex(await crypto.subtle.digest('SHA-256', bytes));
+
   async function pairing() {
     try {
-      const response = await fetch(chrome.runtime.getURL('pairing.json'), { cache: 'no-store' });
+      const response = await fetch(chrome.runtime.getURL('.pairing.json'), { cache: 'no-store' });
       if (!response.ok) return null;
       const value = await response.json();
-      return nodAddress.test(value?.nod) && tokenShape.test(value?.token)
-        ? { nod: value.nod, token: value.token }
-        : null;
+      if (!nodAddress.test(value?.nod) || !uuid.test(value?.id) || !tokenShape.test(value?.token))
+        return null;
+      const secret = await crypto.subtle.digest('SHA-256', encoder.encode(value.token));
+      const key = await crypto.subtle.importKey(
+        'raw',
+        secret,
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign', 'verify'],
+      );
+      return { nod: value.nod, id: value.id, key };
     } catch {
       return null;
     }
+  }
+
+  async function send(paired, path, body) {
+    const text = JSON.stringify(body);
+    const url = new URL(`/api/helper/${path}`, paired.nod);
+    const time = String(Date.now());
+    const signature = base64url(
+      await crypto.subtle.sign(
+        'HMAC',
+        paired.key,
+        encoder.encode(
+          [
+            'nod-helper-request',
+            'POST',
+            url.host,
+            url.pathname + url.search,
+            time,
+            await digest(encoder.encode(text)),
+          ].join('\n'),
+        ),
+      ),
+    );
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        cache: 'no-store',
+        credentials: 'omit',
+        redirect: 'error',
+        headers: {
+          'content-type': 'application/json',
+          'x-nod-helper': paired.id,
+          'x-nod-time': time,
+          'x-nod-signature': signature,
+        },
+        body: text,
+      });
+    } catch (error) {
+      trusted = '';
+      throw new Problem(
+        'offline',
+        `Nod isn't answering at ${paired.nod}. Start Nod, or run pair-helper.ps1 again if it now uses another address. (${error.message})`,
+      );
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const answer = response.headers.get('x-nod-signature') || '';
+    const genuine =
+      tokenShape.test(answer) &&
+      (await crypto.subtle.verify(
+        'HMAC',
+        paired.key,
+        fromBase64url(answer),
+        encoder.encode(
+          ['nod-helper-response', signature, String(response.status), await digest(bytes)].join(
+            '\n',
+          ),
+        ),
+      ));
+    if (!genuine) {
+      trusted = '';
+      throw new Problem(
+        'unverified',
+        `What answers at ${paired.nod} didn't prove it is the Nod this panel is paired with (HTTP ${response.status}), so the panel sends it nothing. Start Nod, then run pair-helper.ps1 again.`,
+      );
+    }
+    if (response.ok) return { bytes, response };
+    let reason = '';
+    try {
+      reason = JSON.parse(decoder.decode(bytes))?.error || '';
+    } catch {
+      reason = '';
+    }
+    throw new Problem(
+      response.status === 400 ? 'invalid' : 'error',
+      `${reason || 'Nod refused the request.'} (HTTP ${response.status})`,
+    );
   }
 
   async function nod(path, body = {}) {
@@ -37,31 +139,18 @@
         'unpaired',
         'This panel is not paired with Nod yet. On the Jobs page, open Helper and select Pair the Edge panel, then run pair-helper.ps1.',
       );
-    let response;
-    try {
-      response = await fetch(`${paired.nod}/api/helper/${path}`, {
-        method: 'POST',
-        cache: 'no-store',
-        credentials: 'omit',
-        redirect: 'error',
-        headers: { authorization: `Bearer ${paired.token}`, 'content-type': 'application/json' },
-        body: JSON.stringify(body),
+    const name = `${paired.nod} ${paired.id}`;
+    if (trusted !== name) {
+      greeting ??= send(paired, 'hello', {}).finally(() => {
+        greeting = null;
       });
-    } catch (error) {
-      throw new Problem(
-        'offline',
-        `Nod isn't answering at ${paired.nod}. Start Nod, or run pair-helper.ps1 again if it now uses another address. (${error.message})`,
-      );
+      await greeting;
+      trusted = name;
     }
-    if (response.ok) return path === 'cv' ? response : response.json();
-    const reason = await response
-      .json()
-      .then((value) => value?.error)
-      .catch(() => '');
-    throw new Problem(
-      response.status === 401 || response.status === 403 ? 'unpaired' : 'error',
-      `${reason || 'Nod refused the request.'} (HTTP ${response.status})`,
-    );
+    const { bytes, response } = await send(paired, path, body);
+    return path === 'cv'
+      ? { bytes, disposition: response.headers.get('content-disposition') }
+      : JSON.parse(decoder.decode(bytes));
   }
 
   let chain = Promise.resolve();
@@ -81,17 +170,41 @@
   async function sendWaiting() {
     const { queue = [] } = await chrome.storage.local.get('queue');
     const waiting = [...queue];
+    const now = Date.now();
     let sent = 0;
-    while (waiting.length) {
-      const invite = waiting[0];
+    for (let index = 0; index < waiting.length;) {
+      const entry = waiting[index];
+      if (entry.next > now) {
+        index += 1;
+        continue;
+      }
       try {
-        await nod('invites', { company: invite.company, people: [invite.person] });
+        await nod('invites', { company: entry.invite.company, people: [entry.invite.person] });
+        waiting.splice(index, 1);
         sent += 1;
       } catch (error) {
-        if (error.kind !== 'error') break;
-        await remember(`The invite for ${invite.person.name} wasn't saved: ${error.message}`);
+        if (error.kind === 'invalid') {
+          waiting.splice(index, 1);
+          await remember(
+            `The invite for ${entry.invite.person.name} wasn't saved: ${error.message}`,
+          );
+        } else if (error.kind === 'error') {
+          const tries = entry.tries + 1;
+          if (tries >= retries) {
+            waiting.splice(index, 1);
+            await remember(
+              `The invite for ${entry.invite.person.name} wasn't saved after ${retries} tries: ${error.message}`,
+            );
+          } else
+            waiting[index] = {
+              ...entry,
+              tries,
+              next: now + Math.min(30_000 * 2 ** tries, 3_600_000),
+            };
+          await chrome.storage.local.set({ queue: waiting });
+          break;
+        } else break;
       }
-      waiting.shift();
       await chrome.storage.local.set({ queue: waiting });
     }
     if (sent) changed();
@@ -132,7 +245,9 @@
       if (!invite) return null;
       await serial(async () => {
         const { queue = [] } = await chrome.storage.local.get('queue');
-        await chrome.storage.local.set({ queue: [...queue, invite].slice(-200) });
+        await chrome.storage.local.set({
+          queue: [...queue, { invite, tries: 0, next: 0 }].slice(-200),
+        });
       });
       return flush();
     }
@@ -177,12 +292,11 @@
   }
 
   async function downloadCv() {
-    const response = await nod('cv');
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    const { bytes, disposition } = await nod('cv');
     let binary = '';
     for (let start = 0; start < bytes.length; start += 0x8000)
       binary += String.fromCharCode(...bytes.subarray(start, start + 0x8000));
-    const filename = fileName(response.headers.get('content-disposition'));
+    const filename = fileName(disposition);
     await chrome.downloads.download({
       url: `data:application/pdf;base64,${btoa(binary)}`,
       filename,
@@ -197,10 +311,11 @@
     const stored = await chrome.storage.local.get({ connections: true, problem: null });
     const settings = { connections: stored.connections };
     try {
-      const [company, accepted] = await Promise.all([
-        nod('company', page ? { slug: page.slug, ...(page.name ? { name: page.name } : {}) } : {}),
-        nod('accepted'),
-      ]);
+      const company = await nod(
+        'company',
+        page ? { slug: page.slug, ...(page.name ? { name: page.name } : {}) } : {},
+      );
+      const accepted = await nod('accepted');
       return {
         status: 'ready',
         ...company,
@@ -230,14 +345,14 @@
       );
     }
     if (message.type === 'status') {
-      if (!personId.test(message.id) || !statuses.has(message.status)) return null;
+      if (!uuid.test(message.id) || !statuses.has(message.status)) return null;
       return nod(`people/${message.id}/status`, {
         status: message.status,
         revision: message.revision,
       });
     }
     if (message.type === 'noLuck') {
-      if (!personId.test(message.id)) return null;
+      if (!uuid.test(message.id)) return null;
       return nod(`companies/${message.id}/no-luck`, {
         noLuck: message.noLuck,
         ...(Number.isInteger(message.revision) ? { revision: message.revision } : {}),

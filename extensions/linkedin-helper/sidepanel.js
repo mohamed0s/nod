@@ -13,6 +13,8 @@
     ready: 'Connected',
     unpaired: 'Not paired',
     offline: "Nod isn't running",
+    unverified: "Can't confirm Nod",
+    invalid: 'Problem',
     error: 'Problem',
   };
   const when = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });

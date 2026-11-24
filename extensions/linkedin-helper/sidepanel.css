@@ -88,6 +88,8 @@ main {
   color: var(--accent);
 }
 .pill[data-state='offline'],
+.pill[data-state='unverified'],
+.pill[data-state='invalid'],
 .pill[data-state='unpaired'],
 .pill[data-state='error'] {
   background: var(--danger-soft);

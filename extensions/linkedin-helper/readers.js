@@ -1,14 +1,16 @@
 globalThis.nodLinkedInReaders = (() => {
   const site = 'https://www.linkedin.com';
   const member = /^ACoAA[A-Za-z0-9_-]{10,120}$/;
-  const memberInLink = /(?:recipient=|fsd_profile:|fs_miniProfile:)(ACoAA[A-Za-z0-9_-]{10,120})/g;
+  const miniProfile = /^urn:li:fs_miniProfile:(ACoAA[A-Za-z0-9_-]{10,120})$/;
+  const hiddenParts = '.visually-hidden, [hidden], script, style';
 
   const text = (node) => {
     if (!node) return '';
-    const copy = node.cloneNode(true);
-    for (const hidden of copy.querySelectorAll('.visually-hidden, [hidden], script, style'))
-      hidden.remove();
-    return (copy.textContent || '').replace(/\s+/g, ' ').trim();
+    const walker = node.ownerDocument.createTreeWalker(node, 4);
+    let value = '';
+    for (let current = walker.nextNode(); current; current = walker.nextNode())
+      if (!current.parentElement?.closest(hiddenParts)) value += current.nodeValue;
+    return value.replace(/\s+/g, ' ').trim();
   };
 
   const decoded = (value) => {
@@ -19,20 +21,22 @@ globalThis.nodLinkedInReaders = (() => {
     }
   };
 
-  function profileLink(href) {
-    let url;
+  const onSite = (href) => {
     try {
-      url = new URL(href, site);
+      const url = new URL(href, site);
+      return url.origin === site ? url : null;
     } catch {
       return null;
     }
-    if (url.origin !== site) return null;
+  };
+
+  function profileLink(href) {
+    const url = onSite(href);
+    if (!url) return null;
     const segment = /^\/in\/([^/]+)\/?$/.exec(url.pathname)?.[1];
-    if (!segment || !decoded(segment)) return null;
-    const own = decoded(segment);
-    const fromQuery = /ACoAA[A-Za-z0-9_-]{10,120}/.exec(
-      decoded(url.searchParams.get('miniProfileUrn') || ''),
-    )?.[0];
+    const own = segment ? decoded(segment) : '';
+    if (!own) return null;
+    const fromQuery = miniProfile.exec(url.searchParams.get('miniProfileUrn') || '')?.[1];
     const memberUrn = member.test(own) ? own : fromQuery;
     return {
       profileUrl: `${site}/in/${segment}/`,
@@ -105,21 +109,14 @@ globalThis.nodLinkedInReaders = (() => {
     const segment = /^\/in\/([^/]+)\/?$/.exec(loc.pathname)?.[1];
     const own = segment ? decoded(segment) : '';
     if (!own || member.test(own)) return null;
-    const heading = doc.querySelector('main h1');
-    const top = heading?.closest('section');
+    const top = doc.querySelector('main h1')?.closest('section');
     if (!top) return null;
     const found = new Set();
     for (const anchor of top.querySelectorAll('a[href]')) {
-      const href = anchor.getAttribute('href') || '';
-      let path = '';
-      try {
-        path = new URL(href, site).pathname;
-      } catch {
-        continue;
-      }
-      const other = /^\/in\/([^/]+)/.exec(path)?.[1];
-      if (other && decoded(other) !== own) continue;
-      for (const match of decoded(href).matchAll(memberInLink)) found.add(match[1]);
+      const url = onSite(anchor.getAttribute('href') || '');
+      if (!url || !/^\/messaging\/compose\/?$/.test(url.pathname)) continue;
+      const recipient = url.searchParams.get('recipient') || '';
+      if (member.test(recipient)) found.add(recipient);
     }
     if (found.size !== 1) return null;
     return { profileUrl: `${site}/in/${segment}/`, memberUrn: [...found][0] };
