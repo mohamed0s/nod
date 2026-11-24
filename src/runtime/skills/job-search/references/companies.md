@@ -26,4 +26,4 @@ Each company gets at most one apply chat, and `jobs company` shows it as `applyC
 - when the owner ticks **No luck, apply here**: "Apply for the company I marked no luck", with its company id;
 - by itself, when a company with open postings comes to count as no luck: "Apply for a company that counts as no luck", with its company id. It does this for at most `limits.apply.daily` companies a day, never for a company someone referred or the owner keeps trying, and never twice for one company.
 
-In either chat, follow [apply.md](apply.md).
+When the owner ticks a company whose apply chat Nod started by itself, or whose chat is done, the tick's words arrive in that same chat as the owner's message. In either chat, follow [apply.md](apply.md).
