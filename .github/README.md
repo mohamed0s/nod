@@ -105,45 +105,101 @@ Free keys come with limits. Each service caps how many requests you send a minut
 
 ## Use the job search
 
-Open **Jobs** in the sidebar and go through its tabs once:
+Nod finds and scores jobs, keeps count of who you invited where, drafts each referral message and applies on companies' own careers sites. You do everything on LinkedIn yourself, and Nod asks you before it sends anything in your name. Open **Jobs** in the sidebar: its tabs are **Postings**, **Companies**, **CVs**, **Profile**, **Templates**, **Sources** and **Helper**, and a **Get started** list at the top shows what's left to set up.
 
-1. **CVs:** select **Add a CV** and choose a PDF or Word file. Nod converts it, drafts your job profile from it, and asks at most one short question. Add more if you like: the main CV goes with your referral requests, and **Mark as main** switches it. You can also send a CV to Nod in chat or on Telegram.
-2. **Profile:** check what Nod drafted: the name and one-line introduction it uses in messages, the roles and regions you want, the programmes and tracks you're applying to, which language to write in for each country, and your invite limits (15 a day and 80 a week to start). Select **Save profile**, or tell Nod the change in chat.
-3. **Templates:** write your referral message, one per language. Nod fills in the blanks for each person: `{greeting}`, `{first_name}`, `{company}`, `{programme}`, `{track}`, `{role}`, `{my_name}` and `{my_intro}`. The greeting follows the time of day when you look at the message: morning, afternoon or evening.
-4. **Sources:** turn on the scanners and add public Telegram channels that post jobs. For job-alert emails, connect Gmail on the **Apps** page.
-5. **Job radar:** when Nod has drafted your profile, it offers a morning check. Say yes, and every day at 07:30 it looks for new jobs, scores them against your CV and messages you the best ones. Each job shows once on **Postings**, best score first, to **Shortlist** or **Skip**.
-6. **Companies:** each company with its open jobs and the people you invited there, filtered by who is waiting to accept, accepted but not asked yet, asked with no reply, next wave, and no luck. You invite people on LinkedIn yourself. Tell Nod in chat or on Telegram, for example "I invited Sam Example at Example Co" with their profile link, or let a paired helper log it.
-   - **When someone accepts,** Nod fills in your template for them, its small model adjusts the wording once (for example Arabic forms for a woman), and Nod sends you the message on Telegram, ready to copy, with **Open profile** and **Message** links. Your first 10 messages say what was changed and why. The message is also under the person on this tab, with **Copy**, a language switch and **Remake**, and you can edit it.
-   - **Waves:** invite 5 people per company, up to 10. Each company shows how many more to invite today within your daily and weekly limits, and stops as soon as someone refers you. When nobody accepts or replies in time, the next wave opens.
-   - **No luck:** a company counts as no luck once all 10 had their chance. Where referrals don't work out, tick **No luck, apply here**, and Nod opens one chat to apply to that company.
-7. **Helper (optional):** pair a browser helper you install separately. It logs your invites, shows who accepted with their message and the wave count, and lets you switch a message's language, through signed routes on this computer only.
+Before you start:
 
-**Open profile** and **Message** open LinkedIn in a new tab for you; Nod never opens them itself. Your CVs, profile and templates stay in Nod's storage on your computer, never in the code. The details are in [Job search](https://github.com/mohamed0s/nod/blob/mine/docs/src/content/docs/use/job-search.md).
+- **Connect Telegram or WhatsApp** ([Channels](https://github.com/mohamed0s/nod/blob/mine/docs/src/content/docs/use/channels.mdx)) and write to Nod there once. Its pings about accepts and replies arrive in the chat where you last wrote to it.
+- **Connect Gmail** on the **Apps** page, for job-alert emails and Job mail.
+- **Keep the light model in mind.** Nod suggests your connection's light model for its job schedules, so the daily runs cost less ([Models](https://nod.n8n.io/docs/connect/models/)).
+
+### What runs by itself, and what needs you
+
+| Part                                      | Runs by itself / you            | When                                               | How to turn it on                                            |
+| ----------------------------------------- | ------------------------------- | -------------------------------------------------- | ------------------------------------------------------------ |
+| Job radar                                 | By itself                       | Every morning at 07:30                             | Say yes when Nod offers it ([step 5](#switch-it-on))         |
+| Weekly sweep                              | By itself, inside the Job radar | Once a week                                        | Its switch on **Sources**                                    |
+| Job mail: accepts, replies, company mail  | By itself                       | Every 30 minutes, 08:00 to 22:30                   | Choose the mailbox on **Sources**, then say yes              |
+| A message for each accept, and its ping   | By itself                       | When someone you invited accepts                   | Save a template on **Templates**                             |
+| Waves and no luck                         | By itself                       | Whenever your records change                       | On from the start                                            |
+| Apply chats for no-luck companies         | By itself, then you approve     | Within 10 minutes of a company counting as no luck | Send Nod the standing rule ([step 8](#switch-it-on))         |
+| Follow-ups due                            | By itself                       | 3 days after you asked someone, with no reply      | On from the start                                            |
+| Weekly report                             | By itself                       | Sundays at 19:00                                   | Say yes when Nod offers it ([step 7](#switch-it-on))         |
+| Inviting people                           | You                             | On LinkedIn                                        |                                                              |
+| Logging invites                           | You, or a paired helper         | As you invite                                      | Tell Nod in chat, or pair a helper ([step 9](#switch-it-on)) |
+| Sending each message with your CV         | You                             | After the ping                                     |                                                              |
+| **No luck, apply here**                   | You                             | When you give up on referrals at a company         | Tick it on the company                                       |
+| Each new careers site and each **Submit** | You                             | When an apply chat asks                            |                                                              |
+
+### What runs by itself
+
+Each part says when it runs, what it does, what it costs, where you see it and how to stop it. Model use shows on **Usage** like any other work.
+
+- **Job radar.** Every morning at 07:30 in your time zone, it reads every source that's on, drops duplicates, gives each new job a short check and fully scores the five best. Then it sends one message: the jobs worth a look, each with its score, company, title and link, then who accepted and waits for your message, the follow-ups due, the replies since yesterday and the companies whose next wave opened. A quiet day sends nothing.
+  - **Costs:** one run a day. Short checks are cheap; the five full scores read your CV and each job's page, and cost the most.
+  - **See it:** in that message, and on **Postings**, best score first.
+  - **Stop it:** pause **Job radar** on the **Scheduled** page.
+- **Weekly sweep.** Off at first. When it's on, the Job radar also reads, once a week, every company that Greenhouse, Lever and Ashby list publicly. That brings in many more jobs, so the run takes a while and its short checks cost more. You see the jobs on **Postings**. Turn it off with its switch on **Sources**.
+- **Job mail.** Every 30 minutes from 08:00 to 22:30, Nod's server checks the Gmail account you linked to LinkedIn for LinkedIn's "accepted your invitation" and new-message emails, and for emails from companies you applied to or asked someone at. It checks each sender, matches the emails to your records without a model, moves people to **Accepted** or **Replied**, and has its small model label each company's email interview, rejection or other. It never replies to anything.
+  - **Costs:** no model call when no new mail arrived. Otherwise one short run, plus one small-model label for each company email.
+  - **See it:** one ping per accept, reply and company email; the statuses, the **Interview**, **Rejected** or **Email reply** badge and the **Replied** filter on **Companies**; and the last run under **Job mail** on **Sources**.
+  - **Stop it:** pause **Job mail** on the **Scheduled** page.
+- **A message for each accept.** When someone you invited becomes **Accepted**, from Job mail, a helper or your own words, Nod fills in your template for them, its small model adjusts the wording once (for example Arabic forms for a woman), and Nod sends you the message on Telegram or WhatsApp, ready to copy, with **Open profile** and **Message** links. Your first 10 messages also say what it changed and why. Nod sends nothing to the person.
+  - **Costs:** filling in the template uses no model; tailoring is one small-model request.
+  - **See it:** in the ping, under the person on **Companies**, with **Copy**, **Edit**, **Remake** and **Language**, and in a paired helper.
+  - **Stop it:** there's no switch. It follows every accept of someone you logged.
+- **Waves and no luck.** Nod's server keeps count, with no model. It suggests inviting 5 people at a company at a time, up to 10, within your daily and weekly invite limits. Someone has had their chance after 7 days without accepting, 5 days without answering your request, or a decline, and the next wave opens when everyone so far has had theirs. A company counts as no luck once all 10 had their chance and nobody referred you. You see it in each company's wave line, the **Next wave** and **No luck** filters, the Job radar and a paired helper. **Keep trying** keeps one company open, and the numbers are on **Profile**.
+- **Apply chats.** With the [standing rule](#switch-it-on) in place, when a company with open jobs comes to count as no luck, Nod opens one chat for it, **Apply for a company that counts as no luck**, for at most 3 companies a day. It checks every 10 minutes and soon after your records change, and during your quiet hours it waits for them to end. For each job, at most 2 a company, it checks that you haven't applied already, finds the job on the company's own careers site, makes a tailored CV from your main CV, fills in the form and stops before the final **Submit**. Without the rule, it only picks the jobs, tells you once what the rule would let it do, and stops.
+  - **Costs:** the big one. An application often takes 100,000 to 300,000 tokens, and a long one reaches the [task check-in](https://github.com/mohamed0s/nod/blob/mine/docs/src/content/docs/use/spending.md#task-check-ins).
+  - **See it:** the chat in your chat list (and in its own Telegram topic when [topics](https://github.com/mohamed0s/nod/blob/mine/docs/src/content/docs/use/channels.mdx#telegram-topics) are on), **Apply chat: started automatically** on the company, and **Applied on** with the date and the site's reference on the posting.
+  - **Stop it:** set **Apply chats Nod starts by itself a day** to 0 on **Profile**, tell Nod "Pause preparation", or select **Keep trying** on a company.
+- **Follow-ups due.** When 3 days pass after you asked someone for a referral without a reply, they show **Follow-up due**, on their company and in the next Job radar. It comes once per person, with no model. Nod has no follow-up template: write it yourself, or ask Nod in chat for a draft. Then select **Followed up**, or **Dismiss**. Change the days on **Profile**.
+- **Weekly report.** Every Sunday at 19:00, Nod updates the **Job search weekly** page in **Pages** and sends you a short summary: the week's invites, accepts, requests, replies, referrals, applications and company replies, and what leads to replies, by template version, message language and company. The numbers are counted from your records, never estimated. It costs one light-model run a week. Pause **Weekly job report** on the **Scheduled** page to stop it.
+
+### What needs you
+
+- **Everything on LinkedIn.** Nod never opens LinkedIn. You send each invite, paste each message, attach your main CV and follow up. **Open profile** and **Message** open LinkedIn in a new tab for you.
+- **Telling Nod what happened,** when Job mail or a paired helper doesn't see it. In chat or on Telegram: "I invited Sam Example at Example Co" with their profile link, "I asked Sam Example", "Sam Example referred me". Or change the status next to the person on **Companies**, for example to **Asked** after you send your request.
+- **Yes or no to Nod's offers:** the Job radar, the Telegram channels it suggests, Job mail and the weekly report. It offers each once.
+- **Postings:** **Shortlist** or **Skip** what you've read, and select **I applied** when you applied yourself.
+- **No luck, apply here,** when you give up on referrals at a company before Nod would. Your tick opens its apply chat at once, without the standing rule.
+- **In an apply chat:** your yes to each new careers site (**Apply at** _company_ **on** _site_**?**) before Nod enters anything there, any required answer your CV and profile don't give, a CAPTCHA, and your yes to each final **Submit**. When a site signs in only with Google or keeps showing a CAPTCHA, Nod sends you the answer sheet and the tailored CV: finish in your own browser, then select **I applied** on the posting.
+- **Company emails:** Nod tells you about each one; you read and answer it yourself.
+
+### Switch it on
+
+Do these once, in this order. Each step names the button, or the words to send Nod in chat, on Telegram or on WhatsApp.
+
+1. **CV.** On **CVs**, select **Add a CV** and choose a PDF or Word file, or send the file on Telegram with "This is my CV". Nod converts it in a new chat, **Convert the CV I just added for job search**, drafts your profile from it and asks at most one short question. Your first CV is the main one; **Mark as main** switches it.
+2. **Profile and programmes.** On **Profile**, check **Name in messages**, **Introduction**, **Target roles** and **Regions**. Add what you're applying to under **Programmes and tracks**, one per line, such as `Example Graduate Programme: Data, Software`. Pick a **Message language**, and add exceptions under **Language by country**, such as `CA = fr-CA`. Select **Save profile**. Or tell Nod: "I'm applying to the Example Graduate Programme, tracks Data and Software."
+3. **Templates.** On **Templates**, pick a **Language** and write your referral message. Select a field under it to insert `{greeting}`, `{first_name}`, `{company}`, `{programme}`, `{track}`, `{role}`, `{my_name}` or `{my_intro}`. Fill in **Morning greeting**, **Afternoon greeting** and **Evening greeting**, or only **Any time**. Use **Add a language** for each other language, then **Save templates**.
+4. **Sources.** On **Sources**, **Company career sites and job boards** and **Job-alert emails** are on from the start; turn on **Weekly sweep of Greenhouse, Lever and Ashby** if you want it. Add public Telegram channels under **Add a channel**.
+5. **Job radar.** Nod offers it when it drafts your profile; say yes. If you missed it, send: "Set up the Job radar: every morning at 07:30, look for new jobs and message me the ones worth a look."
+6. **Job mail.** On **Sources**, under **Job mail**, choose the **Gmail account linked to LinkedIn**. Nod never guesses it. Nod offers the schedule once in chat, after Gmail is connected and you've invited someone; say yes, or send: "Check my job mail every 30 minutes."
+7. **Weekly report.** Nod offers it once, after your first referral request; say yes, or send: "Make me a weekly job report every Sunday evening."
+8. **The standing rule for applying.** Send it once:
+
+   > When a company is marked no luck, apply to its matching jobs on its own careers site with a tailored CV. Ask me before the final Submit.
+
+   Without it, an apply chat that Nod starts by itself only picks the jobs and stops. Reply in that chat, or tick **No luck, apply here**, to let it go on there.
+
+9. **The helper (optional).** Pair a browser helper on the **Helper** tab; its own guide explains it.
+10. **Limits.** On **Profile**: **Invites a day** (15) and **Invites a week** (80), **No luck after days without an accept** (7) and **No luck after days without a reply** (5), **Follow up after days without a reply** (3), **People in a wave** (5) and **People a company, at most** (10), **Apply chats Nod starts by itself a day** (3; 0 turns it off) and **Applications a company, at most** (2). Select **Save profile**. When you ask Nod in chat instead, it changes invite limits, no-luck days, waves and apply limits only when your words ask for exactly that change, and asks you first otherwise.
 
 ### A day of job hunting
 
-Once it's set up, a day looks like this:
+| When                               | Nod                                                                                                                                                                                                                            | You                                                                     |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- |
+| Every morning at 07:30             | The **Job radar** sends one message: new jobs worth a look, people who accepted and wait for your message, follow-ups due, replies since yesterday and companies whose next wave opened.                                       | Read it. **Shortlist** or **Skip** on **Postings**.                     |
+| While you're on LinkedIn           | A paired helper logs each invite you send and shows how many more to invite at that company today, within your limits. Without one, tell Nod who you invited.                                                                  | Send the invites.                                                       |
+| Every 30 minutes, 08:00 to 22:30   | **Job mail** reads your LinkedIn Gmail account for accepts, replies and company emails, updates the people and labels each company email.                                                                                      | Nothing, unless Nod asks who someone is.                                |
+| When someone accepts               | Nod fills in your template for them, tailors it once and sends it to you on Telegram with **Open profile** and **Message**.                                                                                                    | Paste it, attach your main CV, send it, and mark them **Asked**.        |
+| When a company emails you          | Nod pings you once per email and shows the label on the company. It never replies.                                                                                                                                             | Answer the ones that matter.                                            |
+| 3 days without a reply             | The person shows **Follow-up due**, on **Companies** and in the next morning's message.                                                                                                                                        | Follow up on LinkedIn, then select **Followed up**.                     |
+| When a company runs out of chances | Once all 10 people had their chance and nobody referred you, the company counts as no luck. With your rule, Nod opens one apply chat (up to 3 a day), finds the job on the company's own careers site and makes a tailored CV. | Say yes to the site, fill any blanks, then yes or no to the **Submit**. |
+| Sundays at 19:00                   | The **Job search weekly** page in **Pages** shows the week and what leads to replies, by company, language and template version.                                                                                               | Glance at it.                                                           |
 
-| When                                   | Nod                                                                                                                                                                                                                                                                                                                | You                                                         |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
-| Every morning at 07:30                 | The **Job radar** scans the career sites, your Telegram channels and job-alert emails, drops duplicates, scores what's new and sends one message: the jobs worth a look, people who accepted and are waiting for your message, follow-ups due, and companies where the next wave of invites is open.               | Read it.                                                    |
-| While you're on LinkedIn               | A paired helper logs each invite you send and shows how many more to invite at that company today, within your limits.                                                                                                                                                                                             | Send the invites.                                           |
-| When someone accepts                   | Nod notices from LinkedIn's email (or the helper), fills in your template for them, tailors it once and sends it to you on Telegram with **Open profile** and **Message**.                                                                                                                                         | Paste it, attach your CV, send it, and mark them **Asked**. |
-| Every 30 minutes, with **Job mail** on | Nod's server reads the Gmail account linked to your LinkedIn for accepts, replies and emails from companies you applied to, labels employer emails interview, rejection or other, and pings you once per email. It never replies.                                                                                  | Answer the ones that matter.                                |
-| 3 days without a reply                 | The person shows as **follow-up due**, in the morning message and on the **Companies** tab.                                                                                                                                                                                                                        | Follow up on LinkedIn.                                      |
-| When a company runs out of chances     | After all 10 people had their chance and nobody referred you, the company counts as no luck. With your rule in place, Nod opens one apply chat, finds the job on the company's own careers site and makes a tailored CV. It asks before it first enters your details on any site, and before the final **Submit**. | Answer those two questions.                                 |
-| Sundays                                | A **Weekly job report** page shows what leads to replies: by company, language and template version.                                                                                                                                                                                                               | Glance at it.                                               |
-
-To set it up once:
-
-1. Add your CV and let Nod draft the profile.
-2. Tell Nod your programmes and tracks.
-3. Say yes to the Job radar.
-4. Pick your LinkedIn Gmail account on **Sources** and say yes to Job mail and the weekly report.
-5. Pair the helper.
-6. Send Nod this rule:
-
-   > When a company is marked no luck, apply to its matching jobs on its own careers site with a tailored CV. Ask me before the final Submit.
+Your CVs, profile and templates stay in Nod's storage on your computer, never in the code. Everything else, including what each part sends to a model and who can change which record, is in [Job search](https://github.com/mohamed0s/nod/blob/mine/docs/src/content/docs/use/job-search.md).
 
 ## Use Pages
 
