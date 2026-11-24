@@ -20,6 +20,7 @@ import { appConfirmation } from '../src/ports/agent.ts';
 import { registerLocalAccess } from '../src/server/access.ts';
 import { runJobsTool } from '../src/runtime/jobs-tool.ts';
 import type { TelegramPost } from '../src/ports/job-sources.ts';
+import type { MemoryCurator } from '../src/ports/memory-curator.ts';
 import { telegramChannelPosts } from '../src/providers/public-web/telegram-channel.ts';
 import type { Turn } from '../src/runtime/turn.ts';
 
@@ -57,6 +58,8 @@ test('subagents can only read job search records', async () => {
     'source_update',
     'telegram',
     'person_update',
+    'draft_prepare',
+    'draft_save',
   ])
     await assert.rejects(runJobsTool(turn('helper'), { action }), /subagent can only read/);
   const reads = ['setup_status', 'cv_get', 'cv_file', 'list', 'sources', 'companies', 'company'];
@@ -202,6 +205,177 @@ const telegramPage = (posts: Array<{ id: number; at: string; body: string }>) =>
 </div></div></div>`,
     )
     .join('')}</section></body></html>`;
+
+test('referral templates fill without a model and greet by the local time', async () => {
+  const { fillTemplate, greetingFor, showDraft, templateFor } =
+    await import('../src/server/job-drafts.ts');
+  const body =
+    '{greeting} {first_name}, I am {my_name}, {my_intro}. {role} at {company}, {programme} ({track}).';
+  const all = {
+    first_name: 'Robin',
+    company: 'Example Co',
+    my_name: 'Sam Example',
+    my_intro: 'a synthetic analyst',
+    programme: 'Synthetic Programme',
+    track: 'Data',
+    role: 'Analyst',
+  };
+  const filled = fillTemplate(body, all);
+  assert.deepEqual(filled.missing, []);
+  assert.equal(
+    filled.text,
+    '{greeting} Robin, I am Sam Example, a synthetic analyst. Analyst at Example Co, Synthetic Programme (Data).',
+  );
+  assert.deepEqual(fillTemplate(body, { ...all, track: '', role: '' }).missing, ['role', 'track']);
+  assert.deepEqual(fillTemplate('{greeting} {first_name}', { first_name: 'Robin' }).missing, []);
+
+  const greetings = {
+    morning: 'Good morning',
+    afternoon: 'Good afternoon',
+    evening: 'Good evening',
+  };
+  const at = (utc: string) => new Date(utc);
+  for (const [utc, expected] of [
+    ['2026-03-02T07:59:59Z', 'Good evening'],
+    ['2026-03-02T08:00:00Z', 'Good morning'],
+    ['2026-03-02T14:59:59Z', 'Good morning'],
+    ['2026-03-02T15:00:00Z', 'Good afternoon'],
+    ['2026-03-02T19:59:59Z', 'Good afternoon'],
+    ['2026-03-02T20:00:00Z', 'Good evening'],
+  ] as const)
+    assert.equal(greetingFor(greetings, 'America/Sao_Paulo', at(utc)), expected, utc);
+  assert.equal(
+    greetingFor(
+      { morning: 'Good morning', default: 'Hi' },
+      'America/Sao_Paulo',
+      at('2026-03-02T16:00:00Z'),
+    ),
+    'Hi',
+  );
+  assert.equal(showDraft('{greeting} Robin,\nThanks', 'Hello'), 'Hello Robin,\nThanks');
+  assert.equal(showDraft('{greeting} Robin,\nThanks', ''), 'Robin,\nThanks');
+
+  const templates = [{ language: 'ar' }, { language: 'en' }, { language: 'fr-CA' }];
+  assert.equal(templateFor(templates, 'fr-CA', 'en')?.language, 'fr-CA');
+  assert.equal(templateFor(templates, 'ar-EG', 'en')?.language, 'ar');
+  assert.equal(templateFor(templates, 'de', 'en')?.language, 'en');
+  assert.equal(templateFor(templates, '', 'ar-EG')?.language, 'ar');
+  assert.equal(templateFor([{ language: 'ar' }], 'de', 'en')?.language, 'ar');
+  assert.equal(templateFor([], 'en', 'en'), null);
+});
+
+test('a tailored message keeps the owner’s fields, links and length', async () => {
+  const { checkTailoring } = await import('../src/server/job-drafts.ts');
+  const base = '{greeting} Robin, I am Sam Example. Portfolio: https://example.com/sam. Thank you.';
+  const offered = [
+    { language: 'en', text: base },
+    { language: 'ar', text: '{greeting} يا روبن، أنا سام. شكرًا.' },
+  ];
+  const reply = (change: Record<string, unknown>) => ({
+    language: 'en',
+    text: base,
+    changes: '',
+    ...change,
+  });
+  assert.deepEqual(checkTailoring(reply({ changes: 'Kept as it is.' }), offered), {
+    language: 'en',
+    text: base,
+    changes: 'Kept as it is.',
+  });
+  assert.equal(
+    (
+      checkTailoring(reply({ language: 'ar', text: offered[1]!.text }), offered) as {
+        language: string;
+      }
+    ).language,
+    'ar',
+  );
+  for (const [change, problem] of [
+    [{ language: 'de' }, /no template/],
+    [{ text: base.replace('Robin', '{first_name}') }, /left \{first_name\}/],
+    [{ text: base.replace('{greeting} ', '') }, /dropped the greeting/],
+    [{ text: `${base} See https://example.net/x` }, /added a link/],
+    [{ text: `${base} www.example.net` }, /added a link/],
+    [{ text: `${base} ${'Truly grateful. '.repeat(10)}` }, /much longer/],
+    [{ text: '{greeting} Robin.' }, /cut much/],
+    [{ changes: 'See https://example.net' }, /note/],
+    [{ text: 42 }, /JSON/],
+  ] as const)
+    assert.match(
+      (checkTailoring(reply(change), offered) as { problem?: string }).problem ?? '',
+      problem,
+      JSON.stringify(change),
+    );
+});
+
+test('waves pace the invites at a company and decide no luck', async () => {
+  const { automaticNoLuck, companyWaves, localDayStart } =
+    await import('../src/server/job-companies.ts');
+  const now = Date.parse('2026-03-10T12:00:00Z');
+  const day = 86_400_000;
+  const at = (ms: number) => new Date(now - ms).toISOString();
+  const person = (status: string, ms = day) => ({
+    status: status as 'invited',
+    invited_at: at(ms),
+    asked_at: status === 'asked' ? at(ms) : null,
+    declined_at: status === 'declined' ? at(ms) : null,
+  });
+  const settings = {
+    waves: { size: 5, max: 10 },
+    noLuck: { noAcceptDays: 7, noReplyDays: 5 },
+    inviteLimits: { daily: 15, weekly: 80 },
+  };
+  const quiet = { today: 0, week: 0 };
+  const waves = (people: ReturnType<typeof person>[], invites = quiet) =>
+    companyWaves(people, settings, invites, now);
+  const pick = (value: ReturnType<typeof waves>) => [value.state, value.wave, value.more];
+  const over = (count: number) => Array.from({ length: count }, () => person('invited', 8 * day));
+  const fresh = (count: number) => Array.from({ length: count }, () => person('invited', day));
+
+  assert.deepEqual(pick(waves([])), ['open', 1, 5]);
+  assert.deepEqual(pick(waves(fresh(4))), ['open', 1, 1]);
+  assert.deepEqual(pick(waves(fresh(5))), ['waiting', 1, 0]);
+  assert.deepEqual(pick(waves([...over(4), person('invited', 6 * day)])), ['waiting', 1, 0]);
+  assert.deepEqual(pick(waves([...over(4), person('accepted')])), ['waiting', 1, 0]);
+  assert.equal(waves([...over(4), person('accepted')]).owed, 1);
+  assert.deepEqual(pick(waves(over(5))), ['next', 2, 5]);
+  assert.deepEqual(pick(waves([...over(5), ...fresh(2)])), ['open', 2, 3]);
+  assert.deepEqual(pick(waves([...over(9), ...fresh(1)])), ['waiting', 2, 0]);
+  assert.deepEqual(pick(waves(over(10))), ['done', 2, 0]);
+  assert.deepEqual(pick(waves([...over(4), person('referred')])), ['stopped', 1, 0]);
+  assert.deepEqual(pick(waves(fresh(2), { today: 14, week: 20 })), ['open', 1, 1]);
+  assert.deepEqual(pick(waves(over(5), { today: 3, week: 79 })), ['next', 2, 1]);
+  const full = waves(fresh(1), { today: 16, week: 30 });
+  assert.deepEqual([full.more, full.left, full.over], [0, 4, 'day']);
+  assert.equal(waves(fresh(1), { today: 2, week: 81 }).over, 'week');
+
+  assert.equal(automaticNoLuck(over(9), settings, now), null);
+  assert.equal(automaticNoLuck([...over(9), person('invited', 6 * day)], settings, now), null);
+  assert.equal(automaticNoLuck([...over(9), person('referred', 20 * day)], settings, now), null);
+  assert.equal(
+    automaticNoLuck([...over(9), person('declined', 2 * day)], settings, now)?.toISOString(),
+    at(day),
+  );
+
+  const tokyo = localDayStart('Asia/Tokyo', new Date('2026-03-10T14:59:00Z'));
+  assert.equal(tokyo.toISOString(), '2026-03-09T15:00:00.000Z');
+  assert.equal(
+    localDayStart('Asia/Tokyo', new Date('2026-03-10T15:00:00Z')).toISOString(),
+    '2026-03-10T15:00:00.000Z',
+  );
+  assert.equal(
+    localDayStart('Asia/Tokyo', new Date('2026-03-10T14:59:00Z'), 6).toISOString(),
+    '2026-03-03T15:00:00.000Z',
+  );
+  assert.equal(
+    localDayStart('America/New_York', new Date('2026-03-08T12:00:00Z')).toISOString(),
+    '2026-03-08T05:00:00.000Z',
+  );
+  assert.equal(
+    localDayStart('America/New_York', new Date('2026-03-09T12:00:00Z')).toISOString(),
+    '2026-03-09T04:00:00.000Z',
+  );
+});
 
 test('alert emails and channel posts become postings without a model', async () => {
   const { alertPostings, telegramPostings } = await import('../src/server/jobs-parsers.ts');
@@ -489,7 +663,11 @@ test(
           .slice(0, 20);
       },
     };
-    const owner = (ownerId: string, turnLock = false) => {
+    const owner = (
+      ownerId: string,
+      turnLock = false,
+      extra: { curator?: MemoryCurator; timeZone?: () => Promise<string> } = {},
+    ) => {
       const artifacts = createArtifactService({ database: db.pool, ownerId, localRoot: root });
       const jobs = createJobs({
         pool: db.pool,
@@ -516,6 +694,7 @@ test(
         withTurnLock: (turnId, operation) =>
           turnLock ? withTurnLock(turnId, operation) : transaction(operation, db.pool),
         telegram,
+        ...extra,
       });
       const app = Fastify();
       jobs.registerRoutes(app);
@@ -622,6 +801,7 @@ test(
             links: [{ label: 'Portfolio', url: 'https://example.com/sam' }],
             inviteLimits: { daily: 15, weekly: 80 },
             noLuck: { noAcceptDays: 7, noReplyDays: 5 },
+            waves: { size: 5, max: 10 },
           },
         });
         assert.equal(saved.statusCode, 200, saved.body);
@@ -779,7 +959,11 @@ test(
           },
         );
         assert.equal(outcome, marker);
-        const current = { inviteLimits: before.inviteLimits, noLuck: before.noLuck };
+        const current = {
+          inviteLimits: before.inviteLimits,
+          noLuck: before.noLuck,
+          waves: before.waves,
+        };
         assert.deepEqual(asked, [{ input: { noLuck: { noReplyDays: 2 } }, current }]);
         assert.deepEqual(
           (await request(a, 'GET', '/api/jobs/profile')).json().profile.noLuck,
@@ -810,6 +994,7 @@ test(
             a.jobs.applyLimits({ noLuck: { noReplyDays: 2 } }, client, {
               inviteLimits: edited.inviteLimits,
               noLuck: edited.noLuck,
+              waves: edited.waves,
             }),
           db.pool,
         );
@@ -1596,7 +1781,17 @@ test(
         await assert.rejects(a.jobs.execute(stopped, entry), /no longer active/);
       });
 
-      await t.test('a company counts as no luck once everyone had their days', async () => {
+      await t.test('a company counts as no luck once its waves are done', async () => {
+        const page = (await request(c, 'GET', '/api/jobs/profile')).json();
+        assert.equal(
+          (
+            await request(c, 'PUT', '/api/jobs/profile', {
+              revision: page.revision,
+              profile: { ...page.profile, waves: { size: 1, max: 2 } },
+            })
+          ).statusCode,
+          200,
+        );
         const started = await turn(c, 'user');
         const before = chats.length;
         records(
@@ -1604,6 +1799,7 @@ test(
             action: 'person_update',
             people: [
               person('sam-example', 'Alpha Example', 'invited', ago(7 * day + 60_000)),
+              person('alpha-two', 'Alpha Example', 'declined', ago(8 * day)),
               person('beta-one', 'Beta Example', 'invited', ago(7 * day - 3_600_000)),
               person('gamma-one', 'Gamma Example', 'asked', ago(5 * day + 60_000)),
               person('gamma-two', 'Gamma Example', 'declined', ago(9 * day)),
@@ -1612,6 +1808,7 @@ test(
               person('epsilon-two', 'Epsilon Example', 'referred', ago(20 * day)),
               person('zeta-one', 'Zeta Example', 'invited', ago(30 * day)),
               person('zeta-two', 'Zeta Example', 'accepted', ago(20 * day)),
+              person('eta-one', 'Eta Example', 'invited', ago(8 * day)),
             ],
           }),
         );
@@ -1624,13 +1821,34 @@ test(
         assert.deepEqual(await names('waiting'), [
           'Beta Example',
           'Epsilon Example',
+          'Eta Example',
           'Zeta Example',
         ]);
         assert.deepEqual(await names('to_ask'), ['Zeta Example']);
         assert.deepEqual(await names('asked'), ['Delta Example']);
+        assert.deepEqual(await names('next_wave'), ['Eta Example']);
         const view = (await request(c, 'GET', '/api/jobs/companies')).json();
-        assert.deepEqual(view.counts, { all: 6, waiting: 3, to_ask: 1, asked: 1, no_luck: 2 });
-        assert.deepEqual(view.limits, { noAcceptDays: 7, noReplyDays: 5 });
+        assert.deepEqual(view.counts, {
+          all: 7,
+          waiting: 4,
+          to_ask: 1,
+          asked: 1,
+          next_wave: 1,
+          no_luck: 2,
+        });
+        assert.deepEqual(view.limits, {
+          noAcceptDays: 7,
+          noReplyDays: 5,
+          waves: { size: 1, max: 2 },
+        });
+        const state = (name: string) =>
+          view.companies.find((entry: { name: string }) => entry.name === name).waves.state;
+        assert.deepEqual(
+          ['Beta Example', 'Epsilon Example', 'Eta Example', 'Zeta Example', 'Gamma Example'].map(
+            state,
+          ),
+          ['waiting', 'stopped', 'next', 'waiting', 'done'],
+        );
         const gamma = view.companies.find(
           (entry: { name: string }) => entry.name === 'Gamma Example',
         );
@@ -1915,6 +2133,674 @@ test(
             error.message.includes(lee.id),
         );
       });
+      const curated: Array<{ task: string; input: Record<string, any> }> = [];
+      let tailorReply: (input: Record<string, any>) => unknown = (input) => ({
+        language: input.drafts[0].language,
+        text: input.drafts[0].text.replace('Thank you', 'Many thanks'),
+        changes: 'Said many thanks instead of thank you.',
+      });
+      const curator: MemoryCurator = {
+        id: 'synthetic',
+        configured: true,
+        curate: async (request) => {
+          curated.push({ task: request.task, input: request.input as Record<string, any> });
+          return tailorReply(request.input as Record<string, any>);
+        },
+      };
+      const f = owner('synthetic-owner-f', false, {
+        curator,
+        timeZone: async () => 'Asia/Tokyo',
+      });
+      const g = owner('synthetic-owner-g', false, { timeZone: async () => 'America/Sao_Paulo' });
+      await Promise.all([f.app.ready(), g.app.ready()]);
+      const englishBody =
+        "{greeting} {first_name},\n\nI'm {my_name}, {my_intro}. I'm applying for {role} at {company} through {programme} ({track}).\n\nThank you for your time.";
+      const arabicBody =
+        '{greeting} يا {first_name}، أنا {my_name}، {my_intro}. أتقدم لوظيفة {role} في {company} ضمن {programme} ({track}). شكرًا لوقتك.';
+      const setUpOwner = async (side: Side) => {
+        const page = (await request(side, 'GET', '/api/jobs/profile')).json();
+        assert.equal(
+          (
+            await request(side, 'PUT', '/api/jobs/profile', {
+              revision: page.revision,
+              profile: {
+                ...page.profile,
+                name: 'Sam Example',
+                intro: 'a synthetic analyst',
+                targetRoles: ['Analyst', 'Engineer'],
+                languageRule: { default: 'en', byCountry: { YY: 'ar-YY' } },
+                programmes: [{ name: 'Synthetic Programme', tracks: ['Data'] }],
+              },
+            })
+          ).statusCode,
+          200,
+        );
+        assert.equal(
+          (
+            await request(side, 'PUT', '/api/jobs/templates', {
+              revision: (await request(side, 'GET', '/api/jobs/templates')).json().revision,
+              templates: [
+                {
+                  language: 'en',
+                  body: englishBody,
+                  greetings: { morning: 'Good morning', default: 'Hello' },
+                },
+                { language: 'ar', body: arabicBody, greetings: { default: 'أهلاً' } },
+              ],
+            })
+          ).statusCode,
+          200,
+        );
+      };
+      await setUpOwner(f);
+      await setUpOwner(g);
+      const invite = async (side: Side, slug: string, company: string, extra = {}) =>
+        records(
+          await side.jobs.execute(await turn(side, 'user'), {
+            action: 'person_update',
+            people: [{ ...person(slug, company, 'invited'), ...extra }],
+          }),
+        ).saved[0] as { id: string; companyId: string; revision: number };
+      const prepare = async (side: Side, input: Record<string, unknown>) =>
+        records(
+          await side.jobs.execute(await turn(side, 'user'), { action: 'draft_prepare', ...input }),
+        );
+      const personOf = async (side: Side, companyId: string, id: string) =>
+        (await request(side, 'GET', `/api/jobs/companies/${companyId}`))
+          .json()
+          .people.find((entry: { id: string }) => entry.id === id);
+      const posting = (side: Side, companyId: string, values: Record<string, unknown>) =>
+        db.pool.query(
+          `INSERT INTO job_postings(id,owner_id,url_key,url,title,company,status,score,company_id,programme,track)
+           VALUES($1,$2,$3,$4,$5,'Synthetic',$6,$7,$8,$9,$10)`,
+          [
+            values.id ?? randomUUID(),
+            side.ownerId,
+            `jobs.example.test/${randomUUID()}`,
+            'https://jobs.example.test/role',
+            values.title,
+            values.status ?? 'new',
+            values.score ?? null,
+            companyId,
+            values.programme ?? '',
+            values.track ?? '',
+          ],
+        );
+      await db.pool.query(`
+        CREATE TABLE IF NOT EXISTS channel_inbox (
+          source_id text PRIMARY KEY, provider text NOT NULL, account_id text NOT NULL, sender_id text NOT NULL,
+          thread_id text NOT NULL, text text NOT NULL, received_at timestamptz NOT NULL, state text NOT NULL DEFAULT 'pending',
+          owner_id text NOT NULL, channel text, topic_id text, created_at timestamptz NOT NULL DEFAULT now());
+        CREATE TABLE IF NOT EXISTS channel_outbox (
+          message_id uuid PRIMARY KEY, source_id text NOT NULL REFERENCES channel_inbox(source_id),
+          state text NOT NULL DEFAULT 'pending', presentation jsonb, created_at timestamptz NOT NULL DEFAULT now());
+        CREATE TABLE IF NOT EXISTS channel_main_topics (
+          owner_id text NOT NULL, provider text NOT NULL, account_id text NOT NULL, sender_id text NOT NULL,
+          topic_id text NOT NULL, PRIMARY KEY(owner_id,provider,account_id,sender_id));`);
+      await db.pool.query(
+        `INSERT INTO channel_inbox(source_id,provider,account_id,sender_id,thread_id,text,received_at,state,owner_id,topic_id)
+         VALUES('synthetic:task','telegram','1','2','3','task message',now(),'submitted',$1,'77'),
+           ('synthetic:main','telegram','1','2','3','main message',now()-interval '1 hour','submitted',$1,NULL)`,
+        [f.ownerId],
+      );
+      const pings = async (side: Side) =>
+        (
+          await db.pool.query<{ text: string; source_id: string; thread_id: string | null }>(
+            `SELECT m.text,o.source_id,m.thread_id FROM channel_outbox o JOIN messages m ON m.id=o.message_id
+             WHERE m.owner_id=$1 ORDER BY m.created_at`,
+            [side.ownerId],
+          )
+        ).rows;
+
+      await t.test(
+        'an accept makes one referral message, tailored once, and one ping',
+        async () => {
+          const kim = await invite(f, 'kim-example', 'Kappa Example', {
+            memberUrn: 'ACoAASyntheticMemberKKKK11',
+          });
+          const busy = await posting(f, kim.companyId, {
+            title: 'Data Analyst',
+            score: 4,
+            programme: 'Spring Programme',
+            track: 'Analytics',
+          });
+          assert.equal(busy.rowCount, 1);
+          const before = curated.length;
+          const results = await Promise.allSettled([
+            request(f, 'PATCH', `/api/jobs/people/${kim.id}`, {
+              status: 'accepted',
+              revision: kim.revision,
+            }),
+            f.jobs.execute(await turn(f, 'user'), {
+              action: 'person_update',
+              people: [{ id: kim.id, status: 'accepted' }],
+            }),
+            f.jobs.execute(await turn(f, 'user'), {
+              action: 'person_update',
+              people: [{ profileUrl: profile('kim-example'), status: 'accepted' }],
+            }),
+          ]);
+          assert.ok(results.every((result) => result.status === 'fulfilled'));
+          await f.jobs.drafts.idle();
+          assert.equal(curated.length - before, 1);
+          const sent = curated.at(-1)!;
+          assert.equal(sent.task, 'referral');
+          assert.deepEqual(
+            sent.input.drafts.map((entry: { language: string }) => entry.language),
+            ['en', 'ar'],
+          );
+          assert.deepEqual(sent.input.languageRule, { default: 'en', byCountry: { YY: 'ar-YY' } });
+          assert.deepEqual(sent.input.person, {
+            name: 'Synthetic kim-example',
+            headline: '',
+            company: 'Kappa Example',
+          });
+          assert.match(sent.input.drafts[0].text, /^\{greeting\} Synthetic,/);
+          assert.match(
+            sent.input.drafts[0].text,
+            /Data Analyst at Kappa Example through Spring Programme \(Analytics\)/,
+          );
+          const kept = await personOf(f, kim.companyId, kim.id);
+          assert.deepEqual(
+            [kept.status, kept.draftInfo.state, kept.draftInfo.languageBy, kept.draftInfo.early],
+            ['accepted', 'tailored', 'guess', true],
+          );
+          assert.match(kept.draft, /Many thanks/);
+          assert.doesNotMatch(kept.draft, /\{/);
+          assert.match(kept.draftInfo.raw, /^\{greeting\} Synthetic,/);
+          assert.equal(kept.draftInfo.note, 'Said many thanks instead of thank you.');
+          const sentPings = await pings(f);
+          assert.equal(sentPings.length, 1);
+          const [ping] = sentPings;
+          assert.equal(ping!.source_id, 'synthetic:main');
+          assert.equal(ping!.thread_id, null);
+          assert.match(
+            ping!.text,
+            /^Synthetic kim-example accepted your invite at Kappa Example\./,
+          );
+          assert.match(ping!.text, /Open profile: https:\/\/www\.linkedin\.com\/in\/kim-example\//);
+          assert.match(ping!.text, /recipient=ACoAASyntheticMemberKKKK11/);
+          assert.ok(ping!.text.includes(kept.draft));
+          assert.match(ping!.text, /What Nod changed and why: Said many thanks/);
+          assert.equal(
+            (
+              await db.pool.query(
+                "SELECT count(*)::int AS n FROM job_events WHERE owner_id=$1 AND kind='accept_ping'",
+                [f.ownerId],
+              )
+            ).rows[0].n,
+            1,
+          );
+          const tool = records(
+            await f.jobs.execute(await turn(f, 'user'), { action: 'company', id: kim.companyId }),
+          );
+          assert.equal(tool.people[0].draftInfo.state, 'tailored');
+          assert.doesNotMatch(JSON.stringify(tool), /linkedin\.com/);
+          assert.deepEqual(await pings(b), []);
+        },
+      );
+
+      await t.test('values passed in win, then the posting, then the profile', async () => {
+        const first = await invite(g, 'lee-example', 'Lambda Example');
+        const missing = await prepare(g, { personId: first.id });
+        assert.deepEqual([missing.saved, missing.missing], [false, ['role']]);
+        const row = async (id: string) =>
+          (
+            await db.pool.query(
+              'SELECT draft,draft_state,draft_missing FROM job_people WHERE id=$1',
+              [id],
+            )
+          ).rows[0];
+        assert.deepEqual(await row(first.id), {
+          draft: '',
+          draft_state: 'missing',
+          draft_missing: ['role'],
+        });
+        const made = await prepare(g, { personId: first.id, role: 'Given Role' });
+        assert.deepEqual([made.saved, made.state, made.language], [true, 'filled', 'en']);
+        assert.match(made.reason, /No small model/);
+        assert.match(
+          made.raw,
+          /^\{greeting\} Synthetic,\n\nI'm Sam Example, a synthetic analyst\. I'm applying for Given Role at Lambda Example through Synthetic Programme \(Data\)\./,
+        );
+        assert.doesNotMatch(made.text, /\{/);
+        assert.deepEqual(await pings(g), []);
+        const named = randomUUID();
+        await posting(g, first.companyId, {
+          id: named,
+          title: 'Top Role',
+          score: 5,
+          programme: 'Other Programme',
+        });
+        await posting(g, first.companyId, {
+          title: 'Posting Role',
+          score: 3,
+          programme: 'Posting Programme',
+          track: 'Posting Track',
+        });
+        await posting(g, first.companyId, {
+          title: 'Closed Role',
+          score: 5,
+          status: 'skipped',
+          programme: 'Closed Programme',
+          track: 'Closed Track',
+        });
+        const again = await prepare(g, { personId: first.id });
+        assert.match(
+          again.raw,
+          /Given Role at Lambda Example through Posting Programme \(Posting Track\)/,
+        );
+        const second = await invite(g, 'mo-example', 'Lambda Example');
+        assert.match(
+          (await prepare(g, { personId: second.id })).raw,
+          /Posting Role at Lambda Example through Posting Programme \(Posting Track\)/,
+        );
+        const third = await invite(g, 'noa-example', 'Lambda Example');
+        const noTrack = await prepare(g, { personId: third.id, postingId: named });
+        assert.deepEqual([noTrack.saved, noTrack.missing], [false, ['track']]);
+        const thirdMade = await prepare(g, {
+          personId: third.id,
+          postingId: named,
+          track: 'Given',
+        });
+        assert.match(thirdMade.raw, /Top Role at Lambda Example through Other Programme \(Given\)/);
+        const fourth = await invite(g, 'ola-example', 'Lambda Example');
+        assert.match(
+          (
+            await prepare(g, {
+              personId: fourth.id,
+              programme: 'Given Programme',
+              track: 'Given Track',
+              role: 'Given Role',
+            })
+          ).raw,
+          /Given Role at Lambda Example through Given Programme \(Given Track\)/,
+        );
+        await assert.rejects(
+          g.jobs.execute(await turn(g, 'user'), {
+            action: 'draft_prepare',
+            personId: fourth.id,
+            postingId: randomUUID(),
+          }),
+          /isn't one of this person's company's postings/,
+        );
+      });
+
+      await t.test('the owner’s language wins, then the guess, then the default', async () => {
+        const person1 = await invite(g, 'pia-example', 'Mu Example');
+        const set = async (id: string, companyId: string, language: string) => {
+          const current = await personOf(g, companyId, id);
+          return request(g, 'PATCH', `/api/jobs/people/${id}`, {
+            language,
+            revision: current.revision,
+          });
+        };
+        await prepare(g, { personId: person1.id, role: 'Given Role' });
+        assert.equal((await set(person1.id, person1.companyId, 'ar-EG')).statusCode, 200);
+        const arabic = await personOf(g, person1.companyId, person1.id);
+        assert.deepEqual(
+          [arabic.language, arabic.draftInfo.language, arabic.draftInfo.languageBy],
+          ['ar-EG', 'ar', 'owner'],
+        );
+        assert.match(arabic.draft, /^أهلاً يا Synthetic، أنا Sam Example/);
+        assert.equal((await set(person1.id, person1.companyId, 'de')).statusCode, 200);
+        const fallback = await personOf(g, person1.companyId, person1.id);
+        assert.deepEqual(
+          [fallback.draftInfo.language, fallback.draftInfo.languageBy],
+          ['en', 'owner'],
+        );
+
+        const guessed = await invite(f, 'qin-example', 'Nu Example', {
+          headline: 'Analyst in Country YY',
+        });
+        await posting(f, guessed.companyId, {
+          title: 'Analyst',
+          score: 2,
+          programme: 'P',
+          track: 'T',
+        });
+        tailorReply = (input) => {
+          const rule = input.languageRule ?? { default: input.drafts[0].language, byCountry: {} };
+          const wanted = /Country YY/.test(input.person.headline)
+            ? (rule.byCountry.YY ?? rule.default).split('-')[0]
+            : rule.default;
+          const draft =
+            input.drafts.find((entry: { language: string }) => entry.language === wanted) ??
+            input.drafts[0];
+          return { language: draft.language, text: draft.text, changes: '' };
+        };
+        await prepare(f, { personId: guessed.id });
+        await f.jobs.drafts.idle();
+        const guess = await personOf(f, guessed.companyId, guessed.id);
+        assert.deepEqual(
+          [guess.draftInfo.state, guess.draftInfo.language, guess.draftInfo.languageBy],
+          ['tailored', 'ar', 'guess'],
+        );
+        await prepare(f, { personId: guessed.id, language: 'en' });
+        await f.jobs.drafts.idle();
+        assert.deepEqual(
+          curated.at(-1)!.input.drafts.map((entry: { language: string }) => entry.language),
+          ['en'],
+        );
+        assert.equal(curated.at(-1)!.input.languageRule, undefined);
+        const chosen = await personOf(f, guessed.companyId, guessed.id);
+        assert.deepEqual(
+          [
+            chosen.language,
+            chosen.draftInfo.state,
+            chosen.draftInfo.language,
+            chosen.draftInfo.languageBy,
+          ],
+          ['en', 'tailored', 'en', 'owner'],
+        );
+      });
+
+      await t.test('a tailored message that breaks a rule keeps the filled template', async () => {
+        const rin = await invite(f, 'rin-example', 'Xi Example');
+        await posting(f, rin.companyId, { title: 'Analyst', score: 2, programme: 'P', track: 'T' });
+        const filled = (await prepare(f, { personId: rin.id, language: 'en' })).raw as string;
+        await f.jobs.drafts.idle();
+        for (const [reply, reason] of [
+          [() => ({ language: 'fr', text: filled }), /no template/],
+          [
+            () => ({ language: 'en', text: filled.replace('Sam Example', '{my_name}') }),
+            /left \{my_name\}/,
+          ],
+          [() => ({ language: 'en', text: `${filled} https://example.net/x` }), /added a link/],
+          [() => ({ language: 'en', text: `${filled}\n${filled}` }), /much longer/],
+          [
+            () => {
+              throw new Error('Synthetic provider refused the request (HTTP 429).');
+            },
+            /couldn't tailor it \(Synthetic provider refused the request \(HTTP 429\)\.\)/,
+          ],
+        ] as const) {
+          tailorReply = reply;
+          const current = await personOf(f, rin.companyId, rin.id);
+          const remade = await request(f, 'POST', `/api/jobs/people/${rin.id}/draft`, {
+            draftRevision: current.draftRevision,
+          });
+          assert.equal(remade.statusCode, 200, remade.body);
+          await f.jobs.drafts.idle();
+          const after = await personOf(f, rin.companyId, rin.id);
+          assert.equal(after.draftInfo.state, 'failed', String(reason));
+          assert.equal(after.draftInfo.raw, filled);
+          assert.match(after.draftInfo.reason, reason);
+        }
+        const stale = await personOf(f, rin.companyId, rin.id);
+        assert.equal(
+          (
+            await request(f, 'POST', `/api/jobs/people/${rin.id}/draft`, {
+              draftRevision: stale.draftRevision - 1,
+            })
+          ).statusCode,
+          409,
+        );
+        tailorReply = (input) => ({
+          language: input.drafts[0].language,
+          text: input.drafts[0].text,
+          changes: '',
+        });
+      });
+
+      await t.test('an owner-edited message is never overwritten by Nod on its own', async () => {
+        const sol = await invite(f, 'sol-example', 'Omicron Example');
+        await posting(f, sol.companyId, { title: 'Analyst', score: 2, programme: 'P', track: 'T' });
+        let release = () => {};
+        tailorReply = (input) =>
+          new Promise((resolve) => {
+            release = () =>
+              resolve({
+                language: input.drafts[0].language,
+                text: input.drafts[0].text,
+                changes: '',
+              });
+          });
+        const accepted = await request(f, 'PATCH', `/api/jobs/people/${sol.id}`, {
+          status: 'accepted',
+          revision: sol.revision,
+        });
+        assert.equal(accepted.statusCode, 200);
+        const waiting = await personOf(f, sol.companyId, sol.id);
+        assert.equal(waiting.draftInfo.state, 'tailoring');
+        const edited = await request(f, 'PUT', `/api/jobs/people/${sol.id}/draft`, {
+          text: '{greeting} Sol, my own words. https://example.com/sam',
+          draftRevision: waiting.draftRevision,
+        });
+        assert.equal(edited.statusCode, 200, edited.body);
+        assert.equal(edited.json().draftInfo.state, 'edited');
+        assert.equal(
+          (
+            await request(f, 'PUT', `/api/jobs/people/${sol.id}/draft`, {
+              text: 'Old version',
+              draftRevision: waiting.draftRevision,
+            })
+          ).statusCode,
+          409,
+        );
+        const asked = () =>
+          curated.some((entry) => entry.input.person?.name === 'Synthetic sol-example');
+        for (let tries = 0; tries < 100 && !asked(); tries++)
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        assert.ok(asked());
+        release();
+        await f.jobs.drafts.idle();
+        const kept = await personOf(f, sol.companyId, sol.id);
+        assert.deepEqual(
+          [kept.draftInfo.state, kept.draftInfo.raw],
+          ['edited', '{greeting} Sol, my own words. https://example.com/sam'],
+        );
+        for (const status of ['invited', 'accepted'])
+          assert.equal(
+            (
+              await request(f, 'PATCH', `/api/jobs/people/${sol.id}`, {
+                status,
+                revision: (await personOf(f, sol.companyId, sol.id)).revision,
+              })
+            ).statusCode,
+            200,
+          );
+        assert.equal((await personOf(f, sol.companyId, sol.id)).draftInfo.raw, kept.draftInfo.raw);
+        await assert.rejects(
+          f.jobs.execute(await turn(f, 'user'), { action: 'draft_prepare', personId: sol.id }),
+          /replace: true/,
+        );
+        tailorReply = (input) => ({
+          language: input.drafts[0].language,
+          text: input.drafts[0].text,
+          changes: '',
+        });
+        const replaced = await prepare(f, { personId: sol.id, replace: true });
+        assert.equal(replaced.state, 'tailoring');
+        await f.jobs.drafts.idle();
+        const sentPings = await pings(f);
+        assert.equal(
+          sentPings.filter((entry) => entry.text.includes('sol-example accepted')).length,
+          1,
+        );
+      });
+
+      await t.test('only work started by an owner message writes referral messages', async () => {
+        const tia = await invite(f, 'tia-example', 'Pi Example');
+        await posting(f, tia.companyId, { title: 'Analyst', score: 2, programme: 'P', track: 'T' });
+        const event = await turn(f, 'event');
+        for (const other of [
+          await turn(f, 'schedule'),
+          event,
+          await turn(f, 'task', { message: false, parent: event.turnId }),
+        ]) {
+          await assert.rejects(
+            f.jobs.execute(other, { action: 'draft_prepare', personId: tia.id }),
+            /owner message/,
+          );
+          await assert.rejects(
+            f.jobs.execute(other, {
+              action: 'draft_save',
+              personId: tia.id,
+              text: 'Synthetic',
+              changes: 'Synthetic.',
+              revision: 0,
+            }),
+            /owner message/,
+          );
+        }
+        const prepared = await prepare(f, { personId: tia.id, language: 'en' });
+        await f.jobs.drafts.idle();
+        assert.equal(prepared.saved, true);
+        const current = await personOf(f, tia.companyId, tia.id);
+        const owned = async (input: Record<string, unknown>) =>
+          f.jobs.execute(await turn(f, 'user'), {
+            action: 'draft_save',
+            personId: tia.id,
+            ...input,
+          });
+        await assert.rejects(
+          owned({
+            text: '{greeting} Tia, see https://example.net',
+            changes: 'Added a link.',
+            revision: current.draftRevision,
+          }),
+          /doesn't take links/,
+        );
+        await assert.rejects(
+          owned({
+            text: '{greeting} {first_name}, hello',
+            changes: 'Synthetic.',
+            revision: current.draftRevision,
+          }),
+          /\{first_name\}/,
+        );
+        await assert.rejects(
+          owned({ text: '{greeting} Tia, hello', revision: current.draftRevision }),
+          /first 10 messages/,
+        );
+        await assert.rejects(
+          owned({
+            text: '{greeting} Tia, hello',
+            changes: 'Shorter.',
+            revision: current.draftRevision - 1,
+          }),
+          /changed after you read it/,
+        );
+        const saved = records(
+          await owned({
+            text: '{greeting} Tia, hello',
+            changes: 'Made it shorter.',
+            revision: current.draftRevision,
+          }),
+        );
+        assert.deepEqual([saved.state, saved.note], ['edited', 'Made it shorter.']);
+        for (const [method, path, body] of [
+          ['POST', `/api/jobs/people/${tia.id}/draft`, { draftRevision: saved.draftRevision }],
+          [
+            'PUT',
+            `/api/jobs/people/${tia.id}/draft`,
+            { text: 'Taken', draftRevision: saved.draftRevision },
+          ],
+          [
+            'PATCH',
+            `/api/jobs/people/${tia.id}`,
+            { language: 'ar', revision: saved.person.revision },
+          ],
+        ] as const)
+          assert.equal((await request(b, method, path, body)).statusCode, 404, `${method} ${path}`);
+        await assert.rejects(
+          b.jobs.execute(await turn(b, 'user'), { action: 'draft_prepare', personId: tia.id }),
+          /not found/,
+        );
+        assert.equal(
+          (await personOf(f, tia.companyId, tia.id)).draftInfo.raw,
+          '{greeting} Tia, hello',
+        );
+      });
+
+      await t.test('invites count by the owner’s local day and week', async () => {
+        const offset = 9 * 3_600_000;
+        const local = new Date(Date.now() + offset);
+        const midnight =
+          Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()) - offset;
+        const company = await invite(f, 'uma-example', 'Rho Example');
+        await db.pool.query(
+          "UPDATE job_people SET invited_at=now()-interval '30 days' WHERE owner_id=$1",
+          [f.ownerId],
+        );
+        for (const [slug, at] of [
+          ['rho-1', midnight + 60_000],
+          ['rho-2', midnight - 60_000],
+          ['rho-3', midnight - 6 * 86_400_000 + 60_000],
+          ['rho-4', midnight - 6 * 86_400_000 - 60_000],
+        ] as const)
+          await db.pool.query(
+            `INSERT INTO job_people(id,owner_id,company_id,profile_key,status,invited_at)
+             VALUES($1,$2,$3,$4,'invited',$5)`,
+            [randomUUID(), f.ownerId, company.companyId, slug, new Date(at)],
+          );
+        const view = (await request(f, 'GET', '/api/jobs/companies')).json();
+        assert.deepEqual(view.invites, { today: 1, week: 3, daily: 15, weekly: 80 });
+        const rho = (await request(f, 'GET', `/api/jobs/companies/${company.companyId}`)).json();
+        assert.deepEqual(
+          [rho.waves.state, rho.waves.wave, rho.waves.more, rho.waves.today, rho.waves.week],
+          ['waiting', 1, 0, 1, 3],
+        );
+      });
+
+      await t.test('the referral columns add to an existing 8d database, twice', async () => {
+        const legacy = `${schema}_8d`;
+        await admin.query(`CREATE SCHEMA ${legacy}`);
+        const address = new URL(process.env.TEST_DATABASE_URL!);
+        address.searchParams.set('options', `-c search_path=${legacy}`);
+        const old = new pg.Pool({ connectionString: address.href });
+        try {
+          const { jobTables } = await import('../src/server/jobs.ts');
+          await old.query(jobTables);
+          await old.query(`
+            DROP TABLE job_events;
+            ALTER TABLE job_people DROP COLUMN draft_state, DROP COLUMN draft_reason, DROP COLUMN draft_note,
+              DROP COLUMN draft_language, DROP COLUMN draft_language_by, DROP COLUMN draft_template_revision,
+              DROP COLUMN draft_missing, DROP COLUMN draft_inputs, DROP COLUMN draft_at;
+            ALTER TABLE job_postings DROP COLUMN programme, DROP COLUMN track;`);
+          const companyKey = randomUUID();
+          await old.query(
+            `INSERT INTO job_companies(id,owner_id,name,key) VALUES($1,'synthetic-owner-old','Old Example','old example')`,
+            [companyKey],
+          );
+          await old.query(
+            `INSERT INTO job_people(id,owner_id,company_id,profile_key,status,draft,draft_revision,accepted_at)
+             VALUES($1,'synthetic-owner-old',$2,'old-example','accepted','Synthetic old draft',3,now())`,
+            [randomUUID(), companyKey],
+          );
+          await old.query(
+            `INSERT INTO job_postings(id,owner_id,url_key,url,title,company,company_id)
+             VALUES($1,'synthetic-owner-old','jobs.example.test/old','https://jobs.example.test/old','Old Role','Old Example',$2)`,
+            [randomUUID(), companyKey],
+          );
+          await old.query(jobTables);
+          await old.query(jobTables);
+          const rows = (
+            await old.query(
+              'SELECT draft,draft_revision,draft_state,draft_missing,draft_inputs FROM job_people',
+            )
+          ).rows;
+          assert.deepEqual(rows, [
+            {
+              draft: 'Synthetic old draft',
+              draft_revision: 3,
+              draft_state: null,
+              draft_missing: [],
+              draft_inputs: {},
+            },
+          ]);
+          assert.deepEqual((await old.query('SELECT programme,track FROM job_postings')).rows, [
+            { programme: '', track: '' },
+          ]);
+          assert.equal((await old.query('SELECT count(*)::int AS n FROM job_events')).rows[0].n, 0);
+        } finally {
+          await old.end();
+          await admin.query(`DROP SCHEMA ${legacy} CASCADE`);
+        }
+      });
+      await Promise.allSettled([f.app.close(), g.app.close()]);
+
       await t.test(
         'a paired browser helper reaches only its own routes, over 127.0.0.1, with requests sealed by a key Nod paired',
         async (h) => {
@@ -2544,18 +3430,25 @@ test(
               .rowCount,
             0,
           );
+          assert.deepEqual((await send('accepted', {})).json().languages, []);
           const waiting = (await send('accepted', {})).json().people as Array<{
             id: string;
             name: string;
             company: string;
             messageUrl: string | null;
             revision: number;
+            draftInfo: { state: string; missing: string[] } | null;
+            waves: { state: string; invited: number };
           }>;
           assert.deepEqual(waiting.map((person) => [person.name, person.company]).sort(), [
             ['Lee Helper', 'Other Helper Example'],
             ['Sam Helper', page.name],
           ]);
           const samView = waiting.find((person) => person.id === samId)!;
+          assert.deepEqual(
+            [samView.draftInfo?.state, samView.draftInfo?.missing, samView.waves.state],
+            ['missing', ['template'], 'open'],
+          );
           assert.equal(
             samView.messageUrl,
             `https://www.linkedin.com/messaging/compose/?recipient=${memberA}`,
@@ -2567,6 +3460,10 @@ test(
           );
           const asked = await status({ status: 'asked', revision: samView.revision });
           assert.equal(asked.json().status, 'asked');
+          const switched = await status({ language: 'ar', revision: asked.json().revision });
+          assert.equal(switched.statusCode, 200, switched.body);
+          assert.deepEqual([switched.json().status, switched.json().language], ['asked', 'ar']);
+          assert.equal((await status({ revision: switched.json().revision })).statusCode, 400);
           assert.equal(
             (await status({ status: 'hired', revision: asked.json().revision })).statusCode,
             400,
