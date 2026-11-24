@@ -356,3 +356,11 @@
   font-size: var(--text-control);
   overflow-wrap: anywhere;
 }
+.jobs-company .saved-plan-title,
+.jobs-company-head .saved-plan-title {
+  flex-wrap: wrap;
+}
+.jobs-company .saved-plan-title h2,
+.jobs-company-head .saved-plan-title h2 {
+  flex: 1 1 12rem;
+}
