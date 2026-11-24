@@ -2636,9 +2636,11 @@ export function decisionAuthorization(
   )
     throw new Error('Unsupported Trust review routing in this revision.');
   let basisValidator: typeof trustBasis | undefined;
+  let validSources: ((input: object) => string[]) | undefined;
   if (basis) {
     const exports: {
       trustBasis?: (answer: unknown, words: TrustWords, ids?: string[]) => TrustBasis | undefined;
+      trustSources?: (words: TrustWords) => string[];
     } = {};
     try {
       if (!validators.basis) throw new Error('Missing basis source.');
@@ -2652,6 +2654,11 @@ export function decisionAuthorization(
         const value = validate(answer, sourced(words), shown(words));
         return value ? { ...value } : undefined;
       };
+      if (source.includes('validSources')) {
+        const list = exports.trustSources;
+        if (typeof list !== 'function') throw new Error('Missing source list.');
+        validSources = (input) => [...list(sourced(input))];
+      }
     } catch (cause) {
       throw new Error('Unsupported Trust basis validator revision.', { cause });
     }
@@ -2670,6 +2677,7 @@ export function decisionAuthorization(
       : ('latest' as const),
     basisHash: basis ? hash(validators.basis!) : undefined,
     basisValidator,
+    validSources,
     termsHash: terms ? hash(loaded.terms) : undefined,
     termsInstructions: terms
       ? policy(validators.terms!, 'termsInstructions', 'run').instructions
@@ -2769,6 +2777,7 @@ export async function evaluateDecision(options: {
     mode: AuthorizationMode;
     termsInstructions?: string;
     basisValidator?: typeof trustBasis;
+    validSources?: (input: object) => string[];
     scheduleFormat?: 'entries' | 'text';
     replyFormat?: 'message' | 'latest';
   };
@@ -2785,6 +2794,8 @@ export async function evaluateDecision(options: {
   const encoded = JSON.stringify(options.item.input);
   const input = (terms = false) => {
     const value = JSON.parse(encoded);
+    if (!terms && options.item.kind === 'run' && options.authorization.validSources)
+      value.validSources = options.authorization.validSources(value);
     if (
       !terms &&
       options.authorization.replyFormat === 'message' &&

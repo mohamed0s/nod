@@ -1114,6 +1114,30 @@ test('decision baselines bind only the validator revisions their source invokes'
       () => decisionAuthorization(source, loaded, loaded),
       /Unsupported Trust review routing/,
     );
+  const listed = old + ' const input = { action, validSources };';
+  assert.equal(decisionAuthorization(old, loaded, loaded).validSources, undefined);
+  assert.throws(
+    () => decisionAuthorization(listed, { basis: 'export function trustBasis() {}' }, loaded),
+    /Unsupported Trust basis validator revision/,
+  );
+  const sourced = decisionAuthorization(listed, loaded, loaded);
+  const item = selectDecisionCases(['send-requested'])[0]!;
+  const inputs: object[] = [];
+  for (const authorization of [sourced, decisionAuthorization(old, loaded, loaded)])
+    await evaluateDecision({
+      item,
+      instructions: 'Fixture policy',
+      values: [true, false],
+      authorization,
+      review: async (_instructions, input) => {
+        inputs.push(input);
+        return { run: false };
+      },
+      report: () => {},
+      canStart: () => undefined,
+    });
+  assert.deepEqual((inputs[0] as { validSources?: string[] }).validSources, ['read', 'message:0']);
+  assert.equal('validSources' in inputs[1]!, false);
 });
 
 const manifest: RunManifest = {

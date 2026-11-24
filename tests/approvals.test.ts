@@ -2870,6 +2870,7 @@ test(
                   'userMessages',
                   'assistantMessageBeforeLatestUserMessage',
                   'action',
+                  'validSources',
                   'timeZone',
                 ].includes(key),
             ),
