@@ -70,8 +70,9 @@ export function Helper() {
             Select <strong>Pair the Edge panel</strong> below. Nod copies a one-time code.
           </li>
           <li>
-            Run <code>scripts\windows\pair-helper.ps1</code>. It reads the code, asks Nod for the
-            panel&apos;s key and saves it in the extension folder. The key never appears on screen.
+            Run <code>scripts\windows\pair-helper.ps1</code>. It checks that it&apos;s talking to
+            this Nod app, proves it has the code without sending it, and saves the panel&apos;s key
+            in the extension folder. The key never appears on screen.
           </li>
         </ol>
         {waiting ? (
