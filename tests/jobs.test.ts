@@ -46,12 +46,14 @@ test('subagents can only read job search records', async () => {
     'posting_update',
     'source_update',
     'telegram',
+    'person_update',
   ])
     await assert.rejects(runJobsTool(turn('helper'), { action }), /subagent can only read/);
-  for (const action of ['setup_status', 'cv_get', 'cv_file', 'list', 'sources'])
+  const reads = ['setup_status', 'cv_get', 'cv_file', 'list', 'sources', 'companies', 'company'];
+  for (const action of reads)
     assert.equal(await runJobsTool(turn('helper'), { action }), 'records');
   assert.equal(await runJobsTool(turn(), { action: 'cv_save' }), 'records');
-  assert.deepEqual(calls, ['setup_status', 'cv_get', 'cv_file', 'list', 'sources', 'cv_save']);
+  assert.deepEqual(calls, [...reads, 'cv_save']);
 });
 
 test('job search limits count as an owner setting in the trust check', async () => {
@@ -430,7 +432,8 @@ test(
     const { transaction } = await import('../src/server/transaction.ts');
     const { withTurnLock } = await import('../src/server/thread.ts');
     const files = new Map<string, string | Buffer>();
-    const chats: Array<{ text: string; attachments: string[] }> = [];
+    const chats: Array<{ text: string; attachments: string[]; sessionId: string }> = [];
+    let refuseChats = false;
     const channels = new Map<string, TelegramPost[]>();
     const reads: Array<{ channel: string; before?: number }> = [];
     const telegram = {
@@ -463,8 +466,10 @@ test(
             files.delete(`${threadId}/${path}`);
           },
         },
-        startChat: async (text, attachments) => {
-          chats.push({ text, attachments: attachments.map((file) => file.id) });
+        startChat: async (text, attachments, sessionId) => {
+          if (refuseChats)
+            throw new Error('Configure an agent provider before starting a conversation.');
+          chats.push({ text, attachments: attachments.map((file) => file.id), sessionId });
         },
         withTurnLock: (turnId, operation) =>
           turnLock ? withTurnLock(turnId, operation) : transaction(operation, db.pool),
@@ -1357,6 +1362,385 @@ test(
           ).new,
           3,
         );
+      });
+
+      await t.test('postings link to their company on import and at startup', async () => {
+        const linked = async (ownerId: string) =>
+          (
+            await db.pool.query<{ company: string; company_id: string | null }>(
+              'SELECT company,company_id FROM job_postings WHERE owner_id=$1 ORDER BY first_seen_at,id',
+              [ownerId],
+            )
+          ).rows;
+        const rows = await linked(a.ownerId);
+        assert.ok(rows.length > 0);
+        assert.ok(rows.every((row) => !row.company || row.company_id));
+        const ids = (name: RegExp) =>
+          new Set(rows.filter((row) => name.test(row.company)).map((row) => row.company_id));
+        assert.equal(ids(/^Example Co/).size, 1);
+        assert.equal(ids(/^Sample Labs/).size, 1);
+        const [example] = [...ids(/^Example Co/)];
+        const listed = (await request(a, 'GET', '/api/jobs/companies')).json();
+        assert.deepEqual(listed.companies.map((entry: { name: string }) => entry.name).sort(), [
+          'Example Co, Inc.',
+          'Sample Labs',
+        ]);
+        const add = (company: string, key: string) =>
+          db.pool.query(
+            `INSERT INTO job_postings(id,owner_id,url_key,url,title,company) VALUES($1,$2,$3,$4,'Synthetic Role',$5)`,
+            [randomUUID(), a.ownerId, key, `https://${key}`, company],
+          );
+        await add('EXAMPLE CO LLC', 'jobs.example.test/legacy/1');
+        await add('Zed Analytics', 'jobs.example.test/legacy/2');
+        await add('', 'jobs.example.test/legacy/3');
+        assert.equal(await a.jobs.initialize(), 2);
+        assert.equal(await a.jobs.initialize(), 0);
+        const after = await linked(a.ownerId);
+        assert.equal(after.find((row) => row.company === 'EXAMPLE CO LLC')!.company_id, example);
+        const zed = after.find((row) => row.company === 'Zed Analytics')!.company_id;
+        assert.ok(zed && zed !== example);
+        assert.equal(after.find((row) => row.company === '')!.company_id, null);
+        assert.equal((await request(b, 'GET', `/api/jobs/companies/${zed}`)).statusCode, 404);
+      });
+
+      await t.test('the company tables add to an existing job database', async () => {
+        const legacy = `${schema}_8b`;
+        await admin.query(`CREATE SCHEMA ${legacy}`);
+        const address = new URL(process.env.TEST_DATABASE_URL!);
+        address.searchParams.set('options', `-c search_path=${legacy}`);
+        const old = new pg.Pool({ connectionString: address.href });
+        try {
+          const { jobPostingTables } = await import('../src/server/job-postings.ts');
+          const { jobCompanyTables, linkPostings } = await import('../src/server/job-companies.ts');
+          await old.query(jobPostingTables);
+          for (const [ownerId, key] of [
+            [a.ownerId, 'jobs.example.test/old/1'],
+            [b.ownerId, 'jobs.example.test/old/2'],
+          ])
+            await old.query(
+              `INSERT INTO job_postings(id,owner_id,url_key,url,title,company,status,revision)
+               VALUES($1,$2,$3,$4,'Data Analyst','Example Co','shortlisted',3)`,
+              [randomUUID(), ownerId, key, `https://${key}`],
+            );
+          await old.query(jobCompanyTables);
+          await old.query(jobCompanyTables);
+          assert.equal(await linkPostings(old, a.ownerId), 1);
+          await old.query(jobCompanyTables);
+          assert.equal(await linkPostings(old, a.ownerId), 0);
+          const rows = (
+            await old.query(
+              `SELECT p.owner_id,p.status,p.revision,c.owner_id AS company_owner FROM job_postings p
+               LEFT JOIN job_companies c ON c.id=p.company_id ORDER BY p.owner_id`,
+            )
+          ).rows;
+          assert.deepEqual(rows, [
+            { owner_id: a.ownerId, status: 'shortlisted', revision: 3, company_owner: a.ownerId },
+            { owner_id: b.ownerId, status: 'shortlisted', revision: 3, company_owner: null },
+          ]);
+        } finally {
+          await old.end();
+          await admin.query(`DROP SCHEMA ${legacy} CASCADE`);
+        }
+      });
+
+      const day = 86_400_000;
+      const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+      const profile = (slug: string) => `https://www.linkedin.com/in/${slug}`;
+      const person = (slug: string, company: string, status: string, at?: string) => ({
+        profileUrl: profile(slug),
+        name: `Synthetic ${slug}`,
+        company,
+        status,
+        ...(at ? { at } : {}),
+      });
+      const companyId = async (side: Side, name: string) =>
+        (await request(side, 'GET', `/api/jobs/companies?search=${encodeURIComponent(name)}`))
+          .json()
+          .companies.find((entry: { name: string }) => entry.name === name).id as string;
+
+      await t.test('only work started by an owner message logs people', async () => {
+        const entry = {
+          action: 'person_update',
+          people: [person('sam-example', 'Alpha Example', 'invited')],
+        };
+        const event = await turn(c, 'event');
+        for (const other of [
+          await turn(c, 'schedule'),
+          event,
+          await turn(c, 'task', { message: false, parent: event.turnId }),
+        ])
+          await assert.rejects(c.jobs.execute(other, entry), /owner message/);
+        assert.equal((await request(c, 'GET', '/api/jobs/companies')).json().total, 0);
+        const started = await turn(c, 'user');
+        const task = await turn(c, 'task', { message: false, parent: started.turnId });
+        const first = records(await c.jobs.execute(task, entry));
+        assert.deepEqual(
+          first.saved.map((saved: Record<string, unknown>) => [
+            saved.created,
+            saved.company,
+            saved.status,
+          ]),
+          [[true, 'Alpha Example', 'invited']],
+        );
+        assert.equal(first.saved[0].profileUrl, 'https://www.linkedin.com/in/sam-example/');
+        assert.equal(first.saved[0].messageUrl, null);
+        const again = records(
+          await c.jobs.execute(started, {
+            action: 'person_update',
+            people: [
+              {
+                profileUrl: 'linkedin.com/in/Sam-Example/?utm_source=share&utm_medium=android_app',
+                headline: 'Analyst at Alpha Example',
+                memberUrn: 'urn:li:fsd_profile:ACoAASyntheticMember000001',
+              },
+            ],
+          }),
+        );
+        assert.equal(again.saved[0].created, false);
+        assert.equal(again.saved[0].id, first.saved[0].id);
+        assert.equal(
+          again.saved[0].messageUrl,
+          'https://www.linkedin.com/messaging/compose/?recipient=ACoAASyntheticMember000001',
+        );
+        for (const profileUrl of [
+          'https://lnkd.in/synthetic',
+          'https://www.linkedin.com.example.test/in/sam-example',
+          'javascript:alert(1)//linkedin.com/in/sam-example',
+        ])
+          await assert.rejects(
+            c.jobs.execute(started, {
+              action: 'person_update',
+              people: [{ profileUrl, company: 'Alpha Example' }],
+            }),
+            /LinkedIn profile link/,
+          );
+        await assert.rejects(
+          c.jobs.execute(started, {
+            action: 'person_update',
+            people: [{ profileUrl: profile('no-company-example') }],
+          }),
+          /needs their company/,
+        );
+        const stopped = await turn(a, 'user');
+        await db.pool.query("UPDATE turns SET status='cancelled' WHERE id=$1", [stopped.turnId]);
+        await assert.rejects(a.jobs.execute(stopped, entry), /no longer active/);
+      });
+
+      await t.test('a company counts as no luck once everyone had their days', async () => {
+        const started = await turn(c, 'user');
+        const before = chats.length;
+        records(
+          await c.jobs.execute(started, {
+            action: 'person_update',
+            people: [
+              person('sam-example', 'Alpha Example', 'invited', ago(7 * day + 60_000)),
+              person('beta-one', 'Beta Example', 'invited', ago(7 * day - 3_600_000)),
+              person('gamma-one', 'Gamma Example', 'asked', ago(5 * day + 60_000)),
+              person('gamma-two', 'Gamma Example', 'declined', ago(9 * day)),
+              person('delta-one', 'Delta Example', 'asked', ago(5 * day - 3_600_000)),
+              person('epsilon-one', 'Epsilon Example', 'invited', ago(30 * day)),
+              person('epsilon-two', 'Epsilon Example', 'referred', ago(20 * day)),
+              person('zeta-one', 'Zeta Example', 'invited', ago(30 * day)),
+              person('zeta-two', 'Zeta Example', 'accepted', ago(20 * day)),
+            ],
+          }),
+        );
+        const names = async (filter: string) =>
+          (await request(c, 'GET', `/api/jobs/companies?filter=${filter}`))
+            .json()
+            .companies.map((entry: { name: string }) => entry.name)
+            .sort();
+        assert.deepEqual(await names('no_luck'), ['Alpha Example', 'Gamma Example']);
+        assert.deepEqual(await names('waiting'), [
+          'Beta Example',
+          'Epsilon Example',
+          'Zeta Example',
+        ]);
+        assert.deepEqual(await names('to_ask'), ['Zeta Example']);
+        assert.deepEqual(await names('asked'), ['Delta Example']);
+        const view = (await request(c, 'GET', '/api/jobs/companies')).json();
+        assert.deepEqual(view.counts, { all: 6, waiting: 3, to_ask: 1, asked: 1, no_luck: 2 });
+        assert.deepEqual(view.limits, { noAcceptDays: 7, noReplyDays: 5 });
+        const gamma = view.companies.find(
+          (entry: { name: string }) => entry.name === 'Gamma Example',
+        );
+        assert.deepEqual(gamma.counts, {
+          invited: 2,
+          accepted: 2,
+          asked: 2,
+          replied: 1,
+          referred: 0,
+        });
+        assert.deepEqual(
+          [gamma.noLuck.value, gamma.noLuck.by, gamma.noLuck.choice],
+          [true, 'rule', 'auto'],
+        );
+        assert.ok(Math.abs(Date.parse(gamma.noLuck.since) - (Date.now() - 60_000)) < 30_000);
+        assert.equal(gamma.applySessionId, null);
+        assert.equal(chats.length, before);
+        const alpha = await companyId(c, 'Alpha Example');
+        const set = (id: string, noLuck: boolean | null) =>
+          request(c, 'PUT', `/api/jobs/companies/${id}/no-luck`, { noLuck });
+        const kept = (await set(alpha, false)).json();
+        assert.deepEqual(
+          [kept.apply, kept.company.noLuck.value, kept.company.noLuck.choice],
+          [null, false, 'keep_trying'],
+        );
+        assert.deepEqual(await names('no_luck'), ['Gamma Example']);
+        assert.equal((await set(alpha, null)).json().company.noLuck.by, 'rule');
+        assert.equal(chats.length, before);
+      });
+
+      await t.test('the tick starts exactly one apply chat', async () => {
+        const beta = await companyId(c, 'Beta Example');
+        const tick = (noLuck: boolean | null = true) =>
+          request(c, 'PUT', `/api/jobs/companies/${beta}/no-luck`, { noLuck });
+        const before = chats.length;
+        const ticks = await Promise.all([tick(), tick(), tick()]);
+        for (const response of ticks) assert.equal(response.statusCode, 200, response.body);
+        assert.deepEqual(ticks.map((response) => response.json().apply).sort(), [
+          'reused',
+          'reused',
+          'started',
+        ]);
+        assert.equal(chats.length, before + 1);
+        const chat = chats.at(-1)!;
+        const { applyRequest } = await import('../src/server/job-companies.ts');
+        assert.equal(chat.text, applyRequest(beta));
+        assert.doesNotMatch(chat.text, /Beta|Example/);
+        assert.deepEqual(chat.attachments, []);
+        const marked = (await tick()).json();
+        assert.equal(marked.apply, 'reused');
+        assert.deepEqual(
+          [
+            marked.company.noLuck.value,
+            marked.company.noLuck.by,
+            marked.company.noLuck.choice,
+            marked.company.applySessionId,
+          ],
+          [true, 'owner', 'no_luck', chat.sessionId],
+        );
+        const unticked = (await tick(false)).json().company;
+        assert.deepEqual(
+          [unticked.noLuck.value, unticked.noLuck.choice, unticked.applySessionId],
+          [false, 'keep_trying', chat.sessionId],
+        );
+        await db.pool.query(
+          `INSERT INTO tasks(id,owner_id,title,done_when,now_text) VALUES($1,$2,'Synthetic','','')`,
+          [chat.sessionId, c.ownerId],
+        );
+        await db.pool.query(
+          "UPDATE job_companies SET apply_started_at=now()-interval '1 hour' WHERE id=$1",
+          [beta],
+        );
+        const back = (await tick()).json();
+        assert.deepEqual(
+          [back.apply, back.company.applyChat, back.company.applySessionId],
+          ['reused', true, chat.sessionId],
+        );
+        assert.equal(chats.length, before + 1);
+        await db.pool.query('DELETE FROM tasks WHERE id=$1', [chat.sessionId]);
+        assert.equal((await tick()).json().apply, 'started');
+        assert.equal(chats.length, before + 2);
+        const delta = await companyId(c, 'Delta Example');
+        refuseChats = true;
+        const refused = (
+          await request(c, 'PUT', `/api/jobs/companies/${delta}/no-luck`, { noLuck: true })
+        ).json();
+        refuseChats = false;
+        assert.deepEqual(
+          [refused.apply, refused.company.noLuck.choice, refused.company.applySessionId],
+          ['Configure an agent provider before starting a conversation.', 'no_luck', null],
+        );
+        assert.equal(
+          (await request(c, 'PUT', `/api/jobs/companies/${delta}/no-luck`, { noLuck: true })).json()
+            .apply,
+          'started',
+        );
+        assert.equal(chats.length, before + 3);
+      });
+
+      await t.test('companies and people stay with their owner', async () => {
+        const alpha = await companyId(c, 'Alpha Example');
+        const detail = (await request(c, 'GET', `/api/jobs/companies/${alpha}`)).json();
+        const sam = detail.people[0];
+        assert.equal(sam.headline, 'Analyst at Alpha Example');
+        assert.equal((await request(b, 'GET', '/api/jobs/companies')).json().counts.no_luck, 0);
+        for (const [method, path, body] of [
+          ['GET', `/api/jobs/companies/${alpha}`, undefined],
+          ['PUT', `/api/jobs/companies/${alpha}/no-luck`, { noLuck: true }],
+          ['PATCH', `/api/jobs/people/${sam.id}`, { status: 'accepted', revision: sam.revision }],
+        ] as const)
+          assert.equal((await request(b, method, path, body)).statusCode, 404, `${method} ${path}`);
+        const other = await turn(b, 'user');
+        await assert.rejects(
+          b.jobs.execute(other, { action: 'company', id: alpha }),
+          /Company not found/,
+        );
+        await assert.rejects(
+          b.jobs.execute(other, {
+            action: 'person_update',
+            people: [{ profileUrl: profile('someone-example'), companyId: alpha }],
+          }),
+          /no company has the id/,
+        );
+        await assert.rejects(
+          b.jobs.execute(other, {
+            action: 'person_update',
+            people: [{ id: sam.id, status: 'referred' }],
+          }),
+          /Person not found/,
+        );
+        const theirs = records(
+          await b.jobs.execute(other, {
+            action: 'person_update',
+            people: [person('sam-example', 'Alpha Example', 'invited')],
+          }),
+        );
+        assert.equal(theirs.saved[0].created, true);
+        assert.notEqual(theirs.saved[0].companyId, alpha);
+        assert.ok(
+          records(await b.jobs.execute(other, { action: 'companies' })).companies.every(
+            (entry: { id: string }) => entry.id !== alpha,
+          ),
+        );
+        assert.equal(
+          (await request(c, 'GET', `/api/jobs/companies/${alpha}`)).json().people[0].status,
+          'invited',
+        );
+      });
+
+      await t.test('a person changed since it was loaded is not saved', async () => {
+        const zetaId = await companyId(c, 'Zeta Example');
+        const zeta = (await request(c, 'GET', `/api/jobs/companies/${zetaId}`)).json();
+        const accepted = zeta.people.find(
+          (entry: { status: string }) => entry.status === 'accepted',
+        );
+        assert.equal(zeta.people[0].id, accepted.id);
+        const moved = await request(c, 'PATCH', `/api/jobs/people/${accepted.id}`, {
+          status: 'asked',
+          revision: accepted.revision,
+        });
+        assert.equal(moved.statusCode, 200, moved.body);
+        assert.equal(moved.json().status, 'asked');
+        assert.ok(Date.now() - Date.parse(moved.json().statusAt) < 60_000);
+        assert.ok(moved.json().times.accepted);
+        assert.equal(
+          (
+            await request(c, 'PATCH', `/api/jobs/people/${accepted.id}`, {
+              status: 'referred',
+              revision: accepted.revision,
+            })
+          ).statusCode,
+          409,
+        );
+        const company = records(
+          await c.jobs.execute(await turn(c, 'event'), { action: 'company', id: zetaId }),
+        );
+        assert.deepEqual(company.people.map((entry: { status: string }) => entry.status).sort(), [
+          'asked',
+          'invited',
+        ]);
       });
     } finally {
       await Promise.allSettled([a.app.close(), b.app.close(), c.app.close()]);

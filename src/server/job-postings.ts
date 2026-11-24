@@ -17,6 +17,7 @@ import {
   type JobSwitch,
 } from '../shared/job-postings.ts';
 import { untrustedBlock } from '../shared/untrusted.ts';
+import { ensureCompany } from './job-companies.ts';
 import { jobFingerprint, jobUrl, jobUrlKey, siteOf } from './job-urls.ts';
 import {
   alertPostings,
@@ -322,6 +323,7 @@ export function createJobPostings(options: {
       source?: JobSourceKind;
       sinceHours?: number;
       limit?: number;
+      companyId?: string;
     } = {},
   ) {
     const { rows } = await client.query<PostingRow>(
@@ -333,6 +335,7 @@ export function createJobPostings(options: {
          AND ($5::text IS NULL OR ($5='none' AND p.score IS NULL) OR p.score_kind=$5)
          AND ($6::text IS NULL OR EXISTS (SELECT 1 FROM job_posting_links s WHERE s.owner_id=p.owner_id AND s.posting_id=p.id AND s.source=$6))
          AND ($7::int IS NULL OR p.first_seen_at>now()-make_interval(hours=>$7))
+         AND ($9::uuid IS NULL OR p.company_id=$9)
        ORDER BY p.score DESC NULLS LAST,p.first_seen_at DESC,p.id LIMIT $8`,
       [
         ownerId,
@@ -343,6 +346,7 @@ export function createJobPostings(options: {
         filter.source ?? null,
         filter.sinceHours ?? null,
         filter.limit ?? 50,
+        filter.companyId ?? null,
       ],
     );
     return rows.map(view);
@@ -408,8 +412,8 @@ export function createJobPostings(options: {
         counts.merged++;
       } else {
         await client.query(
-          `INSERT INTO job_postings(id,owner_id,url_key,url,fingerprint,title,company,location,posted_at,excerpt)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+          `INSERT INTO job_postings(id,owner_id,url_key,url,fingerprint,title,company,location,posted_at,excerpt,company_id)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
           [
             id,
             ownerId,
@@ -421,6 +425,7 @@ export function createJobPostings(options: {
             row.location,
             row.postedAt,
             row.excerpt,
+            await ensureCompany(client, ownerId, row.company),
           ],
         );
         counts.new++;
@@ -968,5 +973,11 @@ export function createJobPostings(options: {
     });
   }
 
-  return { handles, execute, registerRoutes };
+  return {
+    handles,
+    execute,
+    registerRoutes,
+    ofCompany: (client: Query, companyId: string) =>
+      postings(client, { companyId, status: 'all', limit: 100 }),
+  };
 }

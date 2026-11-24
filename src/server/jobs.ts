@@ -28,6 +28,7 @@ import {
   type JobTemplatesView,
 } from '../shared/jobs.ts';
 import type { ArtifactService } from './artifacts.ts';
+import { createJobCompanies, jobCompanyTables, linkPostings } from './job-companies.ts';
 import { createJobPostings, jobPostingTables } from './job-postings.ts';
 import { careerOpsFiles, scanConfig, scanSummary } from './jobs-files.ts';
 import { failure, parse, rootedIn as lineage, type Query, type TurnRef } from './jobs-shared.ts';
@@ -65,6 +66,7 @@ export const jobTables = `
   CREATE INDEX IF NOT EXISTS job_revisions_owner ON job_revisions(owner_id,kind,cv_id,created_at DESC);
   ALTER TABLE job_cvs ADD COLUMN IF NOT EXISTS conversion_started_at timestamptz;
   ${jobPostingTables}
+  ${jobCompanyTables}
 `;
 
 export const exampleTemplates: JobTemplate[] = [
@@ -331,6 +333,16 @@ export function createJobs(options: {
       const state = await profileState(client);
       return scanSummary(scanConfig(state.profile, state.portals));
     },
+    turnWrite,
+    owned,
+    changed,
+  });
+  const companies = createJobCompanies({
+    pool,
+    ownerId,
+    noLuck: async (client) => (await profileState(client)).profile.noLuck,
+    postings: postings.ofCompany,
+    ...(options.startChat ? { startChat: options.startChat } : {}),
     turnWrite,
     owned,
     changed,
@@ -909,6 +921,7 @@ export function createJobs(options: {
     } = {},
   ) {
     if (postings.handles(raw)) return postings.execute(turn, raw, context.signal);
+    if (companies.handles(raw)) return companies.execute(turn, raw, context.signal);
     const request = parse(toolInput, raw, 'The jobs request');
     const result = async (): Promise<unknown> => {
       switch (request.action) {
@@ -1033,6 +1046,7 @@ export function createJobs(options: {
 
   function registerRoutes(app: FastifyInstance) {
     postings.registerRoutes(app);
+    companies.registerRoutes(app);
     const body = <T extends z.ZodType>(schema: T, value: unknown, what: string) =>
       parse(schema, value, what);
     app.get('/api/jobs/setup', () => setup(pool));
@@ -1191,5 +1205,6 @@ export function createJobs(options: {
     applyLimits,
     registerRoutes,
     setup: () => setup(pool),
+    initialize: () => owned((client) => linkPostings(client, ownerId)),
   };
 }
