@@ -14,15 +14,15 @@ The language is the owner's choice for that person, otherwise the guess from the
 2. `jobs company` shows the person's message, if one was made, in `draftInfo`. Show its `text` when the owner only wants to see it.
 3. To make it again, or for someone without one, call `jobs draft_prepare {personId}`. Pass `postingId` when the owner names the job, and `programme`, `track` or `role` when the owner gives them. Pass `language` only when the owner names the language for that person; it becomes their choice for that person.
 4. When the result has `missing`, nothing was saved. Ask the owner for those values in one short question, then call `draft_prepare` again with them. When `missing` holds `template`, ask the owner to save a template on the Jobs page, Templates tab.
-5. A message the owner edited is replaced only after they agree: then pass `replace: true`.
+5. A message the owner edited is replaced only when the owner asks for it: then pass `replace: true`. Never set it on your own.
 
 `draft_prepare` returns `text` (the greeting filled in) and `raw` (as saved, with `{greeting}`), the `language`, `draftRevision` and the company's `waves`.
 
 ## Changing a message
 
-Change a message only when the owner asks. Follow the `rules` that `draft_prepare` returns: keep the owner's words, facts, order and length, change only what fits this person, invent nothing, add no link, claim, flattery or request, and keep `{greeting}`.
+Change a message only when the owner asks. Follow the `rules` that `draft_prepare` returns: keep the owner's words, facts, order and length, change only what fits this person, invent nothing, add no claim, flattery or request, add no link, web or email address, handle or phone number, and keep `{greeting}`.
 
-Save the change with `jobs draft_save {personId, text, changes, revision}`: start from `raw`, keep `{greeting}`, and send `draftRevision` as `revision`. For the owner's first 10 messages, `changes` is required: one or two short sentences on what you changed and why. A refusal for a stale revision means the message changed meanwhile: read it again with `jobs company`.
+Save the change with `jobs draft_save {personId, text, changes, revision}`: start from `raw`, keep `{greeting}`, and send `draftRevision` as `revision`. A message the owner edited is replaced only with `replace: true`, when the owner asked for that change. For the owner's first 10 messages, `changes` is required: one or two short sentences on what you changed and why. A refusal for a stale revision means the message changed meanwhile: read it again with `jobs company`.
 
 ## After the owner sends it
 
