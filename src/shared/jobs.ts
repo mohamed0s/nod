@@ -18,7 +18,7 @@ export const cvMimeTypes = {
 
 const text = (max: number) => z.string().trim().max(max);
 const item = (max: number) => z.string().trim().min(1).max(max);
-const languageTag = z
+export const languageTag = z
   .string()
   .trim()
   .regex(/^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/, 'Use a language tag such as en or fr-CA.');

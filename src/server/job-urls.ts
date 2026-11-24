@@ -124,10 +124,14 @@ const fold = (text: string) =>
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim();
 
-export function jobFingerprint(company: string, title: string, location: string) {
+export function companyKey(company: string) {
   const words = fold(company).split(' ').filter(Boolean);
   while (words.length > 1 && legalForms.has(words.at(-1)!)) words.pop();
-  const name = words.join(' ');
+  return words.join(' ');
+}
+
+export function jobFingerprint(company: string, title: string, location: string) {
+  const name = companyKey(company);
   const role = fold(title);
   if (!name || !role) return null;
   const place = fold(location.split(/[,|/(·•–—]|\s-\s/)[0] ?? '');
