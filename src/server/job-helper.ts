@@ -116,7 +116,7 @@ const empty = z.object({}).strict();
 const nonce = z.string().regex(/^[A-Za-z0-9_-]{43}$/, 'needs 32 random bytes in base64url');
 const extensionId = z
   .string()
-  .regex(/^[a-p]{32}$/, 'needs the Edge extension id, 32 letters from a to p');
+  .regex(/^[a-p]{32}$/, 'needs the browser extension id, 32 letters from a to p');
 
 async function pairingKeys(code: string, clientNonce: string, serverNonce: string) {
   const root = await derive(
@@ -440,7 +440,7 @@ export function createJobHelper(options: {
 
   const noCode = () =>
     failure(
-      'No pairing code is waiting. On the Jobs page, open Helper, select Pair the Edge panel, then run the script again.',
+      'No pairing code is waiting. On the Jobs page, open Helper, select Pair a helper, then run the pairing script again.',
       410,
     );
 
@@ -645,7 +645,7 @@ export function createJobHelper(options: {
               reply,
               'company',
               dailyCompanies,
-              `The panel added ${dailyCompanies} new companies in the last day. It sends this invite once the limit frees up; add the company in Nod's chat to save it sooner.`,
+              `The helper added ${dailyCompanies} new companies in the last day. It can save this invite once the limit frees up; add the company in Nod's chat to save it sooner.`,
             );
           const result = await companies.invites(client, input.company, input.people);
           if (!known) await use(client, 'company', token);
@@ -741,7 +741,7 @@ export function createJobHelper(options: {
                 reply,
                 'apply',
                 dailyApplyChats,
-                `This panel started ${dailyApplyChats} apply chats in the last day. Tick the company on Nod's Jobs page to start more.`,
+                `This helper started ${dailyApplyChats} apply chats in the last day. Tick the company on Nod's Jobs page to start more.`,
                 token,
               );
             const result = await companies.markNoLuck(request.params.id, noLuck, revision);
