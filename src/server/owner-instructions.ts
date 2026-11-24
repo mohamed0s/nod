@@ -247,6 +247,7 @@ export async function recentOwnerWords(
            AND a.created_at>=CASE WHEN m.created_at>=cleared.at THEN cleared.at ELSE '-infinity'::timestamptz END
            AND t.channel IS NOT DISTINCT FROM u.channel
            AND (u.task_id IS NULL OR u.session_id<>u.task_id OR t.session_id=u.session_id)
+           AND (u.channel<>'web' OR u.session_id=u.task_id OR t.task_id IS NULL OR t.session_id<>t.task_id)
          ORDER BY a.created_at DESC,a.id DESC LIMIT 1) implicit ON TRUE
      CROSS JOIN LATERAL (SELECT COALESCE(explicit.id,implicit.id) AS id,COALESCE(explicit.text,implicit.text) AS text,
          CASE WHEN explicit.id IS NOT NULL THEN explicit.presentation ELSE implicit.presentation END AS presentation,

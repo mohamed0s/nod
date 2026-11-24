@@ -2936,6 +2936,51 @@ test(
           });
           assert.ok(seen(afterNote.turnId).includes(note));
           assert.ok(!seen(afterNote.turnId).some((text) => /lanterns|canoes/.test(text)));
+          const [askTurn, pairTask, pairTurn, yesTurn] = [
+            randomUUID(),
+            randomUUID(),
+            randomUUID(),
+            randomUUID(),
+          ];
+          t.after(async () => {
+            await db.pool.query('UPDATE turns SET task_id=NULL WHERE id=$1', [pairTurn]);
+            await db.pool.query('DELETE FROM tasks WHERE id=$1', [pairTask]);
+            await db.pool.query('DELETE FROM messages WHERE turn_id=ANY($1::uuid[])', [
+              [askTurn, pairTurn, yesTurn],
+            ]);
+            await db.pool.query('DELETE FROM turns WHERE id=ANY($1::uuid[])', [
+              [askTurn, pairTurn, yesTurn],
+            ]);
+          });
+          const addTurn = (id: string, session: string) =>
+            db.pool.query(
+              "INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,background) VALUES($1,$2,$3,$4,'user','Synthetic pairing','succeeded',$5)",
+              [id, ownerId, current, session, session !== current],
+            );
+          const addMessage = async (turnId: string, role: string, text: string) => {
+            const id = randomUUID();
+            await db.pool.query(
+              'INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id) VALUES($1,$2,$3,$4,$5,$6)',
+              [id, ownerId, role, text, current, turnId],
+            );
+            return id;
+          };
+          await addTurn(askTurn, current);
+          await addMessage(askTurn, 'assistant', 'Shall I archive the synthetic receipts?');
+          await addTurn(pairTurn, pairTask);
+          const pairStart = await addMessage(pairTurn, 'user', 'Synthetic pairing chat');
+          await db.pool.query(
+            "INSERT INTO tasks(id,owner_id,turn_id,session_id,source_message_id,title,done_when,now_text) VALUES($1,$2,$3,$1,$4,'Synthetic pairing chat','Checked','Checking')",
+            [pairTask, ownerId, pairTurn, pairStart],
+          );
+          await db.pool.query('UPDATE turns SET task_id=$1 WHERE id=$2', [pairTask, pairTurn]);
+          await addMessage(pairTurn, 'assistant', 'Shall I sell the synthetic bicycle?');
+          await addTurn(yesTurn, current);
+          const yes = await addMessage(yesTurn, 'user', 'yes');
+          assert.deepEqual((await checked(yes, null)).slice(-2), [
+            'Shall I archive the synthetic receipts?',
+            'yes',
+          ]);
         },
       );
 
