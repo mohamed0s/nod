@@ -70,13 +70,14 @@ test(
       `fetch(${target}).catch(()=>{});navigator.sendBeacon(${target},'synthetic');new Image().src=${target}`,
       `const form=document.createElement('form');form.action=${target};form.method='POST';document.body.append(form);form.submit()`,
     ];
-    const frame = (content: string, scripts = true) =>
+    const frame = (content: string, scripts = true, links = false) =>
       renderToStaticMarkup(
         createElement(SandboxedFrame, {
           html: sandboxedDocument(content, escapeForwarder),
           title: 'Synthetic HTML preview',
           scripts,
           onLeave() {},
+          ...(links ? { onLink() {} } : {}),
         }),
       );
     const previews = attempts.map((script, index) =>
@@ -94,6 +95,16 @@ test(
       ),
       frame(
         `&quot;><iframe src="${destination}"></iframe><script>top.postMessage('quoted-content','*')</script>`,
+      ),
+    );
+    const linked = previews.length;
+    previews.push(
+      ...attempts.map((script, index) =>
+        frame(
+          `<p>synthetic-marker</p><script>top.postMessage('linked-${index}','*');try{${script}}catch{}</script>`,
+          true,
+          true,
+        ),
       ),
     );
     const host = createServer((_request, response) => {
@@ -128,13 +139,19 @@ test(
         readOnly: true,
       });
       const html = JSON.parse(result.text.slice(result.text.indexOf('\n') + 1)) as string;
-      for (let index = 0; index < attempts.length; index++)
+      for (let index = 0; index < attempts.length; index++) {
         assert.match(html, new RegExp(`ran-${index}(?:&quot;|\")`));
+        assert.match(html, new RegExp(`linked-${index}(?:&quot;|\")`));
+      }
       assert.deepEqual(received, []);
       assert.match(html, /data-closed="yes"/);
       const blocked = /data-navigation-blocked="([^"]+)"/.exec(html);
       assert.ok(blocked);
-      assert.deepEqual(JSON.parse(blocked[1]), [...navigations.keys(), attempts.length + 1]);
+      assert.deepEqual(JSON.parse(blocked[1]), [
+        ...navigations.keys(),
+        attempts.length + 1,
+        ...[...navigations.keys()].map((index) => linked + index),
+      ]);
       assert.match(html, /&quot;interactive&quot;/);
       assert.match(html, /&quot;quoted-content&quot;/);
       assert.doesNotMatch(html, /&quot;thumbnail-script&quot;/);
