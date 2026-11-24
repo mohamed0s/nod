@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
+  createCipheriv,
   createDecipheriv,
   createHash,
   createHmac,
@@ -681,59 +682,99 @@ test('the Edge helper worker takes commands only from its own side panel', async
   assert.deepEqual(calls, ['chrome-extension://synthetic-extension/.pairing.json']);
 });
 
-test('the Edge helper worker sends data only to a Nod that signs its answers and keeps invites it could not deliver', async () => {
+function helperCrypto(token: string) {
+  const base = createHash('sha256').update(token).digest();
+  const derived = (label: string) => createHmac('sha256', base).update(label).digest();
+  const macKey = derived('nod-helper-mac');
+  const encryptKey = derived('nod-helper-encrypt');
+  return {
+    sha: (value: string | Buffer) => createHash('sha256').update(value).digest('hex'),
+    hmac: (text: string) => createHmac('sha256', macKey).update(text).digest('base64url'),
+    seal(plainText: Buffer, context: string) {
+      const iv = randomBytes(12);
+      const cipher = createCipheriv('aes-256-gcm', encryptKey, iv);
+      cipher.setAAD(Buffer.from(context));
+      const data = Buffer.concat([cipher.update(plainText), cipher.final(), cipher.getAuthTag()]);
+      return JSON.stringify({ iv: iv.toString('base64url'), data: data.toString('base64url') });
+    },
+    open(text: string, context: string) {
+      const { iv, data } = JSON.parse(text) as { iv: string; data: string };
+      const bytes = Buffer.from(data, 'base64url');
+      const decipher = createDecipheriv('aes-256-gcm', encryptKey, Buffer.from(iv, 'base64url'));
+      decipher.setAAD(Buffer.from(context));
+      decipher.setAuthTag(bytes.subarray(bytes.length - 16));
+      return Buffer.concat([
+        decipher.update(bytes.subarray(0, bytes.length - 16)),
+        decipher.final(),
+      ]);
+    },
+  };
+}
+
+test('the Edge helper worker sends only encrypted data to a Nod that signs its answers and keeps invites it could not deliver', async () => {
   const token = randomBytes(32).toString('base64url');
   const id = randomUUID();
-  const secret = createHash('sha256').update(token).digest();
-  const hmac = (parts: string[]) =>
-    createHmac('sha256', secret).update(parts.join('\n')).digest('base64url');
-  const digest = (text: string) => createHash('sha256').update(text).digest('hex');
-  let mode: 'squatter' | 'tampered' | 'busy' | 'refused' | 'nod' = 'squatter';
-  const requests: Array<{ path: string; body: string }> = [];
+  const keys = helperCrypto(token);
+  let address = 'http://localhost:4310';
+  let mode: 'squatter' | 'tampered' | 'busy' | 'refused' | 'conflict' | 'capped' | 'nod' = 'nod';
+  const requests: Array<{ path: string; raw: string; body: unknown }> = [];
   const worker = await helperWorker(async (url, init) => {
-    if (String(url).endsWith('/.pairing.json'))
-      return Response.json({ nod: 'http://127.0.0.1:4310', id, token });
+    if (String(url).endsWith('/.pairing.json')) return Response.json({ nod: address, id, token });
     const target = new URL(String(url));
     const headers = init!.headers as Record<string, string>;
-    const body = String(init!.body);
-    requests.push({ path: target.pathname, body });
-    assert.equal(JSON.stringify(init).includes(token), false);
+    const raw = String(init!.body);
+    const context = [
+      'nod-helper-request',
+      'POST',
+      target.host,
+      target.pathname,
+      headers['x-nod-time'],
+    ].join('\n');
     assert.equal(headers['x-nod-helper'], id);
-    assert.equal(
-      headers['x-nod-signature'],
-      hmac([
-        'nod-helper-request',
-        'POST',
-        target.host,
-        target.pathname,
-        headers['x-nod-time']!,
-        digest(body),
-      ]),
-    );
+    assert.equal(headers['x-nod-signature'], keys.hmac(`${context}\n${keys.sha(raw)}`));
+    assert.equal(JSON.stringify(init).includes(token), false);
+    const body = JSON.parse(keys.open(raw, context).toString());
+    requests.push({ path: target.pathname, raw, body });
     const invites = target.pathname === '/api/helper/invites';
-    const [status, answer] =
-      invites && mode === 'busy'
-        ? [503, { error: 'Nod is updating.' }]
-        : invites && mode === 'refused'
-          ? [400, { error: 'The invites (people.0.name): is too long for a name' }]
-          : [
-              200,
-              target.pathname === '/api/helper/company'
-                ? { company: null, invites: { today: 0, week: 0, daily: 15, weekly: 80 } }
-                : target.pathname === '/api/helper/accepted'
-                  ? { people: [] }
+    const refusal: Record<string, [number, string, string]> = {
+      busy: [503, 'Nod is updating.', ''],
+      refused: [400, 'The invites (people.0.name): is too long for a name', ''],
+      conflict: [409, 'people.0: the profile and member id belong to different people.', ''],
+      capped: [429, 'The panel added 30 new companies in the last day.', '3600'],
+    };
+    const [status, answer, retryAfter] =
+      invites && refusal[mode]
+        ? [refusal[mode][0], { error: refusal[mode][1] }, refusal[mode][2]]
+        : [
+            200,
+            target.pathname === '/api/helper/company'
+              ? { company: null, invites: { today: 0, week: 0, daily: 15, weekly: 80 } }
+              : target.pathname === '/api/helper/accepted'
+                ? { people: [] }
+                : target.pathname === '/api/helper/profile'
+                  ? { person: null }
                   : invites
                     ? { saved: [] }
                     : { ok: true },
-            ];
-    const text = JSON.stringify(answer);
-    const signature = hmac([
-      'nod-helper-response',
-      headers['x-nod-signature']!,
-      String(status),
-      digest(text),
-    ]);
-    return new Response(mode === 'tampered' ? text.replace('true', 'false') : text, {
+            '',
+          ];
+    const sealed = keys.seal(
+      Buffer.from(
+        JSON.stringify({
+          type: 'application/json; charset=utf-8',
+          disposition: '',
+          retryAfter,
+          body: Buffer.from(JSON.stringify(answer)).toString('base64'),
+        }),
+      ),
+      `nod-helper-response\n${headers['x-nod-signature']}`,
+    );
+    const signature = keys.hmac(
+      ['nod-helper-response', headers['x-nod-signature'], String(status), keys.sha(sealed)].join(
+        '\n',
+      ),
+    );
+    return new Response(mode === 'tampered' ? sealed.replace('"data":"', '"data":"AAAA') : sealed, {
       status,
       headers: {
         'content-type': 'application/json',
@@ -754,14 +795,33 @@ test('the Edge helper worker sends data only to a Nod that signs its answers and
         value: { status: string };
       }
     ).value.status;
+  const problem = () =>
+    String((worker.storage.get('problem') as { text: string } | undefined)?.text);
 
+  assert.equal(await state(), 'unpaired');
+  assert.equal(requests.length, 0);
+  address = 'http://127.0.0.1:4310';
+  assert.equal(await state(), 'ready');
+  mode = 'squatter';
+  const profile = {
+    type: 'profile',
+    profileUrl: 'https://www.linkedin.com/in/synthetic-private-person/',
+    memberUrn: 'ACoAASyntheticPrivateMember1',
+  };
+  const restarted = (await worker.ask(profile, pageSender)) as { ok: boolean; kind: string };
+  assert.deepEqual([restarted.ok, restarted.kind], [false, 'unverified']);
+  const leaked = requests.at(-1)!;
+  assert.equal(leaked.path, '/api/helper/profile');
+  assert.equal(leaked.raw.includes('synthetic-private-person'), false);
+  assert.equal(leaked.raw.includes('ACoAASyntheticPrivateMember1'), false);
+  const sent = requests.length;
   await worker.ask(invite('sam-example'), pageSender);
   assert.equal(await state(), 'unverified');
   mode = 'tampered';
   assert.equal(await state(), 'unverified');
   assert.deepEqual(
-    new Set(requests.map((request) => `${request.path} ${request.body}`)),
-    new Set(['/api/helper/hello {}']),
+    new Set(requests.slice(sent).map((request) => request.path)),
+    new Set(['/api/helper/hello']),
   );
   assert.equal(queue().length, 1);
 
@@ -775,7 +835,19 @@ test('the Edge helper worker sends data only to a Nod that signs its answers and
   mode = 'refused';
   await worker.ask(invite('kim-example'), pageSender);
   assert.equal(queue().length, 1);
-  assert.match(String((worker.storage.get('problem') as { text: string }).text), /kim-example/);
+  assert.match(problem(), /kim-example/);
+  mode = 'conflict';
+  await worker.ask(invite('lee-example'), pageSender);
+  assert.equal(queue().length, 1);
+  assert.match(problem(), /lee-example.*different people/);
+  mode = 'capped';
+  worker.storage.set(
+    'queue',
+    queue().map((entry) => ({ ...entry, next: 0 })),
+  );
+  assert.equal(await state(), 'ready');
+  assert.equal(queue()[0]!.tries, 1);
+  assert.ok(Math.abs(queue()[0]!.next - (Date.now() + 3_600_000)) < 60_000);
   mode = 'nod';
   worker.storage.set(
     'queue',
@@ -783,6 +855,14 @@ test('the Edge helper worker sends data only to a Nod that signs its answers and
   );
   assert.equal(await state(), 'ready');
   assert.deepEqual(queue(), []);
+  assert.ok(
+    requests.some(
+      (request) =>
+        request.path === '/api/helper/invites' &&
+        JSON.stringify(request.body).includes('sam-example') &&
+        !request.raw.includes('sam-example'),
+    ),
+  );
 });
 
 test('the Edge helper never acts on a page, and only its worker loads anything', async () => {
@@ -805,6 +885,7 @@ test('the Edge helper never acts on a page, and only its worker loads anything',
     /innerHTML|outerHTML|insertAdjacentHTML|document\.write/,
     /\beval\(|new Function/,
     /importScripts/,
+    /localhost/,
   ];
   const files = (await readdir(helperFolder)).filter((name) => name.endsWith('.js'));
   assert.deepEqual(files.sort(), ['content.js', 'readers.js', 'service-worker.js', 'sidepanel.js']);
@@ -815,17 +896,106 @@ test('the Edge helper never acts on a page, and only its worker loads anything',
   }
   const manifest = JSON.parse(await readFile(join(helperFolder, 'manifest.json'), 'utf8'));
   assert.deepEqual(manifest.permissions, ['sidePanel', 'storage', 'downloads']);
-  assert.deepEqual(manifest.host_permissions, [
-    'http://127.0.0.1/*',
-    'http://localhost/*',
-    'https://www.linkedin.com/*',
-  ]);
+  assert.deepEqual(manifest.host_permissions, ['http://127.0.0.1/*', 'https://www.linkedin.com/*']);
   assert.match(
     manifest.content_security_policy.extension_pages,
-    /connect-src 'self' http:\/\/127\.0\.0\.1:\* http:\/\/localhost:\*;/,
+    /connect-src 'self' http:\/\/127\.0\.0\.1:\*;/,
   );
   assert.equal(manifest.web_accessible_resources, undefined);
 });
+
+test(
+  'pair-helper.ps1 talks only to the recorded Nod process and checks the answer before opening it',
+  { skip: process.platform !== 'win32', timeout: 120_000 },
+  async (t) => {
+    const { createServer } = await import('node:http');
+    const { spawn } = await import('node:child_process');
+    const { mkdir, utimes, writeFile } = await import('node:fs/promises');
+    const requests: Array<{ path: string; body: string }> = [];
+    const server = createServer((request, response) => {
+      let body = '';
+      request.on('data', (chunk) => (body += chunk));
+      request.on('end', () => {
+        requests.push({ path: request.url ?? '', body });
+        response.setHeader('content-type', 'application/json');
+        response.end(
+          request.url === '/api/helper-pairing/start'
+            ? JSON.stringify({ serverNonce: randomBytes(32).toString('base64url') })
+            : JSON.stringify({
+                iv: randomBytes(16).toString('base64'),
+                sealed: randomBytes(64).toString('base64'),
+                mac: randomBytes(32).toString('base64url'),
+              }),
+        );
+      });
+    });
+    await new Promise<void>((accept) => server.listen(0, '127.0.0.1', accept));
+    t.after(() => server.close());
+    const port = (server.address() as { port: number }).port;
+    const folder = await mkdtemp(join(tmpdir(), 'nod-pair-'));
+    t.after(() => rm(folder, { recursive: true, force: true }));
+    const portFile = join(folder, 'profiles', 'local', 'engine-port.json');
+    await mkdir(join(folder, 'profiles', 'local'), { recursive: true });
+    const keyFile = join(helperFolder, '.pairing.json');
+    const before = await readFile(keyFile, 'utf8').catch(() => null);
+    const pairScript = (...args: string[]) =>
+      new Promise<{ code: number | null; output: string }>((accept) => {
+        const child = spawn(
+          'powershell',
+          [
+            '-NoProfile',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-File',
+            join(import.meta.dirname, '..', 'scripts', 'windows', 'pair-helper.ps1'),
+            '-Code',
+            'ABCD-2345',
+            ...args,
+          ],
+          { windowsHide: true },
+        );
+        let output = '';
+        child.stdout.on('data', (chunk) => (output += chunk));
+        child.stderr.on('data', (chunk) => (output += chunk));
+        child.on('close', (code) => accept({ code, output: output.replace(/\s+/g, ' ') }));
+      });
+    const record = (values: Record<string, unknown>) =>
+      writeFile(
+        portFile,
+        JSON.stringify({ port, pid: process.pid, executable: process.execPath, ...values }),
+      );
+
+    await record({ pid: 4 });
+    let run = await pairScript('-UserData', folder);
+    assert.notEqual(run.code, 0);
+    assert.match(run.output, /Another program \(process \d+\) holds 127\.0\.0\.1/);
+    await record({ executable: 'C:\\nowhere\\Nod.exe' });
+    run = await pairScript('-UserData', folder);
+    assert.match(run.output, /isn't the Nod desktop app that recorded it/);
+    await record({});
+    const old = new Date(Date.now() - 24 * 3_600_000);
+    await utimes(portFile, old, old);
+    run = await pairScript('-UserData', folder);
+    assert.match(run.output, /started after Nod recorded its address/);
+    run = await pairScript('-Nod', `http://localhost:${port}`);
+    assert.match(run.output, /must look like http:\/\/127\.0\.0\.1:4310/);
+    assert.equal(requests.length, 0);
+
+    await record({});
+    run = await pairScript('-UserData', folder);
+    assert.notEqual(run.code, 0);
+    assert.match(run.output, /wasn't made with your pairing code/);
+    assert.deepEqual(
+      requests.map((request) => request.path),
+      ['/api/helper-pairing/start', '/api/helper-pairing/finish'],
+    );
+    assert.equal(
+      requests.some((request) => /ABCD-?2345/i.test(request.body)),
+      false,
+    );
+    assert.equal(await readFile(keyFile, 'utf8').catch(() => null), before);
+  },
+);
 
 test(
   'job records stay with their owner and change only through the work allowed to change them',
@@ -2289,55 +2459,102 @@ test(
         );
       });
       await t.test(
-        'the Edge helper reaches only its own routes, with requests signed by a key Nod paired',
+        'the Edge helper reaches only its own routes, over 127.0.0.1, with requests sealed by a key Nod paired',
         async (h) => {
+          const { request: httpRequest } = await import('node:http');
+          const net = await import('node:net');
           const key = randomBytes(32).toString('base64url');
-          const served = async (side: Side) => {
+          const freePort = () =>
+            new Promise<number>((accept, reject) => {
+              const probe = net.createServer();
+              probe.once('error', reject);
+              probe.listen(0, '127.0.0.1', () => {
+                const { port } = probe.address() as { port: number };
+                probe.close(() => accept(port));
+              });
+            });
+          const served = async (side: Side, desktop = true, listen = '127.0.0.1') => {
+            const port = await freePort();
             const app = Fastify();
             h.after(() => app.close());
             await app.register(rateLimit, { global: false, keyGenerator: () => side.ownerId });
-            registerLocalAccess(app, 4310, { key, desktop: true, helper: side.jobs.helperAccess });
+            registerLocalAccess(
+              app,
+              port,
+              desktop
+                ? { key, desktop: true, helper: side.jobs.helperAccess }
+                : { key, helper: side.jobs.helperAccess },
+            );
             side.jobs.registerRoutes(app);
-            await app.ready();
-            return app;
+            await app.listen({ port, host: listen });
+            return {
+              port,
+              host: `127.0.0.1:${port}`,
+              inject: (options: {
+                method: 'GET' | 'POST' | 'DELETE';
+                url: string;
+                headers: Record<string, string>;
+                payload?: string;
+              }) => app.inject(options),
+            };
           };
+          type Wire = { statusCode: number; headers: Record<string, unknown>; raw: Buffer };
+          const wire = (
+            port: number,
+            path: string,
+            headers: Record<string, string>,
+            body: string,
+            address = '127.0.0.1',
+          ) =>
+            new Promise<Wire>((accept, reject) => {
+              const outgoing = httpRequest(
+                {
+                  host: address,
+                  port,
+                  path,
+                  method: 'POST',
+                  headers: { ...headers, 'content-length': String(Buffer.byteLength(body)) },
+                },
+                (incoming) => {
+                  const chunks: Buffer[] = [];
+                  incoming.on('data', (chunk: Buffer) => chunks.push(chunk));
+                  incoming.on('end', () =>
+                    accept({
+                      statusCode: incoming.statusCode ?? 0,
+                      headers: incoming.headers,
+                      raw: Buffer.concat(chunks),
+                    }),
+                  );
+                },
+              );
+              outgoing.on('error', reject);
+              outgoing.end(body);
+            });
           const d = owner('synthetic-owner-d');
           const e = owner('synthetic-owner-e');
           const [dApp, eApp] = [await served(d), await served(e)];
           type App = typeof dApp;
-          const host = '127.0.0.1:4310';
-          const asOwner = { host, 'x-nod-desktop-token': key };
-          const call = (
-            app: App,
-            method: string,
-            url: string,
-            headers: Record<string, string>,
-            payload?: unknown,
-          ) =>
-            app.inject({
-              method: method as 'POST',
-              url,
-              headers,
-              ...(payload === undefined ? {} : { payload: payload as object }),
-            });
+          const asOwner = (app: App) => ({ host: app.host, 'x-nod-desktop-token': key });
+          const call = (app: App, method: string, url: string, headers: Record<string, string>) =>
+            app.inject({ method: method as 'POST', url, headers });
           const id = 'abcdefghijklmnopabcdefghijklmnop';
           const origin = `chrome-extension://${id}`;
-          const sha = (value: string | Buffer) => createHash('sha256').update(value).digest();
-          const hmac = (secret: Buffer, parts: string[]) =>
-            createHmac('sha256', secret).update(parts.join('\n')).digest('base64url');
           const newCode = async (app: App) =>
-            (await call(app, 'POST', '/api/jobs/helper/pairing', asOwner)).json().code as string;
-          const pair = async (app: App, code: string, extensionId = id) => {
-            const clientNonce = randomBytes(32).toString('base64url');
-            const start = await call(
-              app,
-              'POST',
-              '/api/helper-pairing/start',
-              { host },
-              { extensionId, clientNonce },
+            (await call(app, 'POST', '/api/jobs/helper/pairing', asOwner(app))).json()
+              .code as string;
+          const json = (response: Wire) => JSON.parse(response.raw.toString());
+          const pairingCall = (app: App, step: string, body: unknown, headers = {}) =>
+            wire(
+              app.port,
+              `/api/helper-pairing/${step}`,
+              { host: app.host, 'content-type': 'application/json', ...headers },
+              JSON.stringify(body),
             );
-            if (start.statusCode !== 200) return { response: start };
-            const { serverNonce } = start.json() as { serverNonce: string };
+          const challenge = async (app: App, code: string, extensionId = id) => {
+            const clientNonce = randomBytes(32).toString('base64url');
+            const start = await pairingCall(app, 'start', { extensionId, clientNonce });
+            if (start.statusCode !== 200) return { start };
+            const { serverNonce } = json(start) as { serverNonce: string };
             const root = pbkdf2Sync(
               code.toUpperCase().replace(/[\s-]/g, ''),
               `nod-helper-pairing\n${clientNonce}\n${serverNonce}`,
@@ -2346,21 +2563,26 @@ test(
               'sha256',
             );
             const derived = (label: string) => createHmac('sha256', root).update(label).digest();
-            const finish = { extensionId, clientNonce, serverNonce };
-            const proof = hmac(derived('proof'), [extensionId, clientNonce, serverNonce]);
-            const response = await call(
-              app,
-              'POST',
-              '/api/helper-pairing/finish',
-              { host },
-              { ...finish, proof },
+            const proof = createHmac('sha256', derived('proof'))
+              .update([extensionId, clientNonce, serverNonce].join('\n'))
+              .digest('base64url');
+            return { start, derived, finish: { extensionId, clientNonce, serverNonce, proof } };
+          };
+          const pair = async (app: App, code: string, extensionId = id) => {
+            const ready = await challenge(app, code, extensionId);
+            if (!ready.finish) return { response: ready.start };
+            const response = await pairingCall(app, 'finish', ready.finish);
+            if (response.statusCode !== 200) return { response, finish: ready.finish };
+            const { iv, sealed, mac } = json(response) as Record<string, string>;
+            assert.equal(
+              mac,
+              createHmac('sha256', ready.derived!('mac'))
+                .update([extensionId, iv, sealed].join('\n'))
+                .digest('base64url'),
             );
-            if (response.statusCode !== 200) return { response, finish, proof };
-            const { iv, sealed, mac } = response.json() as Record<string, string>;
-            assert.equal(mac, hmac(derived('mac'), [extensionId, iv!, sealed!]));
             const decipher = createDecipheriv(
               'aes-256-cbc',
-              derived('encrypt'),
+              ready.derived!('encrypt'),
               Buffer.from(iv!, 'base64'),
             );
             const opened = JSON.parse(
@@ -2369,11 +2591,11 @@ test(
                 decipher.final(),
               ]).toString(),
             ) as { id: string; token: string };
-            return { response, finish, proof, paired: opened };
+            return { response, finish: ready.finish, paired: opened };
           };
           const pairedOn = async (app: App) => {
             const result = await pair(app, await newCode(app));
-            assert.equal(result.response.statusCode, 200, result.response.body);
+            assert.equal(result.response.statusCode, 200, result.response.raw.toString());
             return result.paired!;
           };
           type Paired = { id: string; token: string };
@@ -2387,25 +2609,31 @@ test(
               host?: string;
               signedHost?: string;
               signedBody?: string;
+              raw?: string;
               time?: string;
               secret?: Buffer;
               headers?: Record<string, string>;
+              port?: number;
+              address?: string;
             } = {},
           ) => {
-            const text = JSON.stringify(body);
+            const keys = helperCrypto(paired.token);
             const time = change.time ?? String(Date.now());
-            const secret = sha(paired.token);
             const url = `/api/helper/${path}`;
-            const signature = hmac(change.secret ?? secret, [
+            const context = [
               'nod-helper-request',
               'POST',
-              change.signedHost ?? host,
+              change.signedHost ?? app.host,
               url,
               time,
-              sha(change.signedBody ?? text).toString('hex'),
-            ]);
+            ].join('\n');
+            const text = change.raw ?? keys.seal(Buffer.from(JSON.stringify(body)), context);
+            const signedText = `${context}\n${keys.sha(change.signedBody ?? text)}`;
+            const signature = change.secret
+              ? createHmac('sha256', change.secret).update(signedText).digest('base64url')
+              : keys.hmac(signedText);
             const headers = {
-              host: change.host ?? host,
+              host: change.host ?? app.host,
               origin: change.origin ?? origin,
               'content-type': 'application/json',
               'x-nod-helper': paired.id,
@@ -2413,52 +2641,68 @@ test(
               'x-nod-signature': signature,
               ...change.headers,
             };
-            const response = await app.inject({ method: 'POST', url, headers, payload: text });
+            const response = await wire(
+              change.port ?? app.port,
+              url,
+              headers,
+              text,
+              change.address,
+            );
             const genuine =
               response.headers['x-nod-signature'] ===
-              hmac(secret, [
-                'nod-helper-response',
-                signature,
-                String(response.statusCode),
-                sha(response.rawPayload).toString('hex'),
-              ]);
-            return Object.assign(response, { genuine, headers: response.headers, sent: headers });
+              keys.hmac(
+                [
+                  'nod-helper-response',
+                  signature,
+                  String(response.statusCode),
+                  keys.sha(response.raw),
+                ].join('\n'),
+              );
+            const opened = genuine
+              ? (JSON.parse(
+                  keys
+                    .open(response.raw.toString(), `nod-helper-response\n${signature}`)
+                    .toString(),
+                ) as { type: string; disposition: string; retryAfter: string; body: string })
+              : null;
+            const content = opened ? Buffer.from(opened.body, 'base64') : response.raw;
+            return {
+              statusCode: response.statusCode,
+              headers: response.headers,
+              genuine,
+              opened,
+              raw: response.raw,
+              sent: { headers, text },
+              body: content.toString(),
+              json: () => JSON.parse(content.toString()),
+            };
           };
 
           const code = await newCode(dApp);
           assert.equal((await pair(eApp, code)).response.statusCode, 410);
           const first = await pair(dApp, code);
-          assert.equal(first.response.statusCode, 200, first.response.body);
+          assert.equal(first.response.statusCode, 200, first.response.raw.toString());
           const paired = first.paired!;
-          assert.equal(
-            (
-              await call(
-                dApp,
-                'POST',
-                '/api/helper-pairing/finish',
-                { host },
-                {
-                  ...first.finish,
-                  proof: first.proof,
-                },
-              )
-            ).statusCode,
-            410,
-          );
-          assert.equal((await pair(dApp, code)).response.statusCode, 410);
-          for (const headers of [
-            { host, origin },
-            { host, 'sec-fetch-site': 'cross-site' },
-          ] as Record<string, string>[])
+          assert.equal((await pairingCall(dApp, 'finish', first.finish)).statusCode, 410);
+          for (const headers of [{ origin }, { 'sec-fetch-site': 'cross-site' }])
             assert.equal(
               (
-                await call(dApp, 'POST', '/api/helper-pairing/start', headers, {
-                  extensionId: id,
-                  clientNonce: randomBytes(32).toString('base64url'),
-                })
+                await pairingCall(
+                  dApp,
+                  'start',
+                  { extensionId: id, clientNonce: randomBytes(32).toString('base64url') },
+                  headers,
+                )
               ).statusCode,
               403,
             );
+          const racing = await newCode(dApp);
+          const ready = await challenge(dApp, racing);
+          const finishing = pairingCall(dApp, 'finish', ready.finish);
+          await new Promise((accept) => setTimeout(accept, 20));
+          await newCode(dApp);
+          assert.equal((await finishing).statusCode, 410);
+          await call(dApp, 'DELETE', '/api/jobs/helper/pairing', asOwner(dApp));
           const stored = (
             await db.pool.query(
               'SELECT id,token_hash,origin FROM job_helper_tokens WHERE owner_id=$1',
@@ -2466,19 +2710,25 @@ test(
             )
           ).rows;
           assert.deepEqual(stored, [
-            { id: paired.id, token_hash: sha(paired.token).toString('hex'), origin },
+            {
+              id: paired.id,
+              token_hash: createHash('sha256').update(paired.token).digest('hex'),
+              origin,
+            },
           ]);
 
           const hello = await signed(dApp, 'hello', {}, paired);
           assert.equal(hello.statusCode, 200, hello.body);
           assert.equal(hello.genuine, true);
+          assert.equal(hello.raw.toString().includes('"ok"'), false);
+          assert.deepEqual(hello.json(), { ok: true });
           for (const [change, status] of [
             [{ origin: `chrome-extension://${'b'.repeat(32)}` }, 401],
             [{ origin: 'https://www.linkedin.com' }, 403],
             [{ secret: randomBytes(32) }, 401],
             [{ signedBody: '{"other":true}' }, 401],
             [{ signedHost: '127.0.0.1:4311' }, 401],
-            [{ host: 'localhost:4310' }, 403],
+            [{ host: `localhost:${dApp.port}`, signedHost: `localhost:${dApp.port}` }, 403],
             [{ time: String(Date.now() - 120_000) }, 401],
             [{ headers: { 'x-nod-signature': 'short' } }, 401],
           ] as const) {
@@ -2487,46 +2737,151 @@ test(
             assert.equal(refused.headers['x-nod-signature'], undefined);
           }
           const once = await signed(dApp, 'hello', {}, paired);
-          const replayed = await dApp.inject({
-            method: 'POST',
-            url: '/api/helper/hello',
-            headers: once.sent,
-            payload: '{}',
-          });
+          const replayed = await wire(
+            dApp.port,
+            '/api/helper/hello',
+            once.sent.headers,
+            once.sent.text,
+          );
           assert.equal(once.statusCode, 200);
           assert.equal(replayed.statusCode, 401);
+          assert.notEqual(replayed.headers['x-nod-signature'], undefined);
+          const unreadable = await signed(dApp, 'company', { name: 'Null \u0000 Example' }, paired);
+          assert.equal(unreadable.statusCode, 400);
+          assert.equal(unreadable.genuine, true);
+          assert.match(unreadable.json().message, /null character/);
           for (const headers of [
-            { host, origin, authorization: `Bearer ${paired.token}` },
-            { host, origin, 'x-nod-desktop-token': key },
-            { host, 'x-nod-desktop-token': key },
+            { host: dApp.host, origin, authorization: `Bearer ${paired.token}` },
+            { host: dApp.host, origin, 'x-nod-desktop-token': key },
+            { host: dApp.host, 'x-nod-desktop-token': key },
           ] as Record<string, string>[])
             assert.notEqual(
-              (await call(dApp, 'POST', '/api/helper/hello', headers, {})).statusCode,
+              (await wire(dApp.port, '/api/helper/hello', headers, '{}')).statusCode,
               200,
             );
           assert.equal((await signed(eApp, 'hello', {}, paired)).statusCode, 401);
           for (const [headers, status] of [
-            [{ host, origin }, 403],
-            [{ host }, 401],
-            [asOwner, 200],
+            [{ host: dApp.host, origin }, 403],
+            [{ host: dApp.host }, 401],
+            [asOwner(dApp), 200],
           ] as const)
             assert.equal(
               (await call(dApp, 'GET', '/api/jobs/companies', headers)).statusCode,
               status,
             );
-          const flagged = Fastify();
-          h.after(() => flagged.close());
-          registerLocalAccess(flagged, 4310, {
+          const viaInject = await dApp.inject({
+            method: 'POST',
+            url: '/api/helper/hello',
+            headers: once.sent.headers,
+            payload: once.sent.text,
+          });
+          assert.equal(viaInject.statusCode, 403);
+
+          const local = await served(d, false);
+          assert.equal((await signed(local, 'hello', {}, paired)).statusCode, 200);
+          assert.equal(
+            (
+              await signed(local, 'hello', {}, paired, {
+                host: `localhost:${local.port}`,
+                signedHost: `localhost:${local.port}`,
+              })
+            ).statusCode,
+            403,
+          );
+          const relayed: Buffer[] = [];
+          const relay = net.createServer((socket) => {
+            const upstream = net.connect(local.port, '127.0.0.1');
+            socket.on('data', (chunk: Buffer) => relayed.push(chunk));
+            socket.pipe(upstream).pipe(socket);
+            socket.on('error', () => upstream.destroy());
+            upstream.on('error', () => socket.destroy());
+          });
+          const relaying = await new Promise<boolean>((accept) => {
+            relay.once('error', () => accept(false));
+            relay.listen(local.port, '::1', () => accept(true));
+          });
+          h.after(() => relay.close());
+          if (relaying) {
+            const throughRelay = await signed(
+              local,
+              'invites',
+              {
+                company: { slug: 'relay-example', name: 'Relay Example Co' },
+                people: [
+                  {
+                    profileUrl: 'https://www.linkedin.com/in/relay-private-person/',
+                    name: 'Relay Private Person',
+                    headline: '',
+                  },
+                ],
+              },
+              paired,
+              {
+                address: '::1',
+                host: `localhost:${local.port}`,
+                signedHost: `localhost:${local.port}`,
+              },
+            );
+            assert.equal(throughRelay.statusCode, 403);
+            assert.equal(throughRelay.genuine, false);
+            const seen = Buffer.concat(relayed).toString();
+            assert.match(seen, /POST \/api\/helper\/invites/);
+            assert.equal(/relay-private-person|Relay Private Person/.test(seen), false);
+          }
+
+          const dual = await served(d, false, '::').catch(() => null);
+          if (dual)
+            assert.equal(
+              (await signed(dual, 'hello', {}, paired, { address: '::1' })).statusCode,
+              403,
+            );
+
+          const flaggedLater = Fastify();
+          h.after(() => flaggedLater.close());
+          d.jobs.registerRoutes(flaggedLater);
+          let refusedAtStart = false;
+          try {
+            flaggedLater.post(
+              '/api/elsewhere',
+              { config: { helper: 'paired' } },
+              async () => 'reached',
+            );
+            await flaggedLater.ready();
+          } catch (error) {
+            refusedAtStart = /Only the job search helper/.test(String(error));
+          }
+          assert.equal(refusedAtStart, true);
+          const flaggedFirst = Fastify();
+          h.after(() => flaggedFirst.close());
+          const firstPort = await freePort();
+          registerLocalAccess(flaggedFirst, firstPort, {
             key,
             desktop: true,
             helper: d.jobs.helperAccess,
           });
-          flagged.get('/api/helper/fixture', { config: { helper: 'paired' } }, async () => 'open');
-          await flagged.ready();
+          flaggedFirst.post(
+            '/api/elsewhere',
+            { config: { helper: 'paired' } },
+            async () => 'reached',
+          );
+          await flaggedFirst.listen({ port: firstPort, host: '127.0.0.1' });
           assert.equal(
-            (await flagged.inject({ url: '/api/helper/fixture', headers: { host, origin } }))
-              .statusCode,
-            405,
+            (
+              await wire(
+                firstPort,
+                '/api/elsewhere',
+                {
+                  host: `127.0.0.1:${firstPort}`,
+                  origin,
+                  'content-type': 'application/json',
+                  'x-nod-helper': paired.id,
+                  'x-nod-time': String(Date.now()),
+                  'x-nod-signature': 'A'.repeat(43),
+                },
+                '{}',
+              )
+            ).statusCode,
+            403,
           );
 
           const page = { slug: 'helper-example', name: 'Helper Example Co' };
@@ -2545,6 +2900,8 @@ test(
           const invited = await send('invites', { company: page, people: [sam, kim] });
           assert.equal(invited.statusCode, 200, invited.body);
           assert.equal(invited.genuine, true);
+          assert.equal(invited.sent.text.includes('sam-helper'), false);
+          assert.equal(invited.raw.toString().includes('sam-helper'), false);
           const [samId, kimId] = invited.json().saved.map((entry: { id: string }) => entry.id);
           const again = await send('invites', {
             company: page,
@@ -2709,11 +3066,6 @@ test(
               ['sam-helper', memberA],
             ],
           );
-          assert.equal(
-            (await db.pool.query("SELECT 1 FROM job_people WHERE profile_key='nobody-helper'"))
-              .rowCount,
-            0,
-          );
 
           assert.deepEqual(
             (
@@ -2769,10 +3121,7 @@ test(
               await signed(
                 eApp,
                 `people/${samId}/status`,
-                {
-                  status: 'declined',
-                  revision: asked.json().revision,
-                },
+                { status: 'declined', revision: asked.json().revision },
                 other,
               )
             ).statusCode,
@@ -2804,7 +3153,10 @@ test(
           assert.equal((await newCompany(1)).statusCode, 200);
           const capped = await newCompany(2);
           assert.equal(capped.statusCode, 429);
+          assert.equal(capped.genuine, true);
           assert.match(capped.json().message, /30 new companies/);
+          const wait = Number(capped.opened!.retryAfter);
+          assert.ok(wait > 86_000 && wait <= 86_400, String(wait));
           assert.equal((await send('invites', { company: page, people: [sam] })).statusCode, 200);
 
           refuseChats = false;
@@ -2826,6 +3178,7 @@ test(
           const blocked = await tick(capCompany.id, { noLuck: true });
           assert.equal(blocked.statusCode, 429);
           assert.match(blocked.json().message, /5 apply chats/);
+          assert.ok(Number(blocked.opened!.retryAfter) > 0);
           assert.equal(chats.length, chatsBefore + 1);
           assert.equal(
             (await tick(capCompany.id, { noLuck: false, revision: capCompany.revision }))
@@ -2838,12 +3191,11 @@ test(
           const cv = await send('cv', {});
           assert.equal(cv.statusCode, 200, cv.body);
           assert.equal(cv.genuine, true);
-          assert.equal(cv.headers['content-type'], 'application/pdf');
+          assert.equal(cv.opened!.type, 'application/pdf');
+          assert.match(cv.opened!.disposition, /UTF-8''Helper%20Example%20CV\.pdf$/);
           assert.equal(cv.body, 'synthetic Helper Example CV.pdf');
-          assert.match(
-            String(cv.headers['content-disposition']),
-            /UTF-8''Helper%20Example%20CV\.pdf$/,
-          );
+          assert.equal(cv.headers['content-disposition'], undefined);
+          assert.equal(cv.raw.toString().includes('synthetic Helper Example CV'), false);
 
           let limited = 0;
           for (let n = 1; n <= 245 && !limited; n++) {
@@ -2855,7 +3207,8 @@ test(
           }
           assert.ok(limited > 200 && limited <= 240, String(limited));
 
-          const listed = (await call(dApp, 'GET', '/api/jobs/helper', asOwner)).json().helpers;
+          const listed = (await call(dApp, 'GET', '/api/jobs/helper', asOwner(dApp))).json()
+            .helpers;
           assert.deepEqual(
             listed.map((entry: { extensionId: string }) => entry.extensionId),
             [id],
@@ -2866,15 +3219,15 @@ test(
           assert.equal((await signed(dApp, 'hello', {}, renewed)).statusCode, 200);
           const revoke = (headers: Record<string, string>) =>
             call(dApp, 'POST', `/api/jobs/helper/${renewed.id}/revoke`, headers);
-          assert.equal((await revoke({ host })).statusCode, 401);
-          assert.equal((await revoke(asOwner)).statusCode, 200);
-          assert.equal((await revoke(asOwner)).statusCode, 404);
+          assert.equal((await revoke({ host: dApp.host })).statusCode, 401);
+          assert.equal((await revoke(asOwner(dApp))).statusCode, 200);
+          assert.equal((await revoke(asOwner(dApp))).statusCode, 404);
           assert.equal((await signed(dApp, 'hello', {}, renewed)).statusCode, 401);
 
           const last = await newCode(dApp);
           for (let n = 4; n >= 0; n--)
             assert.match(
-              (await pair(dApp, 'ZZZZ-ZZZZ')).response.json().message,
+              json((await pair(dApp, 'ZZZZ-ZZZZ')).response).message,
               n ? new RegExp(`${n} tr(y|ies) left`) : /last try/,
             );
           assert.equal((await pair(dApp, last)).response.statusCode, 410);
