@@ -23,7 +23,7 @@ function Test-Same([string]$Actual, [string]$Expected) {
 }
 function Invoke-Nod([string]$Address, [string]$Path, [hashtable]$Body) {
     try {
-        return Invoke-RestMethod -Method Post -Uri "$Address$Path" -ContentType 'application/json' -Body ($Body | ConvertTo-Json -Compress) -TimeoutSec 60 -UseBasicParsing
+        return Invoke-RestMethod -Method Post -Uri "$Address$Path" -ContentType 'application/json' -Body ($Body | ConvertTo-Json -Compress) -TimeoutSec 60 -MaximumRedirection 0 -UseBasicParsing
     } catch {
         $reason = $null
         if ($_.ErrorDetails.Message) { try { $reason = ($_.ErrorDetails.Message | ConvertFrom-Json).error } catch {} }
@@ -37,7 +37,7 @@ $hash = [Security.Cryptography.SHA256]::Create().ComputeHash([Convert]::FromBase
 $id = -join (($hash[0..15] | ForEach-Object { $_.ToString('x2') }) -join '').ToCharArray().ForEach({ [char](97 + [Convert]::ToInt32("$_", 16)) })
 
 if ($Nod) {
-    if ($Nod -notmatch '^http://(127\.0\.0\.1|localhost):\d{2,5}$') { throw "-Nod must look like http://localhost:4310, not '$Nod'." }
+    if ($Nod -notmatch '^http://127\.0\.0\.1:\d{2,5}$') { throw "-Nod must look like http://127.0.0.1:4310, not '$Nod'." }
     $address = $Nod
     Write-Host "Pairing with the Nod you named at $address. The script can't check which program answers there, but the exchange never gives it your code or the panel's key."
 } else {
@@ -57,6 +57,8 @@ if ($Nod) {
     if ($others.Count) { throw "Another program (process $($others[0].OwningProcess)) holds 127.0.0.1:$port, not Nod. Close it, restart Nod and run this again." }
     $program = (Get-Process -Id $engine -ErrorAction SilentlyContinue).Path
     if (-not $program -or $program -ne $recorded.executable) { throw "The program on 127.0.0.1:$port ($program) isn't the Nod desktop app that recorded it. Restart Nod and run this again." }
+    $started = (Get-Process -Id $engine).StartTime
+    if ($started -gt (Get-Item -LiteralPath $portFile).LastWriteTime.AddSeconds(1)) { throw "The program on 127.0.0.1:$port started after Nod recorded its address, so it isn't the Nod that wrote $portFile. Restart Nod and run this again." }
     $address = "http://127.0.0.1:$port"
 }
 
@@ -96,6 +98,30 @@ try {
     $opened = [Text.Encoding]::UTF8.GetString($aes.CreateDecryptor().TransformFinalBlock($sealed, 0, $sealed.Length)) | ConvertFrom-Json
 } finally { $aes.Dispose() }
 if ($opened.id -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' -or $opened.token -notmatch '^[A-Za-z0-9_-]{43}$') { throw "Nod's answer didn't hold a key." }
+
+$writeMask = [int64]1343029590
+$allowed = @($me.User.Value, 'S-1-5-18', 'S-1-5-32-544', 'S-1-3-0')
+function Get-OpenWrites([string]$Path) {
+    @((Get-Acl -LiteralPath $Path).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object {
+        $_.AccessControlType -eq 'Allow' -and
+        (([int64]$_.FileSystemRights) -band $writeMask) -ne 0 -and
+        $allowed -notcontains $_.IdentityReference.Value
+    })
+}
+$open = Get-OpenWrites $extension
+if ($open.Count) {
+    Write-Host "Other accounts can change the extension folder, so they could change the panel's code: $(($open | ForEach-Object { $name = $_.IdentityReference; try { $name = $name.Translate([Security.Principal.NTAccount]) } catch {}; "$name ($($_.FileSystemRights))" }) -join ', '). Limiting $extension to you, SYSTEM and Administrators."
+    try {
+        $tight = New-Object Security.AccessControl.DirectorySecurity
+        $tight.SetAccessRuleProtection($true, $false)
+        foreach ($sid in @($me.User, [Security.Principal.SecurityIdentifier]'S-1-5-18', [Security.Principal.SecurityIdentifier]'S-1-5-32-544')) {
+            $tight.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+        }
+        Set-Acl -LiteralPath $extension -AclObject $tight
+    } catch { throw "Couldn't limit who can change $extension ($($_.Exception.Message)). Nothing was saved; Revoke this pairing on the Jobs page, fix the folder's permissions and run this again." }
+}
+$still = @(Get-ChildItem -LiteralPath $extension -Force -Recurse | Where-Object { (Get-OpenWrites $_.FullName).Count })
+if ((Get-OpenWrites $extension).Count -or $still.Count) { throw "Other accounts can still change $(if ($still.Count) { $still[0].FullName } else { $extension }). Nothing was saved; Revoke this pairing on the Jobs page, fix its permissions and run this again." }
 
 $file = Join-Path $extension '.pairing.json'
 $draft = Join-Path $extension ".pairing.$([guid]::NewGuid().ToString('N')).tmp"
