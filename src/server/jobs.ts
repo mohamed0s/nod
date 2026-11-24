@@ -329,6 +329,7 @@ export function createJobs(options: {
     remove?(threadId: string, path: string, signal?: AbortSignal): Promise<void>;
   };
   startChat?: (text: string, attachments: Artifact[], sessionId: string) => Promise<unknown>;
+  continueChat?: (text: string, sessionId: string) => Promise<boolean>;
   withTurnLock?: <T>(
     turnId: string,
     operation: (client: PoolClient) => Promise<T>,
@@ -411,6 +412,7 @@ export function createJobs(options: {
     drafts,
     postings: postings.ofCompany,
     ...(options.startChat ? { startChat: options.startChat } : {}),
+    ...(options.continueChat ? { continueChat: options.continueChat } : {}),
     turnWrite,
     owned,
     changed,

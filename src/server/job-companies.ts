@@ -554,6 +554,7 @@ export function createJobCompanies(options: {
   drafts: JobDrafts;
   postings: (client: Query, companyId: string) => Promise<JobPosting[]>;
   startChat?: (text: string, attachments: [], sessionId: string) => Promise<unknown>;
+  continueChat?: (text: string, sessionId: string) => Promise<boolean>;
   turnWrite: <T>(
     turn: TurnRef,
     operation: (client: PoolClient) => Promise<T>,
@@ -1107,15 +1108,20 @@ export function createJobCompanies(options: {
     const sessionId = randomUUID();
     if (choice === true && !options.startChat)
       throw failure('New chats are unavailable on this server.', 503);
+    let resume: string | null = null;
     const start = await options.owned(async (client) => {
       const row = (
         await client.query<{
           id: string;
           status: JobNoLuckChoice;
           revision: number;
+          apply_session_id: string | null;
+          apply_by: 'owner' | 'rule' | null;
           apply_state: 'open' | 'starting' | 'lost' | null;
+          chat_state: string | null;
         }>(
-          `SELECT c.id,c.status,c.revision,${applyState} AS apply_state
+          `SELECT c.id,c.status,c.revision,c.apply_session_id,c.apply_by,${applyState} AS apply_state,
+             (SELECT t.state FROM tasks t WHERE t.owner_id=c.owner_id AND t.id=c.apply_session_id) AS chat_state
            FROM job_companies c WHERE c.owner_id=$1 AND c.id=$2 FOR UPDATE`,
           [ownerId, parse(z.uuid(), id, 'The company id')],
         )
@@ -1136,6 +1142,12 @@ export function createJobCompanies(options: {
            WHERE owner_id=$1 AND id=$2`,
           [ownerId, row.id, status],
         );
+      if (
+        choice === true &&
+        row.apply_state === 'open' &&
+        (row.apply_by === 'rule' || row.chat_state !== 'open')
+      )
+        resume = row.apply_session_id;
       if (choice !== true || row.apply_state === 'open' || row.apply_state === 'starting')
         return null;
       await client.query(
@@ -1145,6 +1157,21 @@ export function createJobCompanies(options: {
       return row.id;
     });
     let apply: JobNoLuckResult['apply'] = choice === true ? { state: 'reused' } : null;
+    const chat = resume as string | null;
+    if (chat && options.continueChat) {
+      try {
+        if (await options.continueChat(applyRequest(id), chat)) {
+          await pool.query(
+            "UPDATE job_companies SET apply_by='owner' WHERE owner_id=$1 AND id=$2 AND apply_session_id=$3",
+            [ownerId, id, chat],
+          );
+          apply = { state: 'resumed' };
+        }
+      } catch (error) {
+        apply = { state: 'failed', error: error instanceof Error ? error.message : String(error) };
+      }
+      options.changed();
+    }
     if (start) {
       try {
         await options.startChat!(applyRequest(start), [], sessionId);

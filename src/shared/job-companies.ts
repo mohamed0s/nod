@@ -146,5 +146,5 @@ export type JobCompanyView = JobCompany & {
 
 export type JobNoLuckResult = {
   company: JobCompanyView;
-  apply: null | { state: 'started' | 'reused' } | { state: 'failed'; error: string };
+  apply: null | { state: 'started' | 'reused' | 'resumed' } | { state: 'failed'; error: string };
 };

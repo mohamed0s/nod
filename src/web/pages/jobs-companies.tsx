@@ -509,6 +509,11 @@ function CompanyDetail({ id, onBack }: { id: string; onBack(): void }) {
       data.update(() => result.company);
       if (result.apply?.state === 'started')
         setMessage({ kind: 'info', text: 'Nod opened a chat to apply to this company.' });
+      else if (result.apply?.state === 'resumed')
+        setMessage({
+          kind: 'info',
+          text: 'Nod passed your tick to the apply chat it had for this company, and goes on there.',
+        });
       else if (result.apply?.state === 'failed')
         setMessage({
           kind: 'error',

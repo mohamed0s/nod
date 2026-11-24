@@ -1252,6 +1252,19 @@ async function initializeApplication(
     curator,
     notify: async (client, notice) => (channels ? channels.notice(client, notice) : false),
     timeZone: async () => (await getPreferences()).timeZone,
+    continueChat: async (text, sessionId) => {
+      const latest = (
+        await pool.query<{ id: string }>(
+          `SELECT m.id FROM messages m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
+           WHERE m.owner_id=$1 AND u.session_id=$2 AND m.role='assistant' AND m.hidden_at IS NULL
+           ORDER BY m.created_at DESC,m.id DESC LIMIT 1`,
+          [ownerId, sessionId],
+        )
+      ).rows[0];
+      if (!latest) return false;
+      await userMessages.submit(text, [], { channel: 'web', replyToMessageId: latest.id });
+      return true;
+    },
     automatic: {
       start: tasks.startWork,
       lock: (client) => lockThread(client),

@@ -774,7 +774,8 @@ export function createJobHelper(options: {
                 token,
               );
             const result = await companies.markNoLuck(request.params.id, noLuck, revision);
-            if (result.apply?.state === 'started') await use(pool, 'apply', token);
+            if (result.apply?.state === 'started' || result.apply?.state === 'resumed')
+              await use(pool, 'apply', token);
             return result;
           });
           applying = run.catch(() => {});
