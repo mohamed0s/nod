@@ -1,6 +1,6 @@
 ---
 name: job-search
-description: Run the owner's own job search pipeline in Nod. Use whenever the owner sends or mentions their own CV or resume, even with just "this is my CV", to add it to their CV library before anything else, and for their CVs, job profile, message templates, finding jobs (career-ops scans, Telegram job channels, job-alert emails, the Job radar), the postings list, scoring jobs, CV PDFs, the companies and the people the owner invited on LinkedIn, referral messages for the people who accepted, waves of invites, and a company the owner marked no luck. Use hiring-and-career for other people's CVs and any other career or hiring task.
+description: Run the owner's own job search pipeline in Nod. Use whenever the owner sends or mentions their own CV or resume, even with just "this is my CV", to add it to their CV library before anything else, and for their CVs, job profile, message templates, finding jobs (career-ops scans, Telegram job channels, job-alert emails, the Job radar), the postings list, scoring jobs, CV PDFs, the companies and the people the owner invited on LinkedIn, referral messages for the people who accepted, waves of invites, a company the owner marked no luck, job mail (LinkedIn accepts and replies, employer replies, the Job mail schedule), follow-ups and the weekly job report. Use hiring-and-career for other people's CVs and any other career or hiring task.
 ---
 
 # Job search
@@ -30,6 +30,7 @@ The owner's job search lives in Nod. Postgres holds the records, and the `jobs` 
 - A change to `inviteLimits`, `noLuck` or `waves` goes to the owner for approval unless their words ask for exactly that change.
 - `jobs import`, `jobs telegram` and `jobs list` bring in and read postings, and `jobs posting_update` saves checks, scores and statuses. `jobs sources` and `jobs source_update` read and change the Telegram channels and which scanners are on; change them only when the owner asks or accepts.
 - `jobs companies` and `jobs company` read the companies, their people and their postings. `jobs person_update` saves the people the owner tells you they invited or talked to. `jobs draft_prepare` and `jobs draft_save` make and change referral messages.
+- `jobs mail_status`, `jobs mail_setup` and `jobs match_mail` read and apply job mail; `jobs follow_up` marks a follow-up done or dismissed; `jobs report` reads the job search report. Never reply to job mail, message anyone or change the calendar because of it.
 
 ## Guides
 
@@ -39,3 +40,5 @@ The owner's job search lives in Nod. Postgres holds the records, and the `jobs` 
 - Making or sending a CV PDF: read [references/cv-pdf.md](references/cv-pdf.md).
 - People the owner invited or talked to, the companies list, no luck, or a chat that starts "Apply for the company I marked no luck": read [references/companies.md](references/companies.md).
 - A referral message, its language, or how many people to invite at a company: read [references/referral.md](references/referral.md).
+- Job mail, accepts or replies by email, the Job mail schedule, the mailbox linked to LinkedIn, or follow-ups: read [references/mail.md](references/mail.md).
+- The weekly job report or what leads to replies: read [references/weekly.md](references/weekly.md).
