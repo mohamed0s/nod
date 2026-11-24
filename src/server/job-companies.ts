@@ -11,6 +11,7 @@ import {
   type JobCompanyView,
   type JobNoLuck,
   type JobNoLuckChoice,
+  type JobNoLuckResult,
   type JobPerson,
   type JobPersonStatus,
 } from '../shared/job-companies.ts';
@@ -59,6 +60,29 @@ export const applyRequest = (companyId: string) =>
 
 const day = 86_400_000;
 const memberId = /^ACoAA[A-Za-z0-9_-]{10,120}$/;
+const placeholderCompanies = new Set([
+  'anonymous',
+  'company confidential',
+  'confidential',
+  'confidential client',
+  'hidden',
+  'multiple companies',
+  'n a',
+  'na',
+  'none',
+  'not disclosed',
+  'not specified',
+  'private',
+  'tba',
+  'tbd',
+  'undisclosed',
+  'unknown',
+  'various',
+  'various companies',
+]);
+const applyState = `CASE WHEN c.apply_session_id IS NULL THEN NULL
+  WHEN EXISTS (SELECT 1 FROM tasks t WHERE t.owner_id=c.owner_id AND t.id=c.apply_session_id) THEN 'open'
+  WHEN c.apply_started_at>now()-interval '2 minutes' THEN 'starting' ELSE 'lost' END`;
 const timeColumn: Record<JobPersonStatus, string> = {
   invited: 'invited_at',
   accepted: 'accepted_at',
@@ -75,6 +99,14 @@ const stage: Record<JobPersonStatus, number> = {
   referred: 4,
   declined: 3,
 };
+const mergeOrder: JobPersonStatus[] = [
+  'invited',
+  'accepted',
+  'asked',
+  'replied',
+  'declined',
+  'referred',
+];
 const peopleOrder: Record<JobPersonStatus, number> = {
   accepted: 0,
   replied: 1,
@@ -151,9 +183,14 @@ export function automaticNoLuck(
   return new Date(since);
 }
 
+function keyOf(name: string) {
+  const key = companyKey(clean(name, 160));
+  return placeholderCompanies.has(key) ? '' : key;
+}
+
 export async function ensureCompany(client: Query, ownerId: string, name: string) {
   const display = clean(name, 160);
-  const key = companyKey(display);
+  const key = keyOf(display);
   if (!key) return null;
   const find = async () =>
     (
@@ -180,7 +217,7 @@ export async function linkPostings(client: Query, ownerId: string) {
   );
   const groups = new Map<string, { name: string; ids: string[] }>();
   for (const row of rows) {
-    const key = companyKey(clean(row.company, 160));
+    const key = keyOf(row.company);
     if (!key) continue;
     const group = groups.get(key) ?? { name: row.company, ids: [] };
     group.ids.push(row.id);
@@ -268,7 +305,7 @@ type CompanyRow = {
   no_luck_at: Date | null;
   no_luck_by: 'owner' | 'rule' | null;
   apply_session_id: string | null;
-  apply_chat: boolean;
+  apply_state: 'open' | 'starting' | 'lost' | null;
   revision: number;
   updated_at: Date;
   open: number;
@@ -288,6 +325,7 @@ type PersonRow = {
   draft: string;
   draft_revision: number;
   revision: number;
+  created_at: Date;
   updated_at: Date;
 } & Record<`${JobPersonStatus}_at`, Date | null>;
 type Summary = { company: JobCompany; filters: Set<JobCompanyFilter>; active: number };
@@ -331,6 +369,8 @@ function personView(row: PersonRow): JobPerson {
   };
 }
 
+const toolPerson = ({ profileUrl: _profile, messageUrl: _message, ...person }: JobPerson) => person;
+
 const byActivity = (a: Summary, b: Summary) =>
   b.active - a.active ||
   (b.company.bestScore ?? -1) - (a.company.bestScore ?? -1) ||
@@ -359,7 +399,7 @@ export function createJobCompanies(options: {
     const { rows } = await client.query<CompanyRow>(
       `SELECT c.id,c.name,c.linkedin_slug,c.careers_url,c.status,c.no_luck_at,c.no_luck_by,c.apply_session_id,
          c.revision,c.updated_at,
-         (c.apply_session_id IS NOT NULL AND EXISTS (SELECT 1 FROM tasks t WHERE t.owner_id=c.owner_id AND t.id=c.apply_session_id)) AS apply_chat,
+         ${applyState} AS apply_state,
          p.open,p.best,COALESCE(f.people,'[]') AS people,f.active
        FROM job_companies c
        LEFT JOIN LATERAL (SELECT count(*)::int AS open,max(j.score) AS best FROM job_postings j
@@ -408,8 +448,10 @@ export function createJobCompanies(options: {
             referred: row.people.filter((person) => person.status === 'referred').length,
           },
           noLuck,
-          applySessionId: row.apply_session_id,
-          applyChat: row.apply_chat,
+          applyChat:
+            row.apply_session_id && row.apply_state
+              ? { id: row.apply_session_id, state: row.apply_state }
+              : null,
           revision: row.revision,
           lastActivityAt: active ? new Date(active).toISOString() : null,
         },
@@ -486,16 +528,27 @@ export function createJobCompanies(options: {
     }
     if (entry.company === undefined) return undefined;
     const id = await ensureCompany(client, ownerId, entry.company);
-    if (!id) throw failure(`${label}: the company name needs a letter or a digit.`);
+    if (!id)
+      throw failure(
+        `${label}: "${entry.company}" isn't a company name Nod can use. Ask the owner which company it is.`,
+      );
     return id;
   }
 
-  async function write<T>(run: () => Promise<T>) {
+  async function write<T>(
+    label: string,
+    keys: { profile: string; urn: string | null },
+    run: () => Promise<T>,
+  ) {
     try {
       return await run();
     } catch (error) {
-      if ((error as { code?: unknown }).code === '23505')
-        throw failure('Another person in the job search already has that profile.', 409);
+      const { code, constraint } = error as { code?: unknown; constraint?: unknown };
+      if (code === '23505')
+        throw failure(
+          `${label}: another person in the job search already has ${constraint === 'job_people_member' ? `the member id ${keys.urn}` : `the profile ${keys.profile}`}.`,
+          409,
+        );
       throw error;
     }
   }
@@ -510,6 +563,7 @@ export function createJobCompanies(options: {
       status?: JobPersonStatus;
       at?: string;
     },
+    label: string,
   ) {
     const status = next.status ?? current.status;
     const stamp = status !== current.status || next.at !== undefined;
@@ -517,8 +571,8 @@ export function createJobCompanies(options: {
       company_id: next.company_id ?? current.company_id,
       profile_key: next.profile_key ?? current.profile_key,
       member_urn: next.member_urn ?? current.member_urn,
-      name: next.name ?? current.name,
-      headline: next.headline ?? current.headline,
+      name: next.name || current.name,
+      headline: next.headline || current.headline,
       language: next.language ?? current.language,
     };
     const differs = Object.entries(fields).some(
@@ -526,7 +580,7 @@ export function createJobCompanies(options: {
     );
     if (!stamp && !differs) return current;
     const column = timeColumn[status];
-    return write(async () => {
+    return write(label, { profile: fields.profile_key, urn: fields.member_urn }, async () => {
       await client.query(
         `UPDATE job_people SET company_id=$3,profile_key=$4,member_urn=$5,name=$6,headline=$7,language=$8,status=$9,
            ${column}=CASE WHEN $10 THEN COALESCE($11::timestamptz,now()) ELSE ${column} END,
@@ -550,6 +604,81 @@ export function createJobCompanies(options: {
     });
   }
 
+  async function merge(
+    client: Query,
+    rows: PersonRow[],
+    wanted: { key?: string; urn: string | null; id?: string },
+    label: string,
+  ) {
+    const readable = new Set(
+      [...rows.map((row) => row.profile_key), wanted.key ?? ''].filter(
+        (key) => key && !memberId.test(key),
+      ),
+    );
+    const urns = new Set(
+      [
+        ...rows.flatMap((row) => [
+          row.member_urn,
+          memberId.test(row.profile_key) ? row.profile_key : null,
+        ]),
+        wanted.urn,
+      ].filter((urn): urn is string => Boolean(urn)),
+    );
+    if (readable.size > 1 || urns.size > 1) {
+      const first =
+        rows.find((row) => row.id === wanted.id) ??
+        rows.find((row) => row.profile_key === wanted.key) ??
+        rows[0]!;
+      const other = rows.find((row) => row.id !== first.id)!;
+      const clash =
+        other.profile_key === wanted.key
+          ? `the profile ${wanted.key}`
+          : wanted.urn && (other.member_urn === wanted.urn || other.profile_key === wanted.urn)
+            ? `the member id ${wanted.urn}`
+            : `the profile ${other.profile_key}`;
+      throw failure(
+        `${label}: ${clash} belongs to another person (${other.id}), whose profile or member id differs from this one. Ask the owner which is right, then change one of them by its id.`,
+        409,
+      );
+    }
+    const [keep, drop] = [...rows].sort(
+      (a, b) =>
+        Number(memberId.test(a.profile_key)) - Number(memberId.test(b.profile_key)) ||
+        a.created_at.getTime() - b.created_at.getTime(),
+    ) as [PersonRow, PersonRow];
+    const status =
+      mergeOrder.indexOf(drop.status) > mergeOrder.indexOf(keep.status) ? drop.status : keep.status;
+    await client.query('DELETE FROM job_people WHERE owner_id=$1 AND id=$2', [ownerId, drop.id]);
+    await client.query(
+      `UPDATE job_people SET profile_key=$3,member_urn=$4,status=$5,
+         invited_at=LEAST(invited_at,$6::timestamptz),accepted_at=LEAST(accepted_at,$7::timestamptz),
+         asked_at=LEAST(asked_at,$8::timestamptz),replied_at=LEAST(replied_at,$9::timestamptz),
+         referred_at=LEAST(referred_at,$10::timestamptz),declined_at=LEAST(declined_at,$11::timestamptz),
+         name=CASE WHEN name='' THEN $12 ELSE name END,headline=CASE WHEN headline='' THEN $13 ELSE headline END,
+         language=CASE WHEN language='' THEN $14 ELSE language END,
+         draft_revision=CASE WHEN draft='' THEN $16 ELSE draft_revision END,
+         draft=CASE WHEN draft='' THEN $15 ELSE draft END,
+         created_at=LEAST(created_at,$17::timestamptz),revision=GREATEST(revision,$18)+1,updated_at=now()
+       WHERE owner_id=$1 AND id=$2`,
+      [
+        ownerId,
+        keep.id,
+        [...readable][0] ?? keep.profile_key,
+        [...urns][0] ?? null,
+        status,
+        ...jobPersonStatuses.map((name) => drop[`${name}_at`]),
+        drop.name,
+        drop.headline,
+        drop.language,
+        drop.draft,
+        drop.draft_revision,
+        drop.created_at,
+        drop.revision,
+      ],
+    );
+    return onePerson(client, keep.id);
+  }
+
   async function savePerson(client: Query, entry: PersonEntry, label: string) {
     const profile = entry.profileUrl === undefined ? undefined : linkedInPerson(entry.profileUrl);
     if (profile === null)
@@ -559,37 +688,56 @@ export function createJobCompanies(options: {
     const urn = entry.memberUrn === undefined ? undefined : memberUrn(entry.memberUrn);
     if (urn === null) throw failure(`${label}: memberUrn isn't a LinkedIn member id.`);
     const member = urn ?? profile?.urn ?? null;
-    const current = entry.id
-      ? await onePerson(client, entry.id)
-      : (
-          await client.query<PersonRow>(
-            `SELECT * FROM job_people WHERE owner_id=$1 AND (profile_key=$2 OR ($3::text IS NOT NULL AND member_urn=$3))
-             ORDER BY (profile_key=$2) DESC LIMIT 1 FOR UPDATE`,
-            [ownerId, profile!.key, member],
-          )
-        ).rows[0];
+    const byId = entry.id ? await onePerson(client, entry.id) : undefined;
+    const matched = (
+      await client.query<PersonRow>(
+        `SELECT * FROM job_people WHERE owner_id=$1
+           AND (profile_key=$2 OR ($3::text IS NOT NULL AND (member_urn=$3 OR profile_key=$3)))
+         ORDER BY created_at,id FOR UPDATE`,
+        [ownerId, profile?.key ?? null, member],
+      )
+    ).rows;
+    const found = [
+      ...new Map([...(byId ? [byId] : []), ...matched].map((row) => [row.id, row])).values(),
+    ];
+    if (found.length > 2)
+      throw failure(
+        `${label}: that profile and member id belong to different people (${found.map((row) => row.id).join(', ')}). Ask the owner which is right, then change them by their ids.`,
+        409,
+      );
+    const current =
+      found.length === 2
+        ? await merge(client, found, { key: profile?.key, urn: member, id: entry.id }, label)
+        : found[0];
     const companyId = await companyFor(client, entry, label);
-    if (current)
+    if (current) {
+      const readable = !memberId.test(current.profile_key);
       return {
         created: false,
-        row: await change(client, current, {
-          ...(companyId ? { company_id: companyId } : {}),
-          ...(profile ? { profile_key: profile.key } : {}),
-          ...(member ? { member_urn: member } : {}),
-          name: entry.name,
-          headline: entry.headline,
-          language: entry.language,
-          status: entry.status,
-          at: entry.at,
-        }),
+        row: await change(
+          client,
+          current,
+          {
+            ...(companyId ? { company_id: companyId } : {}),
+            ...(profile && !(profile.urn && readable) ? { profile_key: profile.key } : {}),
+            ...(member ? { member_urn: member } : {}),
+            name: entry.name,
+            headline: entry.headline,
+            language: entry.language,
+            status: entry.status,
+            at: entry.at,
+          },
+          label,
+        ),
       };
+    }
     if (!companyId)
       throw failure(
         `${label}: a new person needs their company. Ask the owner which company they work at if it isn't clear.`,
       );
     const status = entry.status ?? 'invited';
     const id = randomUUID();
-    await write(() =>
+    await write(label, { profile: profile!.key, urn: member }, () =>
       client.query(
         `INSERT INTO job_people(id,owner_id,company_id,profile_key,member_urn,name,headline,language,status,${timeColumn[status]})
          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10::timestamptz,now()))`,
@@ -628,7 +776,7 @@ export function createJobCompanies(options: {
               [ownerId, row.company_id],
             )
           ).rows[0]?.name;
-          saved.push({ ...personView(row), company: name ?? '', created });
+          saved.push({ ...toolPerson(personView(row)), company: name ?? '', created });
         }
         return { saved };
       },
@@ -636,7 +784,11 @@ export function createJobCompanies(options: {
     );
   }
 
-  async function markNoLuck(id: string, choice: boolean | null) {
+  async function markNoLuck(
+    id: string,
+    choice: boolean | null,
+    revision?: number,
+  ): Promise<JobNoLuckResult> {
     const sessionId = randomUUID();
     if (choice === true && !options.startChat)
       throw failure('New chats are unavailable on this server.', 503);
@@ -645,17 +797,20 @@ export function createJobCompanies(options: {
         await client.query<{
           id: string;
           status: JobNoLuckChoice;
-          apply_session_id: string | null;
-          reusable: boolean;
+          revision: number;
+          apply_state: 'open' | 'starting' | 'lost' | null;
         }>(
-          `SELECT c.id,c.status,c.apply_session_id,
-             (c.apply_session_id IS NOT NULL AND (c.apply_started_at>now()-interval '2 minutes'
-               OR EXISTS (SELECT 1 FROM tasks t WHERE t.owner_id=c.owner_id AND t.id=c.apply_session_id))) AS reusable
+          `SELECT c.id,c.status,c.revision,${applyState} AS apply_state
            FROM job_companies c WHERE c.owner_id=$1 AND c.id=$2 FOR UPDATE`,
           [ownerId, parse(z.uuid(), id, 'The company id')],
         )
       ).rows[0];
       if (!row) throw failure('Company not found.', 404);
+      if (choice !== true && revision !== row.revision)
+        throw failure(
+          'This company changed since you loaded it. Reload it, then make your choice again.',
+          409,
+        );
       const status: JobNoLuckChoice =
         choice === true ? 'no_luck' : choice === false ? 'keep_trying' : 'auto';
       if (row.status !== status)
@@ -666,25 +821,26 @@ export function createJobCompanies(options: {
            WHERE owner_id=$1 AND id=$2`,
           [ownerId, row.id, status],
         );
-      if (choice !== true || row.reusable) return null;
+      if (choice !== true || row.apply_state === 'open' || row.apply_state === 'starting')
+        return null;
       await client.query(
         'UPDATE job_companies SET apply_session_id=$3,apply_started_at=now() WHERE owner_id=$1 AND id=$2',
         [ownerId, row.id, sessionId],
       );
       return row.id;
     });
-    let apply: string | null = choice === true ? 'reused' : null;
+    let apply: JobNoLuckResult['apply'] = choice === true ? { state: 'reused' } : null;
     if (start) {
       try {
         await options.startChat!(applyRequest(start), [], sessionId);
-        apply = 'started';
+        apply = { state: 'started' };
       } catch (error) {
         await pool.query(
           `UPDATE job_companies SET apply_session_id=NULL,apply_started_at=NULL
            WHERE owner_id=$1 AND id=$2 AND apply_session_id=$3`,
           [ownerId, start, sessionId],
         );
-        apply = error instanceof Error ? error.message : String(error);
+        apply = { state: 'failed', error: error instanceof Error ? error.message : String(error) };
       }
       options.changed();
     }
@@ -701,10 +857,17 @@ export function createJobCompanies(options: {
     const request = parse(toolInput, raw, 'The jobs request');
     const value = await (async (): Promise<unknown> => {
       switch (request.action) {
-        case 'companies':
-          return companies(pool, { ...request, limit: request.limit ?? 50 });
-        case 'company':
-          return company(pool, request.id);
+        case 'companies': {
+          const view = await companies(pool, { ...request, limit: request.limit ?? 50 });
+          return {
+            ...view,
+            companies: view.companies.map(({ linkedinUrl: _page, ...entry }) => entry),
+          };
+        }
+        case 'company': {
+          const { linkedinUrl: _page, people, ...view } = await company(pool, request.id);
+          return { ...view, people: people.map(toolPerson) };
+        }
         case 'person_update':
           return updatePeople(turn, request.people, signal);
       }
@@ -734,14 +897,22 @@ export function createJobCompanies(options: {
     app.get<{ Params: { id: string } }>('/api/jobs/companies/:id', (request) =>
       company(pool, request.params.id),
     );
-    app.put<{ Params: { id: string } }>('/api/jobs/companies/:id/no-luck', async (request) => {
-      const { noLuck } = parse(
-        z.object({ noLuck: z.boolean().nullable() }).strict(),
-        request.body,
-        'The no-luck choice',
-      );
-      return markNoLuck(request.params.id, noLuck);
-    });
+    app.put<{ Params: { id: string } }>(
+      '/api/jobs/companies/:id/no-luck',
+      async (request): Promise<JobNoLuckResult> => {
+        const { noLuck, revision } = parse(
+          z
+            .object({ noLuck: z.boolean().nullable(), revision: z.int().min(0).optional() })
+            .strict()
+            .refine((value) => value.noLuck === true || value.revision !== undefined, {
+              message: "Unticking or handing the choice back to Nod needs the company's revision.",
+            }),
+          request.body,
+          'The no-luck choice',
+        );
+        return markNoLuck(request.params.id, noLuck, revision);
+      },
+    );
     app.patch<{ Params: { id: string } }>('/api/jobs/people/:id', async (request) => {
       const { revision, ...next } = parse(
         z
@@ -766,7 +937,7 @@ export function createJobCompanies(options: {
               'This person changed since you loaded the company. Reload it, then make your change again.',
               409,
             );
-          return change(client, current, next);
+          return change(client, current, next, 'The person');
         }),
       );
     });

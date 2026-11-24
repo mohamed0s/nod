@@ -40,8 +40,7 @@ export type JobCompany = {
   bestScore: number | null;
   counts: JobCompanyCounts;
   noLuck: JobNoLuck;
-  applySessionId: string | null;
-  applyChat: boolean;
+  applyChat: { id: string; state: 'open' | 'starting' | 'lost' } | null;
   revision: number;
   lastActivityAt: string | null;
 };
@@ -75,4 +74,9 @@ export type JobCompanyView = JobCompany & {
   people: JobPerson[];
   postings: JobPosting[];
   limits: { noAcceptDays: number; noReplyDays: number };
+};
+
+export type JobNoLuckResult = {
+  company: JobCompanyView;
+  apply: null | { state: 'started' | 'reused' } | { state: 'failed'; error: string };
 };

@@ -1393,14 +1393,29 @@ test(
         await add('EXAMPLE CO LLC', 'jobs.example.test/legacy/1');
         await add('Zed Analytics', 'jobs.example.test/legacy/2');
         await add('', 'jobs.example.test/legacy/3');
+        await add('Confidential', 'jobs.example.test/legacy/4');
+        await add('N/A', 'jobs.example.test/legacy/5');
+        await add('Confidential Company', 'jobs.example.test/legacy/6');
         assert.equal(await a.jobs.initialize(), 2);
         assert.equal(await a.jobs.initialize(), 0);
         const after = await linked(a.ownerId);
         assert.equal(after.find((row) => row.company === 'EXAMPLE CO LLC')!.company_id, example);
         const zed = after.find((row) => row.company === 'Zed Analytics')!.company_id;
         assert.ok(zed && zed !== example);
-        assert.equal(after.find((row) => row.company === '')!.company_id, null);
+        for (const name of ['', 'Confidential', 'N/A', 'Confidential Company'])
+          assert.equal(after.find((row) => row.company === name)!.company_id, null, name);
         assert.equal((await request(b, 'GET', `/api/jobs/companies/${zed}`)).statusCode, 404);
+        const { createJobs } = await import('../src/server/jobs.ts');
+        const unreachable = createJobs({
+          pool: {
+            connect: async () => {
+              throw new Error('Synthetic database outage.');
+            },
+          } as never,
+          ownerId: a.ownerId,
+          artifacts: a.artifacts,
+        });
+        assert.equal(await unreachable.initialize(), 0);
       });
 
       await t.test('the company tables add to an existing job database', async () => {
@@ -1482,8 +1497,7 @@ test(
           ]),
           [[true, 'Alpha Example', 'invited']],
         );
-        assert.equal(first.saved[0].profileUrl, 'https://www.linkedin.com/in/sam-example/');
-        assert.equal(first.saved[0].messageUrl, null);
+        assert.equal(first.saved[0].profileKey, 'sam-example');
         const again = records(
           await c.jobs.execute(started, {
             action: 'person_update',
@@ -1498,10 +1512,24 @@ test(
         );
         assert.equal(again.saved[0].created, false);
         assert.equal(again.saved[0].id, first.saved[0].id);
-        assert.equal(
-          again.saved[0].messageUrl,
-          'https://www.linkedin.com/messaging/compose/?recipient=ACoAASyntheticMember000001',
+        const alpha = first.saved[0].companyId;
+        const page = (await request(c, 'GET', `/api/jobs/companies/${alpha}`)).json().people[0];
+        assert.deepEqual(
+          [page.profileUrl, page.messageUrl],
+          [
+            'https://www.linkedin.com/in/sam-example/',
+            'https://www.linkedin.com/messaging/compose/?recipient=ACoAASyntheticMember000001',
+          ],
         );
+        for (const read of [
+          again,
+          records(await c.jobs.execute(started, { action: 'company', id: alpha })),
+          records(await c.jobs.execute(started, { action: 'companies' })),
+        ])
+          assert.doesNotMatch(
+            JSON.stringify(read),
+            /linkedin\.com|profileUrl|messageUrl|linkedinUrl/,
+          );
         for (const profileUrl of [
           'https://lnkd.in/synthetic',
           'https://www.linkedin.com.example.test/in/sam-example',
@@ -1576,53 +1604,72 @@ test(
           [true, 'rule', 'auto'],
         );
         assert.ok(Math.abs(Date.parse(gamma.noLuck.since) - (Date.now() - 60_000)) < 30_000);
-        assert.equal(gamma.applySessionId, null);
+        assert.equal(gamma.applyChat, null);
         assert.equal(chats.length, before);
         const alpha = await companyId(c, 'Alpha Example');
-        const set = (id: string, noLuck: boolean | null) =>
-          request(c, 'PUT', `/api/jobs/companies/${id}/no-luck`, { noLuck });
+        const set = async (id: string, noLuck: boolean | null) =>
+          request(c, 'PUT', `/api/jobs/companies/${id}/no-luck`, {
+            noLuck,
+            revision: (await request(c, 'GET', `/api/jobs/companies/${id}`)).json().revision,
+          });
+        const stale = (await request(c, 'GET', `/api/jobs/companies/${alpha}`)).json().revision;
         const kept = (await set(alpha, false)).json();
         assert.deepEqual(
           [kept.apply, kept.company.noLuck.value, kept.company.noLuck.choice],
           [null, false, 'keep_trying'],
         );
         assert.deepEqual(await names('no_luck'), ['Gamma Example']);
+        for (const [body, code] of [
+          [{ noLuck: null, revision: stale }, 409],
+          [{ noLuck: null }, 400],
+        ] as const)
+          assert.equal(
+            (await request(c, 'PUT', `/api/jobs/companies/${alpha}/no-luck`, body)).statusCode,
+            code,
+          );
         assert.equal((await set(alpha, null)).json().company.noLuck.by, 'rule');
         assert.equal(chats.length, before);
       });
 
       await t.test('the tick starts exactly one apply chat', async () => {
         const beta = await companyId(c, 'Beta Example');
-        const tick = (noLuck: boolean | null = true) =>
-          request(c, 'PUT', `/api/jobs/companies/${beta}/no-luck`, { noLuck });
+        const read = async () => (await request(c, 'GET', `/api/jobs/companies/${beta}`)).json();
+        const tick = () =>
+          request(c, 'PUT', `/api/jobs/companies/${beta}/no-luck`, { noLuck: true });
         const before = chats.length;
         const ticks = await Promise.all([tick(), tick(), tick()]);
         for (const response of ticks) assert.equal(response.statusCode, 200, response.body);
-        assert.deepEqual(ticks.map((response) => response.json().apply).sort(), [
+        assert.deepEqual(ticks.map((response) => response.json().apply.state).sort(), [
           'reused',
           'reused',
           'started',
         ]);
         assert.equal(chats.length, before + 1);
         const chat = chats.at(-1)!;
-        const { applyRequest } = await import('../src/server/job-companies.ts');
-        assert.equal(chat.text, applyRequest(beta));
-        assert.doesNotMatch(chat.text, /Beta|Example/);
+        assert.equal(
+          chat.text,
+          `Apply for the company I marked no luck\nCompany id: ${beta}. Ask me before you submit anything.`,
+        );
         assert.deepEqual(chat.attachments, []);
         const marked = (await tick()).json();
-        assert.equal(marked.apply, 'reused');
+        assert.deepEqual(marked.apply, { state: 'reused' });
         assert.deepEqual(
           [
             marked.company.noLuck.value,
             marked.company.noLuck.by,
             marked.company.noLuck.choice,
-            marked.company.applySessionId,
+            marked.company.applyChat,
           ],
-          [true, 'owner', 'no_luck', chat.sessionId],
+          [true, 'owner', 'no_luck', { id: chat.sessionId, state: 'starting' }],
         );
-        const unticked = (await tick(false)).json().company;
+        const unticked = (
+          await request(c, 'PUT', `/api/jobs/companies/${beta}/no-luck`, {
+            noLuck: false,
+            revision: (await read()).revision,
+          })
+        ).json().company;
         assert.deepEqual(
-          [unticked.noLuck.value, unticked.noLuck.choice, unticked.applySessionId],
+          [unticked.noLuck.value, unticked.noLuck.choice, unticked.applyChat.id],
           [false, 'keep_trying', chat.sessionId],
         );
         await db.pool.query(
@@ -1635,12 +1682,13 @@ test(
         );
         const back = (await tick()).json();
         assert.deepEqual(
-          [back.apply, back.company.applyChat, back.company.applySessionId],
-          ['reused', true, chat.sessionId],
+          [back.apply, back.company.applyChat],
+          [{ state: 'reused' }, { id: chat.sessionId, state: 'open' }],
         );
         assert.equal(chats.length, before + 1);
         await db.pool.query('DELETE FROM tasks WHERE id=$1', [chat.sessionId]);
-        assert.equal((await tick()).json().apply, 'started');
+        assert.equal((await read()).applyChat.state, 'lost');
+        assert.deepEqual((await tick()).json().apply, { state: 'started' });
         assert.equal(chats.length, before + 2);
         const delta = await companyId(c, 'Delta Example');
         refuseChats = true;
@@ -1649,13 +1697,20 @@ test(
         ).json();
         refuseChats = false;
         assert.deepEqual(
-          [refused.apply, refused.company.noLuck.choice, refused.company.applySessionId],
-          ['Configure an agent provider before starting a conversation.', 'no_luck', null],
+          [refused.apply, refused.company.noLuck.choice, refused.company.applyChat],
+          [
+            {
+              state: 'failed',
+              error: 'Configure an agent provider before starting a conversation.',
+            },
+            'no_luck',
+            null,
+          ],
         );
-        assert.equal(
+        assert.deepEqual(
           (await request(c, 'PUT', `/api/jobs/companies/${delta}/no-luck`, { noLuck: true })).json()
             .apply,
-          'started',
+          { state: 'started' },
         );
         assert.equal(chats.length, before + 3);
       });
@@ -1741,6 +1796,82 @@ test(
           'asked',
           'invited',
         ]);
+      });
+      await t.test('one person per LinkedIn profile, whichever link names them', async () => {
+        const started = await turn(c, 'user');
+        const save = async (people: unknown[]) =>
+          records(await c.jobs.execute(started, { action: 'person_update', people })).saved;
+        const member = 'ACoAASyntheticMember000002';
+        const [kim] = await save([
+          {
+            profileUrl: profile('kim-example'),
+            company: 'Eta Example',
+            memberUrn: member,
+            name: 'Kim Example',
+            headline: 'Synthetic headline',
+          },
+        ]);
+        const [same] = await save([
+          { profileUrl: profile(member), status: 'accepted', name: '', headline: '' },
+        ]);
+        assert.deepEqual(
+          [same.id, same.created, same.profileKey, same.name, same.headline, same.status],
+          [kim.id, false, 'kim-example', 'Kim Example', 'Synthetic headline', 'accepted'],
+        );
+        const [again] = await save([
+          { profileUrl: profile('kim-example'), company: 'Eta Example' },
+        ]);
+        assert.deepEqual([again.id, again.created], [kim.id, false]);
+        const other = 'ACoAASyntheticMember000003';
+        const [lee] = await save([
+          {
+            profileUrl: profile('lee-example'),
+            company: 'Eta Example',
+            status: 'asked',
+            at: ago(3 * day),
+          },
+        ]);
+        const [shadow] = await save([
+          { profileUrl: profile(other), company: 'Eta Example', at: ago(10 * day) },
+        ]);
+        assert.notEqual(shadow.id, lee.id);
+        await db.pool.query(
+          "UPDATE job_people SET draft='Synthetic draft',draft_revision=2 WHERE id=$1",
+          [shadow.id],
+        );
+        const [merged] = await save([{ profileUrl: profile('lee-example'), memberUrn: other }]);
+        assert.deepEqual(
+          [
+            merged.id,
+            merged.created,
+            merged.profileKey,
+            merged.status,
+            merged.draft,
+            merged.draftRevision,
+          ],
+          [lee.id, false, 'lee-example', 'asked', 'Synthetic draft', 2],
+        );
+        assert.ok(Math.abs(Date.parse(merged.times.invited) - (Date.now() - 10 * day)) < 60_000);
+        assert.ok(Math.abs(Date.parse(merged.times.asked) - (Date.now() - 3 * day)) < 60_000);
+        assert.deepEqual(
+          (
+            await db.pool.query(
+              'SELECT id,profile_key,member_urn FROM job_people WHERE owner_id=$1 AND (profile_key=ANY($2) OR member_urn=$3)',
+              [c.ownerId, ['lee-example', other], other],
+            )
+          ).rows,
+          [{ id: lee.id, profile_key: 'lee-example', member_urn: other }],
+        );
+        await assert.rejects(
+          c.jobs.execute(started, {
+            action: 'person_update',
+            people: [{ id: kim.id, profileUrl: profile('lee-example') }],
+          }),
+          (error: Error & { statusCode?: number }) =>
+            error.statusCode === 409 &&
+            error.message.startsWith('people.0: the profile lee-example') &&
+            error.message.includes(lee.id),
+        );
       });
     } finally {
       await Promise.allSettled([a.app.close(), b.app.close(), c.app.close()]);
