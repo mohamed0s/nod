@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import rateLimit from '@fastify/rate-limit';
 import Fastify from 'fastify';
 import pg from 'pg';
 import { appConfirmation } from '../src/ports/agent.ts';
+import { registerLocalAccess } from '../src/server/access.ts';
 import { runJobsTool } from '../src/runtime/jobs-tool.ts';
 import type { TelegramPost } from '../src/ports/job-sources.ts';
 import { telegramChannelPosts } from '../src/providers/public-web/telegram-channel.ts';
@@ -411,6 +413,166 @@ test(
       assert.match(run(...args).stderr, /only inside a Nod workspace/, args.join(' '));
   },
 );
+
+const helperFolder = join(import.meta.dirname, '..', 'extensions', 'linkedin-helper');
+const memberA = 'ACoAASyntheticMemberAAAA01';
+const memberB = 'ACoAASyntheticMemberBBBB02';
+const peopleTab = (second: string) => `<main>
+  <h1>Synthetic Example Co</h1>
+  <ul>
+    <li><section>
+      <div class="artdeco-entity-lockup__title"><a aria-label="View Sam Example’s profile" href="https://www.linkedin.com/in/sam-example/?miniProfileUrn=urn%3Ali%3Afs_miniProfile%3A${memberA}"><span class="visually-hidden">View Sam Example’s profile</span><div>Sam Example</div></a></div>
+      <div class="artdeco-entity-lockup__subtitle"><div>Synthetic engineer</div></div>
+      <button aria-label="Invite Sam Example to connect"><span>Connect</span></button>
+    </section></li>
+    <li><section>
+      <a href="/in/${memberB}"><img alt="Kim Example"></a>
+      <button id="kim"><span>${second}</span></button>
+    </section></li>
+    <li><section><div class="artdeco-entity-lockup__title">LinkedIn Member</div><button>Connect</button></section></li>
+  </ul>
+</main>`;
+
+const plain = (value: unknown) => JSON.parse(JSON.stringify(value ?? null));
+
+async function linkedInPage(url: string, body: string) {
+  const { JSDOM } = await import('jsdom');
+  const dom = new JSDOM(
+    `<!doctype html><title>(3) Synthetic Example Co | LinkedIn</title>${body}`,
+    {
+      url,
+      runScripts: 'outside-only',
+    },
+  );
+  const window = dom.window as unknown as Window & {
+    eval(source: string): unknown;
+    nodLinkedInReaders: Record<string, (...args: unknown[]) => unknown>;
+  };
+  window.eval(await readFile(join(helperFolder, 'readers.js'), 'utf8'));
+  return { dom, window, readers: window.nodLinkedInReaders };
+}
+
+test('the Edge helper reads synthetic LinkedIn markup without acting on the page', async () => {
+  const company = await linkedInPage(
+    'https://www.linkedin.com/company/synthetic-example/people/',
+    peopleTab('Pending'),
+  );
+  const { readers, window } = company;
+  assert.deepEqual(plain(readers.companyContext(window.document, window.location)), {
+    slug: 'synthetic-example',
+    name: 'Synthetic Example Co',
+  });
+  assert.equal(plain(readers.onPeopleTab(window.location)), true);
+  assert.deepEqual(plain(readers.peopleCards(window.document)), [
+    {
+      person: {
+        profileUrl: 'https://www.linkedin.com/in/sam-example/',
+        memberUrn: memberA,
+        name: 'Sam Example',
+        headline: 'Synthetic engineer',
+      },
+      pending: false,
+    },
+    {
+      person: {
+        profileUrl: `https://www.linkedin.com/in/${memberB}/`,
+        memberUrn: memberB,
+        name: 'Kim Example',
+        headline: '',
+      },
+      pending: true,
+    },
+  ]);
+  for (const href of [
+    'https://evil.example/in/sam-example',
+    'https://www.linkedin.com/in/sam-example/details/experience/',
+    'javascript:alert(1)',
+    'https://www.linkedin.com.evil.example/in/sam-example',
+  ])
+    assert.equal(plain(readers.profileLink(href)), null, href);
+
+  const profile = await linkedInPage(
+    'https://www.linkedin.com/in/sam-example/',
+    `<main><section><h1>Sam Example</h1>
+      <a href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3A${memberA}&recipient=${memberA}&screenContext=NON_SELF_PROFILE_VIEW">Message</a>
+      <a href="/in/kim-example/?miniProfileUrn=urn%3Ali%3Afs_miniProfile%3A${memberB}">Kim Example</a>
+    </section><aside><a href="/messaging/compose/?recipient=${memberB}">Message</a></aside></main>`,
+  );
+  assert.deepEqual(
+    plain(profile.readers.profileIdentity(profile.window.document, profile.window.location)),
+    {
+      profileUrl: 'https://www.linkedin.com/in/sam-example/',
+      memberUrn: memberA,
+    },
+  );
+  const unclear = await linkedInPage(
+    'https://www.linkedin.com/in/sam-example/',
+    `<main><section><h1>Sam Example</h1>
+      <a href="/messaging/compose/?recipient=${memberA}">Message</a>
+      <a href="/messaging/compose/?recipient=${memberB}">Message</a></section></main>`,
+  );
+  assert.equal(
+    plain(unclear.readers.profileIdentity(unclear.window.document, unclear.window.location)),
+    null,
+  );
+
+  const list = await linkedInPage(
+    'https://www.linkedin.com/mynetwork/invite-connect/connections/',
+    `<header><a href="/in/owner-example/">Me</a></header><main><ul>
+      <li><a href="/in/sam-example/">Sam Example</a><a href="/in/sam-example/">Message</a></li>
+      <li><a href="https://www.linkedin.com/in/lee-example">Lee Example</a></li></ul></main>`,
+  );
+  assert.equal(plain(list.readers.onConnections(list.window.location)), true);
+  assert.deepEqual(plain(list.readers.connections(list.window.document)), [
+    { profileUrl: 'https://www.linkedin.com/in/sam-example/' },
+    { profileUrl: 'https://www.linkedin.com/in/lee-example/' },
+  ]);
+
+  const watched = await linkedInPage(
+    'https://www.linkedin.com/company/synthetic-example/people/',
+    peopleTab('Pending'),
+  );
+  const sent: unknown[] = [];
+  const acted: string[] = [];
+  const page = watched.window as unknown as Record<string, unknown> & typeof watched.window;
+  page.chrome = {
+    runtime: {
+      id: 'synthetic',
+      sendMessage: async (message: unknown) => {
+        sent.push(message);
+      },
+      onMessage: { addListener() {} },
+    },
+  };
+  for (const name of ['fetch', 'open', 'XMLHttpRequest']) page[name] = () => acted.push(name);
+  const element = watched.dom.window.HTMLElement.prototype as unknown as Record<string, unknown>;
+  for (const name of ['click', 'focus', 'scrollIntoView']) element[name] = () => acted.push(name);
+  watched.window.eval(await readFile(join(helperFolder, 'content.js'), 'utf8'));
+  const settle = () => new Promise((accept) => setTimeout(accept, 600));
+  await settle();
+  assert.deepEqual(plain(sent), []);
+  const sam = watched.window.document.querySelector(
+    '[aria-label="Invite Sam Example to connect"]',
+  )!;
+  sam.setAttribute('aria-label', 'Pending, click to withdraw invitation sent to Sam Example');
+  sam.querySelector('span')!.textContent = 'Pending';
+  await settle();
+  sam.querySelector('span')!.textContent = 'Pending ';
+  await settle();
+  assert.deepEqual(plain(sent), [
+    {
+      type: 'invite',
+      company: { slug: 'synthetic-example', name: 'Synthetic Example Co' },
+      person: {
+        profileUrl: 'https://www.linkedin.com/in/sam-example/',
+        memberUrn: memberA,
+        name: 'Sam Example',
+        headline: 'Synthetic engineer',
+      },
+    },
+  ]);
+  assert.deepEqual(acted, []);
+});
 
 test(
   'job records stay with their owner and change only through the work allowed to change them',
@@ -1873,6 +2035,381 @@ test(
             error.message.includes(lee.id),
         );
       });
+      await t.test(
+        'the Edge helper reaches only its own routes with a token Nod paired',
+        async (h) => {
+          const key = randomBytes(32).toString('base64url');
+          const served = async (side: Side) => {
+            const app = Fastify();
+            h.after(() => app.close());
+            await app.register(rateLimit, { global: false, keyGenerator: () => side.ownerId });
+            registerLocalAccess(app, 4310, { key, desktop: true, helper: side.jobs.helperAccess });
+            side.jobs.registerRoutes(app);
+            await app.ready();
+            return app;
+          };
+          const d = owner('synthetic-owner-d');
+          const e = owner('synthetic-owner-e');
+          const [dApp, eApp] = [await served(d), await served(e)];
+          const host = '127.0.0.1:4310';
+          const asOwner = { host, 'x-nod-desktop-token': key };
+          const call = (
+            app: typeof dApp,
+            method: string,
+            url: string,
+            headers: Record<string, string>,
+            payload?: unknown,
+          ) =>
+            app.inject({
+              method: method as 'POST',
+              url,
+              headers,
+              ...(payload === undefined ? {} : { payload: payload as object }),
+            });
+          const id = 'abcdefghijklmnopabcdefghijklmnop';
+          const origin = `chrome-extension://${id}`;
+          const newCode = async (app: typeof dApp) =>
+            (await call(app, 'POST', '/api/jobs/helper/pairing', asOwner)).json().code as string;
+          const pair = (app: typeof dApp, code: string, extensionId = id) =>
+            call(app, 'POST', '/api/helper-pairing', { host }, { code, extensionId });
+          const tokenFor = async (app: typeof dApp) => {
+            const paired = await pair(app, await newCode(app));
+            assert.equal(paired.statusCode, 200, paired.body);
+            return paired.json().token as string;
+          };
+
+          const code = await newCode(dApp);
+          assert.equal((await pair(eApp, code)).statusCode, 410);
+          const token = (await pair(dApp, code)).json().token as string;
+          assert.equal((await pair(dApp, code)).statusCode, 410);
+          const stored = (
+            await db.pool.query(
+              'SELECT token_hash,origin FROM job_helper_tokens WHERE owner_id=$1',
+              [d.ownerId],
+            )
+          ).rows;
+          assert.equal(stored.length, 1);
+          assert.equal(stored[0].origin, origin);
+          assert.equal(JSON.stringify(stored).includes(token), false);
+
+          const helper = { host, origin, authorization: `Bearer ${token}` };
+          const accepted = (app: typeof dApp, headers: Record<string, string>) =>
+            call(app, 'POST', '/api/helper/accepted', headers, {});
+          assert.equal((await accepted(dApp, helper)).statusCode, 200);
+          for (const [headers, status] of [
+            [{ ...helper, origin: `chrome-extension://${'b'.repeat(32)}` }, 401],
+            [{ ...helper, origin: 'https://www.linkedin.com' }, 403],
+            [{ host, authorization: helper.authorization }, 403],
+            [{ host, origin }, 401],
+            [{ ...helper, authorization: `Bearer ${randomBytes(32).toString('base64url')}` }, 401],
+            [{ host, origin, 'x-nod-desktop-token': key }, 401],
+            [{ ...helper, host: 'localhost:4310' }, 403],
+          ] as const)
+            assert.equal(
+              (await accepted(dApp, headers)).statusCode,
+              status,
+              JSON.stringify(headers),
+            );
+          assert.equal((await accepted(eApp, helper)).statusCode, 401);
+          for (const [headers, status] of [
+            [{ host, authorization: helper.authorization }, 401],
+            [helper, 403],
+            [asOwner, 200],
+          ] as const)
+            assert.equal(
+              (await call(dApp, 'GET', '/api/jobs/companies', headers)).statusCode,
+              status,
+            );
+          assert.equal((await call(dApp, 'GET', '/api/helper/accepted', helper)).statusCode, 403);
+
+          const send = (path: string, payload: unknown, headers: Record<string, string> = helper) =>
+            call(dApp, 'POST', `/api/helper/${path}`, headers, payload);
+          const page = { slug: 'helper-example', name: 'Helper Example Co' };
+          const sam = {
+            profileUrl: 'https://www.linkedin.com/in/sam-helper/',
+            name: 'Sam Helper',
+            headline: 'Synthetic analyst',
+          };
+          const kim = {
+            profileUrl: `https://www.linkedin.com/in/${memberB}/`,
+            memberUrn: memberB,
+            name: 'Kim Helper',
+            headline: '',
+          };
+          const first = await send('invites', { company: page, people: [sam, kim] });
+          assert.equal(first.statusCode, 200, first.body);
+          const [samId, kimId] = first.json().saved.map((entry: { id: string }) => entry.id);
+          assert.deepEqual(
+            first
+              .json()
+              .saved.map((entry: { created: boolean; status: string }) => [
+                entry.created,
+                entry.status,
+              ]),
+            [
+              [true, 'invited'],
+              [true, 'invited'],
+            ],
+          );
+          const again = await send('invites', {
+            company: page,
+            people: [{ ...sam, name: 'Renamed By Page' }],
+          });
+          assert.deepEqual(
+            again
+              .json()
+              .saved.map((entry: { id: string; created: boolean }) => [entry.id, entry.created]),
+            [[samId, false]],
+          );
+          await d.jobs.execute(await turn(d, 'user'), {
+            action: 'person_update',
+            people: [
+              {
+                profileUrl: 'https://www.linkedin.com/in/lee-helper',
+                name: 'Lee Helper',
+                company: 'Other Helper Example',
+                status: 'accepted',
+              },
+            ],
+          });
+          const lee = await send('invites', {
+            company: page,
+            people: [
+              {
+                profileUrl: 'https://www.linkedin.com/in/lee-helper/',
+                name: 'Lee Helper',
+                headline: '',
+              },
+            ],
+          });
+          assert.deepEqual(
+            lee
+              .json()
+              .saved.map((entry: { created: boolean; status: string }) => [
+                entry.created,
+                entry.status,
+              ]),
+            [[false, 'accepted']],
+          );
+          const people = async () =>
+            (
+              await db.pool.query(
+                `SELECT p.name,p.status,c.name AS company,c.linkedin_slug FROM job_people p
+               JOIN job_companies c ON c.id=p.company_id WHERE p.owner_id=$1 ORDER BY p.name`,
+                [d.ownerId],
+              )
+            ).rows;
+          const saved = await people();
+          assert.deepEqual(saved, [
+            { name: 'Kim Helper', status: 'invited', company: page.name, linkedin_slug: page.slug },
+            {
+              name: 'Lee Helper',
+              status: 'accepted',
+              company: 'Other Helper Example',
+              linkedin_slug: null,
+            },
+            { name: 'Sam Helper', status: 'invited', company: page.name, linkedin_slug: page.slug },
+          ]);
+          for (const list of [
+            [{ ...sam, name: 'x'.repeat(201) }],
+            [{ ...sam, name: '   ' }],
+            [{ ...sam, headline: 'x'.repeat(401) }],
+            [{ ...sam, profileUrl: 'https://evil.example/in/sam-helper/' }],
+            [{ ...sam, profileUrl: 'https://www.linkedin.com/in/sam-helper/?trk=synthetic' }],
+            [{ ...sam, profileUrl: 'https://www.linkedin.com/company/helper-example/' }],
+            [{ ...sam, profileUrl: 'http://www.linkedin.com/in/sam-helper/' }],
+            [{ ...sam, memberUrn: 'urn:li:member:1' }],
+            [{ ...sam, extra: true }],
+            Array.from({ length: 21 }, (_, n) => ({
+              ...sam,
+              profileUrl: `https://www.linkedin.com/in/bulk-helper-${n}/`,
+            })),
+          ])
+            assert.equal((await send('invites', { company: page, people: list })).statusCode, 400);
+          for (const company of [
+            { ...page, slug: 'helper/example' },
+            { ...page, slug: 'x'.repeat(101) },
+            { slug: page.slug },
+            { ...page, name: 'x'.repeat(201) },
+          ])
+            assert.equal((await send('invites', { company, people: [sam] })).statusCode, 400);
+          assert.deepEqual(await people(), saved);
+
+          const view = (await send('company', { slug: page.slug })).json();
+          assert.equal(view.company.name, page.name);
+          assert.deepEqual(
+            view.company.people.map((person: { name: string }) => person.name).sort(),
+            ['Kim Helper', 'Sam Helper'],
+          );
+          assert.deepEqual(view.invites, { today: 2, week: 2, daily: 15, weekly: 80 });
+          assert.equal((await send('company', { slug: 'unknown-helper' })).json().company, null);
+
+          assert.deepEqual(
+            (
+              await send('profile', {
+                profileUrl: 'https://www.linkedin.com/in/nobody-helper/',
+                memberUrn: 'ACoAASyntheticMemberNONE03',
+              })
+            ).json(),
+            { person: null },
+          );
+          assert.equal(
+            (
+              await send('profile', {
+                profileUrl: `https://www.linkedin.com/in/${memberB}/`,
+                memberUrn: memberB,
+              })
+            ).statusCode,
+            400,
+          );
+          assert.deepEqual(
+            (
+              await send('profile', {
+                profileUrl: 'https://www.linkedin.com/in/kim-helper/',
+                memberUrn: memberB,
+              })
+            ).json(),
+            { person: kimId },
+          );
+          assert.deepEqual(
+            (await send('profile', { profileUrl: sam.profileUrl, memberUrn: memberA })).json(),
+            { person: samId },
+          );
+          assert.deepEqual(
+            (
+              await db.pool.query(
+                'SELECT profile_key,member_urn FROM job_people WHERE owner_id=$1 AND id=ANY($2) ORDER BY profile_key',
+                [d.ownerId, [samId, kimId]],
+              )
+            ).rows,
+            [
+              { profile_key: 'kim-helper', member_urn: memberB },
+              { profile_key: 'sam-helper', member_urn: memberA },
+            ],
+          );
+          assert.equal(
+            (await db.pool.query("SELECT 1 FROM job_people WHERE profile_key='nobody-helper'"))
+              .rowCount,
+            0,
+          );
+
+          assert.deepEqual(
+            (
+              await send('connections', {
+                people: [
+                  { profileUrl: sam.profileUrl },
+                  { profileUrl: 'https://www.linkedin.com/in/stranger-helper/' },
+                ],
+              })
+            ).json(),
+            { accepted: [samId] },
+          );
+          assert.deepEqual(
+            (await send('connections', { people: [{ profileUrl: sam.profileUrl }] })).json(),
+            { accepted: [] },
+          );
+          assert.equal(
+            (await db.pool.query("SELECT 1 FROM job_people WHERE profile_key='stranger-helper'"))
+              .rowCount,
+            0,
+          );
+          const waiting = (await send('accepted', {})).json().people as Array<{
+            id: string;
+            name: string;
+            company: string;
+            messageUrl: string | null;
+            revision: number;
+          }>;
+          assert.deepEqual(waiting.map((person) => [person.name, person.company]).sort(), [
+            ['Lee Helper', 'Other Helper Example'],
+            ['Sam Helper', page.name],
+          ]);
+          const samView = waiting.find((person) => person.id === samId)!;
+          assert.equal(
+            samView.messageUrl,
+            `https://www.linkedin.com/messaging/compose/?recipient=${memberA}`,
+          );
+          const status = (body: unknown) => send(`people/${samId}/status`, body);
+          assert.equal(
+            (await status({ status: 'asked', revision: samView.revision - 1 })).statusCode,
+            409,
+          );
+          const asked = await status({ status: 'asked', revision: samView.revision });
+          assert.equal(asked.json().status, 'asked');
+          assert.equal(
+            (await status({ status: 'hired', revision: asked.json().revision })).statusCode,
+            400,
+          );
+
+          const other = { host, origin, authorization: `Bearer ${await tokenFor(eApp)}` };
+          assert.equal(
+            (
+              await call(eApp, 'POST', `/api/helper/people/${samId}/status`, other, {
+                status: 'declined',
+                revision: asked.json().revision,
+              })
+            ).statusCode,
+            404,
+          );
+          assert.equal(
+            (await call(eApp, 'POST', '/api/helper/company', other, { slug: page.slug })).json()
+              .company,
+            null,
+          );
+
+          refuseChats = false;
+          const chatsBefore = chats.length;
+          const tick = (body: unknown) => send(`companies/${view.company.id}/no-luck`, body);
+          assert.equal((await tick({ noLuck: true })).json().apply.state, 'started');
+          assert.equal((await tick({ noLuck: true })).json().apply.state, 'reused');
+          assert.equal(chats.length, chatsBefore + 1);
+          assert.equal((await tick({ noLuck: false })).statusCode, 400);
+
+          assert.equal((await send('cv', {})).statusCode, 404);
+          await add(d, 'Helper Example CV.pdf', 'application/pdf');
+          const cv = await send('cv', {});
+          assert.equal(cv.statusCode, 200, cv.body);
+          assert.equal(cv.headers['content-type'], 'application/pdf');
+          assert.equal(cv.body, 'synthetic Helper Example CV.pdf');
+          assert.match(
+            String(cv.headers['content-disposition']),
+            /UTF-8''Helper%20Example%20CV\.pdf$/,
+          );
+
+          let limited = 0;
+          for (let n = 1; n <= 245 && !limited; n++)
+            if ((await accepted(dApp, helper)).statusCode === 429) limited = n;
+          assert.ok(limited > 200 && limited <= 240, String(limited));
+
+          const listed = (await call(dApp, 'GET', '/api/jobs/helper', asOwner)).json().helpers;
+          assert.deepEqual(
+            listed.map((entry: { extensionId: string }) => entry.extensionId),
+            [id],
+          );
+          assert.notEqual(listed[0].lastUsedAt, null);
+          const renewed = { ...helper, authorization: `Bearer ${await tokenFor(dApp)}` };
+          assert.equal((await accepted(dApp, helper)).statusCode, 401);
+          assert.equal((await send('company', {}, renewed)).statusCode, 200);
+          const [current] = (await call(dApp, 'GET', '/api/jobs/helper', asOwner)).json().helpers;
+          const revoke = (headers: Record<string, string>) =>
+            call(dApp, 'POST', `/api/jobs/helper/${current.id}/revoke`, headers);
+          assert.equal(
+            (await revoke({ host, authorization: renewed.authorization })).statusCode,
+            401,
+          );
+          assert.equal((await revoke(asOwner)).statusCode, 200);
+          assert.equal((await revoke(asOwner)).statusCode, 404);
+          assert.equal((await send('company', {}, renewed)).statusCode, 401);
+
+          const last = await newCode(dApp);
+          for (let n = 4; n >= 0; n--)
+            assert.match(
+              (await pair(dApp, 'ZZZZ-ZZZZ')).json().message,
+              n ? new RegExp(`${n} tr(y|ies) left`) : /last try/,
+            );
+          assert.equal((await pair(dApp, last)).statusCode, 410);
+        },
+      );
     } finally {
       await Promise.allSettled([a.app.close(), b.app.close(), c.app.close()]);
       await db.pool.end();
