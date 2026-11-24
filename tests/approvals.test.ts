@@ -2680,14 +2680,19 @@ test(
       );
 
       await t.test(
-        'a decision check never sees validSources and is never asked again',
+        'a decision checker gets the base instructions and input unchanged and is never asked again',
         async () => {
           const turn = await begin('Email Ana the synthetic invoice.');
           const decided: object[] = [];
-          const reviewed: object[] = [];
+          const permissions: string[] = [];
+          const reviewed: Array<{ instructions: string; input: Record<string, unknown> }> = [];
           let selected = true;
           const decision: DecisionModel = {
             async check(request) {
+              const permission = request.additionalQuestions?.find(
+                ({ name }) => name === 'permission',
+              );
+              if (permission?.instructions) permissions.push(permission.instructions);
               for (const selection of [
                 { provider: 'openai', model: 'decisions' },
                 { provider: 'typesafe', model: 'jev-1.14.0' },
@@ -2699,8 +2704,8 @@ test(
           const checking = createTrust({
             pool: db.pool,
             ownerId,
-            review: async (_instructions, input) => {
-              reviewed.push(input);
+            review: async (instructions, input) => {
+              reviewed.push({ instructions, input: input as Record<string, unknown> });
               return { run: true, source: cite(input as Record<string, any>) };
             },
             decisions: {
@@ -2708,24 +2713,38 @@ test(
               check: decision.check,
             },
           });
+          const args = email('ana@example.test');
           const unrequested = { confirm: true, reason: 'unrequested' };
-          compareVerdict(
-            await checking.check(turn, 'GMAIL_SEND_EMAIL', email('ana@example.test')),
-            unrequested,
-          );
+          compareVerdict(await checking.check(turn, 'GMAIL_SEND_EMAIL', args), unrequested);
           assert.equal(decided.length, 2);
+          assert.equal(permissions.length, 1);
+          assert.equal(reviewed.length, 0);
+          selected = false;
+          compareVerdict(await checking.check(turn, 'GMAIL_SEND_EMAIL', args), unrequested);
+          assert.equal(reviewed.length, 1);
+          assert.equal(decided.length, 2);
+          const [base] = reviewed;
+          const before = reviews.length;
+          await trust.check(turn, 'GMAIL_SEND_EMAIL', args);
+          assert.equal(reviews.length, before + 1);
+          const { validSources, ...words } = reviews.at(-1)!;
+          assert.ok(Array.isArray(validSources));
+          assert.deepEqual(base!.input, words);
+          const lines = prompts.at(-1)!.split('\n');
+          const added = lines.filter((line) => !base!.instructions.split('\n').includes(line));
+          assert.equal(added.length, 1);
+          assert.equal(lines.filter((line) => line !== added[0]).join('\n'), base!.instructions);
+          assert.ok(permissions[0]!.includes(base!.instructions));
+          for (const value of [
+            base!.instructions,
+            permissions[0]!,
+            ...decided.map((input) => JSON.stringify(input)),
+          ])
+            assert.equal(value.includes(added[0]!), false);
           for (const input of decided) {
             assert.equal('validSources' in input, false);
             assert.equal('correction' in input, false);
           }
-          assert.equal(reviewed.length, 0);
-          selected = false;
-          compareVerdict(
-            await checking.check(turn, 'GMAIL_SEND_EMAIL', email('ana@example.test')),
-            unrequested,
-          );
-          assert.equal(reviewed.length, 1);
-          assert.equal(decided.length, 2);
           await finish(turn.turnId, 'cancelled');
         },
       );

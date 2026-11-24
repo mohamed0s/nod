@@ -3080,6 +3080,7 @@ export async function runDecisionEval(options: {
         ? { readOnly: policy(mainTrust, 'readInstructions', 'readOnly') }
         : {}),
       rules: optionalPolicy(mainTrust, 'rulesInstructions'),
+      sources: optionalPolicy(mainTrust, 'sourceInstructions'),
       answer: policy(mainTrust, 'answerInstructions', 'answer'),
       ...(mainCommunication?.includes('const confirmationInstructions =')
         ? { valid: policy(mainCommunication, 'confirmationInstructions', 'valid') }
@@ -3089,6 +3090,7 @@ export async function runDecisionEval(options: {
       run: policy(trust, 'checkInstructions', 'run', { ownerInstructionPolicy }),
       readOnly: policy(trust, 'readInstructions', 'readOnly'),
       rules: optionalPolicy(trust, 'rulesInstructions'),
+      sources: optionalPolicy(trust, 'sourceInstructions'),
       answer: policy(trust, 'answerInstructions', 'answer'),
       ...(communication.includes('const confirmationInstructions =')
         ? { valid: policy(communication, 'confirmationInstructions', 'valid') }
@@ -3236,10 +3238,12 @@ export async function runDecisionEval(options: {
             : 'branch';
     const selected = (arm === 'main-llm' ? policies.main[item.kind] : policies.branch[item.kind])!;
     const rules = arm === 'main-llm' ? policies.main.rules : policies.branch.rules;
+    const sources = arm === 'main-llm' ? policies.main.sources : policies.branch.sources;
     let instructions =
-      item.kind === 'run' && rules && ruled(item.input)
-        ? `${selected.instructions}\n${rules}`
+      item.kind === 'run' && arm.endsWith('-llm') && sources
+        ? `${selected.instructions}\n${sources}`
         : selected.instructions;
+    if (item.kind === 'run' && rules && ruled(item.input)) instructions += `\n${rules}`;
     if (arm.endsWith('-llm') && selected.question) {
       const question = selected.question;
       instructions += `\nReply with only JSON with one property, ${JSON.stringify(question.name)}. Its value must be one of: ${question.choices.map(({ value }) => JSON.stringify(value)).join(', ')}.`;
@@ -3251,9 +3255,10 @@ export async function runDecisionEval(options: {
         item.kind === 'run' || (arm.endsWith('-llm') && item.kind !== 'answer')
           ? [true, false]
           : selected.question!.choices.map(({ value }) => value),
-      authorization:
-        arm.endsWith('-llm') || item.kind === 'run'
-          ? authorization[arm === 'main-llm' ? 'main' : 'branch']
+      authorization: arm.endsWith('-llm')
+        ? authorization[arm === 'main-llm' ? 'main' : 'branch']
+        : item.kind === 'run'
+          ? { ...authorization.branch, validSources: undefined }
           : { mode: 'raw' },
       report,
       canStart: () => (unpriced ? 'unpriced' : spent >= budgetUnits ? 'budget' : undefined),
