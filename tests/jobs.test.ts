@@ -680,6 +680,8 @@ test(
       extra: {
         curator?: MemoryCurator;
         mailboxes?: () => Promise<Array<{ id: string; address: string }>>;
+        mail?: import('../src/server/job-mail.ts').JobMailAccess;
+        mailCheck?: import('../src/server/integration-result.ts').MailCheck;
         timeZone?: () => Promise<string>;
         notify?: (
           client: Pick<pg.PoolClient, 'query'>,
@@ -2960,6 +2962,7 @@ test(
       });
 
       const { createSchedules } = await import('../src/server/schedules.ts');
+      const { jobMailReader } = await import('../src/providers/composio/job-mail.ts');
       await createSchedules({
         pool: db.pool,
         ownerId: 'synthetic-owner-m',
@@ -2967,7 +2970,54 @@ test(
         enqueueTurn: (async () => randomUUID()) as never,
         refresh() {},
       }).initialize({ workers: false });
+      const inboxes = new Map<string, Array<Record<string, unknown>>>();
+      const searches: string[] = [];
+      const gmailClient = {
+        proxyExecute: async (call: {
+          connectedAccountId: string;
+          endpoint: string;
+          parameters: Array<{ name: string; value: string | number }>;
+        }) => {
+          const stored = inboxes.get(call.connectedAccountId) ?? [];
+          const path = call.endpoint.replace('https://gmail.googleapis.com/gmail/v1/users/me/', '');
+          const value = (name: string) =>
+            call.parameters.find((entry) => entry.name === name)?.value;
+          if (path === 'messages') {
+            searches.push(String(value('q')));
+            const newest = [...stored].reverse();
+            const start = Number(value('pageToken') ?? 0);
+            const end = start + Number(value('maxResults'));
+            return {
+              status: 200,
+              data: {
+                messages: newest.slice(start, end).map((entry) => ({ id: entry.id })),
+                ...(end < newest.length ? { nextPageToken: String(end) } : {}),
+              },
+            };
+          }
+          const found = stored.find((entry) => path === `messages/${String(entry.id)}`);
+          return found ? { status: 200, data: found } : { status: 404, data: {} };
+        },
+      };
+      const reader = jobMailReader(gmailClient as never);
+      const mailAccess = {
+        list: (connectionId: string, query: string, max: number, signal: AbortSignal) =>
+          reader.list(`account-${connectionId}`, query, max, signal),
+        read: (connectionId: string, ids: string[], signal: AbortSignal) =>
+          reader.read(`account-${connectionId}`, ids, signal),
+      };
+      const checked: string[] = [];
+      const mailCheck = async (emails: Array<{ from: string; subject: string; text: string }>) =>
+        emails.map((entry) => {
+          checked.push(entry.subject);
+          return /sign-in code/i.test(entry.subject)
+            ? true
+            : /held/i.test(entry.subject)
+              ? 'the check model hit its rate limit (HTTP 429)'
+              : false;
+        });
       const labelled: Array<{ task: string; input: Record<string, any> }> = [];
+      let labelFails = false;
       const mailCurator: MemoryCurator = {
         id: 'synthetic-mail',
         configured: true,
@@ -2976,6 +3026,7 @@ test(
           if (request.task === 'referral')
             return { language: input.drafts[0].language, text: input.drafts[0].text, changes: '' };
           labelled.push({ task: request.task, input });
+          if (labelFails) throw new Error('The classification model is unavailable. HTTP 503.');
           const subject = String(input.email.subject);
           return {
             label: /interview/i.test(subject)
@@ -2984,7 +3035,9 @@ test(
                 ? 'rejection'
                 : /odd/i.test(subject)
                   ? 'offer'
-                  : 'other',
+                  : /reminder/i.test(subject)
+                    ? 'unrelated'
+                    : 'other',
           };
         },
       };
@@ -2996,8 +3049,15 @@ test(
           { id: 'gmail-connection-one', address: 'sam.jobs@example.test' },
           { id: 'gmail-connection-two', address: 'sam.home@example.test' },
         ],
+        mail: mailAccess,
+        mailCheck,
       });
-      const n = owner('synthetic-owner-n', false, { notify: notify('synthetic-owner-n') });
+      const n = owner('synthetic-owner-n', false, {
+        notify: notify('synthetic-owner-n'),
+        mailboxes: async () => [{ id: 'gmail-connection-three', address: 'other@example.test' }],
+        mail: mailAccess,
+        mailCheck,
+      });
       await Promise.all([m.app.ready(), n.app.ready()]);
       await setUpOwner(m);
       const mProfile = (await request(m, 'GET', '/api/jobs/profile')).json();
@@ -3011,45 +3071,56 @@ test(
         200,
       );
       const gmailCheck = (result = 'pass', domain = 'linkedin.com') =>
-        `mx.google.com; dkim=${result} header.i=@${domain} header.s=synthetic header.b=synthetic; spf=${result} (google.com: domain of s-1@bounce.${domain} designates 192.0.2.1 as permitted sender) smtp.mailfrom=s-1@bounce.${domain}; dmarc=${result} (p=REJECT) header.from=${domain}`;
-      const email = (
+        `mx.google.com; dkim=${result} header.i=@${domain} header.s=synthetic header.b=synthetic; spf=${result} (google.com: domain of s-1@bounce.${domain} designates 192.0.2.1 as permitted sender) smtp.mailfrom=s-1@bounce.${domain}; dmarc=${result} (p=REJECT sp=REJECT dis=NONE) header.from=${domain}`;
+      let clock = Date.now() - 3_600_000;
+      const message = (
         id: string,
         from: string,
         subject: string,
-        values: { html?: string; text?: string; auth?: string[] | null; date?: string } = {},
+        values: { html?: string; text?: string; auth?: string[]; labels?: string[] } = {},
       ) => ({
-        messageId: id,
-        threadId: `thread-${id}`,
-        messageTimestamp: values.date ?? new Date(Date.now() - 60_000).toISOString(),
-        sender: from,
-        subject,
-        messageText: values.text ?? '',
+        id,
+        internalDate: String((clock += 1000)),
+        labelIds: values.labels ?? ['INBOX'],
         payload: {
+          mimeType: 'multipart/alternative',
           headers: [
-            { name: 'From', value: from },
-            { name: 'Subject', value: subject },
-            ...(values.auth === null ? [] : (values.auth ?? [gmailCheck()])).map((value) => ({
+            ...(values.auth ?? [gmailCheck('pass', from.replace(/^.*@|>$/g, ''))]).map((value) => ({
               name: 'Authentication-Results',
               value,
             })),
+            { name: 'From', value: from },
+            { name: 'Subject', value: subject },
           ],
-          parts: values.html
-            ? [
-                {
-                  mimeType: 'text/html',
-                  body: { data: Buffer.from(values.html).toString('base64url') },
-                },
-              ]
-            : [],
+          parts: [
+            {
+              mimeType: 'text/plain',
+              headers: [],
+              body: { data: Buffer.from(values.text ?? subject).toString('base64url') },
+            },
+            ...(values.html
+              ? [
+                  {
+                    mimeType: 'text/html',
+                    headers: [],
+                    body: { data: Buffer.from(values.html).toString('base64url') },
+                  },
+                ]
+              : []),
+          ],
         },
       });
-      const gmail = (...messages: unknown[]) => ({ successful: true, data: { messages } });
+      const deliver = (connection: string, ...messages: Array<Record<string, unknown>>) =>
+        inboxes.set(`account-${connection}`, [
+          ...(inboxes.get(`account-${connection}`) ?? []),
+          ...messages,
+        ]);
       const invitations = 'LinkedIn <invitations@linkedin.com>';
       const profileLink = (slug: string) =>
         `<a href="https://www.linkedin.com/comm/in/${slug}?midToken=synthetic&amp;trk=eml-accept">View profile</a>`;
       const mailOwner = async (side: Side) => turn(side, 'user');
-      const match = async (side: Side, at: { threadId: string; turnId: string }, value: unknown) =>
-        records(await side.jobs.execute(at, { action: 'match_mail', emails: value }));
+      const match = async (side: Side, at?: { threadId: string; turnId: string }) =>
+        records(await side.jobs.execute(at ?? (await mailOwner(side)), { action: 'match_mail' }));
       const statusOf = async (side: Side, id: string) =>
         (
           await db.pool.query<{ status: string }>(
@@ -3069,39 +3140,127 @@ test(
             people: [{ ...person(slug, company, 'invited'), ...extra }],
           }),
         ).saved[0] as { id: string; companyId: string; revision: number };
+      const claimed = async (side: Side, ids: string[]) =>
+        (
+          await db.pool.query<{ source_ref: string; kind: string }>(
+            "SELECT source_ref,kind FROM job_events WHERE owner_id=$1 AND source='gmail' AND source_ref=ANY($2) ORDER BY source_ref",
+            [side.ownerId, ids],
+          )
+        ).rows;
+
+      await t.test('the Gmail reader keeps only what Gmail itself checked', async () => {
+        const { jobMailMessage } = await import('../src/providers/composio/job-mail.ts');
+        const parsed = (from: string | string[], auth: string[], labels?: string[]) =>
+          jobMailMessage({
+            id: 'synthetic',
+            internalDate: '1700000000000',
+            ...(labels ? { labelIds: labels } : {}),
+            payload: {
+              headers: [
+                ...auth.map((value) => ({ name: 'Authentication-Results', value })),
+                ...[from].flat().map((value) => ({ name: 'From', value })),
+              ],
+            },
+          });
+        const verdict = (auth: string[]) => {
+          const value = parsed(invitations, auth)!;
+          return [value.authenticatedDomain, value.signedDomains];
+        };
+        assert.deepEqual(verdict([gmailCheck()]), ['linkedin.com', ['linkedin.com']]);
+        assert.deepEqual(verdict(['relay.example.test; spf=none', gmailCheck()]), [null, []]);
+        assert.deepEqual(
+          verdict([
+            'mx.google.com; dkim=fail header.d=evil.test; dmarc=fail header.from=linkedin.com',
+            gmailCheck(),
+          ]),
+          [null, []],
+        );
+        assert.deepEqual(
+          verdict([
+            'mx.google.com; spf=pass (google.com: domain of x@evil.test designates 192.0.2.1) smtp.mailfrom="x;dkim=pass header.d=linkedin.com "@evil.test; dmarc=fail header.from=linkedin.com',
+          ]),
+          [null, []],
+        );
+        assert.deepEqual(
+          verdict([
+            'mx.google.com; dkim=pass header.i=@linkedin.com; spf=fail smtp.mailfrom=evil.test; dmarc=fail header.from=linkedin.com',
+          ]),
+          [null, ['linkedin.com']],
+        );
+        assert.equal(parsed('"invitations@linkedin.com" <x@evil.test>', [])!.sender, 'x@evil.test');
+        assert.equal(
+          parsed('LinkedIn <invitations@linkedin.com>, Eve <x@evil.test>', [])!.sender,
+          null,
+        );
+        assert.equal(parsed('Eve <x@evil.test> <invitations@linkedin.com>', [])!.sender, null);
+        assert.equal(parsed([invitations, 'Eve <x@evil.test>'], [])!.sender, null);
+        assert.equal(parsed(invitations, [], ['SPAM']), null);
+        inboxes.set(
+          'account-paging',
+          Array.from({ length: 250 }, (_, index) => ({ id: `page-${index}` })),
+        );
+        const listed = await reader.list(
+          'account-paging',
+          'synthetic',
+          200,
+          AbortSignal.timeout(5000),
+        );
+        assert.deepEqual([listed.ids.length, listed.ids[0], listed.more], [200, 'page-249', true]);
+        inboxes.delete('account-paging');
+      });
 
       await t.test(
         'job mail marks an accept by profile link, member id or exact name, and asks about the rest',
         async () => {
+          await assert.rejects(match(m), /hasn't chosen the Gmail account/);
+          for (const supplied of [{ emails: [] }, { workspaceFile: 'shared/mail.json' }])
+            await assert.rejects(
+              m.jobs.execute(await mailOwner(m), { action: 'match_mail', ...supplied }),
+              /The jobs request/,
+            );
+          records(
+            await m.jobs.execute(await mailOwner(m), {
+              action: 'mail_setup',
+              account: 'gmail-connection-one',
+            }),
+          );
           const ada = await addPerson(m, 'ada-example', 'Alpha Mail Co');
           const eve = await addPerson(m, 'eve-example', 'Alpha Mail Co');
+          const nia = await addPerson(m, 'nia-example', 'Alpha Mail Co', { name: '' });
           const bea = await addPerson(m, 'bea-example', 'Beta Mail Co', {
             memberUrn: 'ACoAASyntheticMemberMMMM01',
           });
           const cy = await addPerson(m, 'cy-example', 'Gamma Mail Co');
+          const oz = await addPerson(m, 'oz-example', 'Gamma Mail Co');
           const twinOne = await addPerson(m, 'dee-one', 'Delta Mail Co', { name: 'Dee Twin' });
           const twinTwo = await addPerson(m, 'dee-two', 'Epsilon Mail Co', { name: 'Dee Twin' });
           const before = (await pings(m)).length;
-          const first = await match(
-            m,
-            await mailOwner(m),
-            gmail(
-              email('acc-slug', invitations, 'Synthetic ada-example accepted your invitation', {
-                html: `<p>${profileLink('ada-example')}</p><h3>People you may know</h3><p>${profileLink('eve-example')}</p>`,
-              }),
-              email(
-                'acc-member',
-                invitations,
-                'Synthetic bea-example has accepted your invitation',
-                {
-                  html: '<a href="https://www.linkedin.com/comm/mynetwork/discovery?profileUrn=urn%3Ali%3Afsd_profile%3AACoAASyntheticMemberMMMM01">See connection</a>',
-                },
-              ),
-              email('acc-name', invitations, 'Synthetic Cy-Example accepted your invitation'),
-              email('acc-twin', invitations, 'Dee Twin accepted your invitation'),
-              email('acc-nobody', invitations, 'Nobody Known accepted your invitation'),
+          deliver(
+            'gmail-connection-one',
+            message('acc-slug', invitations, 'Synthetic ada-example accepted your invitation', {
+              html: `<p>${profileLink('ada-example')}</p><h3>People you may know</h3><p>${profileLink('eve-example')}</p>`,
+            }),
+            message(
+              'acc-member',
+              invitations,
+              'Synthetic bea-example has accepted your invitation',
+              {
+                html: '<a href="https://www.linkedin.com/comm/mynetwork/discovery?profileUrn=urn%3Ali%3Afsd_profile%3AACoAASyntheticMemberMMMM01">See connection</a>',
+              },
             ),
+            message('acc-name', invitations, 'Synthetic Cy-Example accepted your invitation'),
+            message('acc-twin', invitations, 'Dee Twin accepted your invitation'),
+            message('acc-nobody', invitations, 'Nobody Known accepted your invitation'),
+            message('acc-nameless', invitations, 'Zed Stranger accepted your invitation', {
+              html: `<h3>People you may know</h3><p>${profileLink('eve-example')}</p><p>${profileLink('nia-example')}</p>`,
+            }),
+            message('acc-unnamed', invitations, 'Your invitation was accepted', {
+              text: 'Someone accepted your invitation.',
+              html: profileLink('oz-example'),
+            }),
           );
+          const first = await match(m);
+          assert.match(searches.at(-1)!, /^\{from:invitations@linkedin\.com .*\} after:\d+$/);
           assert.deepEqual(
             first.accepted.map((entry: { personId: string; by: string }) => [
               entry.personId,
@@ -3124,6 +3283,8 @@ test(
             [
               ['ambiguous', 'Dee Twin', [twinOne.id, twinTwo.id].sort()],
               ['unmatched', 'Nobody Known', []],
+              ['ambiguous', 'Zed Stranger', [nia.id]],
+              ['ambiguous', '', [oz.id]],
             ],
           );
           assert.doesNotMatch(JSON.stringify(first), /accepted your invitation|linkedin\.com/);
@@ -3132,6 +3293,8 @@ test(
             [bea.id, 'accepted'],
             [cy.id, 'accepted'],
             [eve.id, 'invited'],
+            [nia.id, 'invited'],
+            [oz.id, 'invited'],
             [twinOne.id, 'invited'],
             [twinTwo.id, 'invited'],
           ] as const)
@@ -3148,19 +3311,11 @@ test(
             sent.filter((ping) => ping.text.startsWith('Synthetic ada-example accepted')).length,
             1,
           );
-          const again = await match(
-            m,
-            await mailOwner(m),
-            gmail(
-              email('acc-slug', invitations, 'Synthetic ada-example accepted your invitation', {
-                html: profileLink('ada-example'),
-              }),
-              email('acc-twin', invitations, 'Dee Twin accepted your invitation'),
-            ),
+          const again = await match(m);
+          assert.deepEqual(
+            [again.counts.seenBefore, again.counts.emails, again.accepted, again.toAsk],
+            [7, 0, [], []],
           );
-          assert.equal(again.counts.seenBefore, 2);
-          assert.deepEqual(again.accepted, []);
-          assert.deepEqual(again.toAsk, []);
           await m.jobs.drafts.idle();
           assert.equal((await pings(m)).length, before + 3);
           assert.equal(
@@ -3172,103 +3327,71 @@ test(
             ).rows[0].n,
             1,
           );
-          const suggested = await match(
-            m,
-            await mailOwner(m),
-            gmail(
-              email('acc-suggested', invitations, 'Zed Stranger accepted your invitation', {
-                html: `<h3>People you may know</h3><p>${profileLink('eve-example')}</p>`,
-              }),
-            ),
-          );
-          assert.deepEqual(
-            suggested.toAsk.map((entry: { problem: string; name: string }) => [
-              entry.problem,
-              entry.name,
-            ]),
-            [['unmatched', 'Zed Stranger']],
-          );
-          assert.equal(await statusOf(m, eve.id), 'invited');
         },
       );
 
-      await t.test(
-        'only LinkedIn’s own checked sender counts, and withheld mail waits',
-        async () => {
-          const fay = await addPerson(m, 'fay-example', 'Zeta Mail Co');
-          const subject = 'Synthetic fay-example accepted your invitation';
-          const html = profileLink('fay-example');
-          const result = await match(
-            m,
-            await mailOwner(m),
-            gmail(
-              email(
-                'spoof-name',
-                '"invitations@linkedin.com" <invitations@linkedin-mail.example.test>',
-                subject,
-                { html },
-              ),
-              email('spoof-check', invitations, subject, { html, auth: [gmailCheck('fail')] }),
-              email('spoof-forged', invitations, subject, {
-                html,
-                auth: [
-                  'mail.example.test; dkim=pass header.i=@linkedin.com; spf=pass smtp.mailfrom=linkedin.com',
-                ],
-              }),
-              email('no-headers', invitations, subject, { html, auth: null }),
-              {
-                messageId: 'held-back',
-                sender: invitations,
-                messageTimestamp: new Date(Date.now() - 120_000).toISOString(),
-                message:
-                  'Nod could not check whether this email is for signing in, so its content is private.',
-              },
-            ),
-          );
-          assert.equal(await statusOf(m, fay.id), 'invited');
-          assert.deepEqual(
-            [
-              result.counts.unverified,
-              result.counts.noHeaders,
-              result.counts.withheld,
-              result.counts.ignored,
+      await t.test('only LinkedIn’s own sender, checked by Gmail, counts', async () => {
+        const fay = await addPerson(m, 'fay-example', 'Zeta Mail Co');
+        const subject = 'Synthetic fay-example accepted your invitation';
+        const html = profileLink('fay-example');
+        deliver(
+          'gmail-connection-one',
+          message(
+            'spoof-name',
+            '"invitations@linkedin.com" <invitations@linkedin-mail.example.test>',
+            subject,
+            {
+              html,
+            },
+          ),
+          message('spoof-check', invitations, subject, { html, auth: [gmailCheck('fail')] }),
+          message('spoof-relay', invitations, subject, {
+            html,
+            auth: ['relay.example.test; dmarc=pass header.from=linkedin.com', gmailCheck()],
+          }),
+          message('spoof-dkim', invitations, subject, {
+            html,
+            auth: [
+              'mx.google.com; dkim=pass header.i=@linkedin.com; spf=fail smtp.mailfrom=evil.test; dmarc=fail header.from=linkedin.com',
             ],
-            [2, 1, 1, 1],
-          );
-          const kept = (
-            await db.pool.query<{ source_ref: string; kind: string }>(
-              "SELECT source_ref,kind FROM job_events WHERE owner_id=$1 AND source='gmail' AND source_ref=ANY($2) ORDER BY source_ref",
-              [m.ownerId, ['spoof-name', 'spoof-check', 'spoof-forged', 'no-headers', 'held-back']],
-            )
-          ).rows;
-          assert.deepEqual(kept, [
+          }),
+          message('spoof-two', `${invitations}, Eve <eve@evil.test>`, subject, { html }),
+          message('spoof-spam', invitations, subject, { html, labels: ['SPAM'] }),
+        );
+        const result = await match(m);
+        assert.equal(await statusOf(m, fay.id), 'invited');
+        assert.deepEqual(
+          [result.counts.unverified, result.counts.ignored, result.accepted.length],
+          [3, 2, 0],
+        );
+        assert.deepEqual(
+          await claimed(m, ['spoof-name', 'spoof-check', 'spoof-relay', 'spoof-dkim', 'spoof-two']),
+          [
             { source_ref: 'spoof-check', kind: 'mail_unverified' },
-            { source_ref: 'spoof-forged', kind: 'mail_unverified' },
+            { source_ref: 'spoof-dkim', kind: 'mail_unverified' },
             { source_ref: 'spoof-name', kind: 'mail_ignored' },
-          ]);
-          const later = await match(
-            m,
-            await mailOwner(m),
-            gmail(email('held-back', invitations, subject, { html })),
-          );
-          assert.deepEqual(
-            later.accepted.map((entry: { personId: string }) => entry.personId),
-            [fay.id],
-          );
-          const view = (await request(m, 'GET', '/api/jobs/mail')).json();
-          assert.equal(view.lastRun.counts.accepted, 1);
-        },
-      );
+            { source_ref: 'spoof-relay', kind: 'mail_unverified' },
+            { source_ref: 'spoof-two', kind: 'mail_ignored' },
+          ],
+        );
+        assert.equal(searches.length > 0, true);
+        deliver('gmail-connection-one', message('fay-real', invitations, subject, { html }));
+        assert.deepEqual(
+          (await match(m)).accepted.map((entry: { personId: string }) => entry.personId),
+          [fay.id],
+        );
+        const view = (await request(m, 'GET', '/api/jobs/mail')).json();
+        assert.equal(view.lastRun.counts.accepted, 1);
+      });
 
       await t.test(
-        'an employer reply matches by company domain, ATS link or name, with a checked label',
+        'an employer reply matches by company domain, ATS link or name, with a checked sender and label',
         async () => {
-          const owner = await mailOwner(m);
-          const companyOf = async (name: string) => {
+          const companyOf = async (name: string, careersUrl?: string) => {
             const id = randomUUID();
             await db.pool.query(
-              `INSERT INTO job_companies(id,owner_id,name,key) VALUES($1,$2,$3,lower($3))`,
-              [id, m.ownerId, name],
+              `INSERT INTO job_companies(id,owner_id,name,key,careers_url) VALUES($1,$2,$3,lower($3),$4)`,
+              [id, m.ownerId, name, careersUrl ?? null],
             );
             return id;
           };
@@ -3281,11 +3404,7 @@ test(
             );
             return id;
           };
-          const kappa = await companyOf('Kappa Mail Labs');
-          await db.pool.query(
-            'UPDATE job_companies SET careers_url=$3 WHERE owner_id=$1 AND id=$2',
-            [m.ownerId, kappa, 'https://careers.kappamail.test/jobs'],
-          );
+          const kappa = await companyOf('Kappa Mail Labs', 'https://careers.kappamail.test/jobs');
           const kappaJob = await applied(
             kappa,
             'Data Analyst',
@@ -3307,41 +3426,64 @@ test(
           );
           const sigma = await addPerson(m, 'sig-example', 'Sigma Mail Works', { status: 'asked' });
           const tau = await addPerson(m, 'tau-example', 'Tau Mail Group');
+          const omega = await companyOf('Omega Mail', 'https://careers.omegamail.test');
+          await applied(
+            omega,
+            'Planner',
+            'https://careers.omegamail.test/jobs/9',
+            'careers.omegamail.test/jobs/9',
+          );
           const before = (await pings(m)).length;
           labelled.length = 0;
-          const result = await match(
-            m,
-            owner,
-            gmail(
-              email(
-                'kappa-1',
-                'Kappa Talent <talent@kappamail.test>',
-                'Interview for Data Analyst',
-                { auth: null },
-              ),
-              email(
-                'lambda-1',
-                'Hiring Team <no-reply@us.greenhouse-mail.io>',
-                'Unfortunately, about your application',
-                {
-                  html: '<a href="https://job-boards.greenhouse.io/lambdamail/jobs/4012399?gh_src=synthetic">The role</a>',
-                  auth: null,
-                },
-              ),
-              email(
-                'sigma-1',
-                'Sigma Mail Works <no-reply@ashbyhq.com>',
-                'An odd update on your application',
-                { auth: null },
-              ),
-              email('tau-1', 'Tau Mail Group <no-reply@ashbyhq.com>', 'Interview invite', {
-                auth: null,
-              }),
-              email('news-1', 'Jobs Digest <alerts@indeed.com>', 'Kappa Mail Labs is hiring', {
-                auth: null,
-              }),
+          checked.length = 0;
+          deliver(
+            'gmail-connection-one',
+            message(
+              'kappa-1',
+              'Kappa Talent <talent@kappamail.test>',
+              'Interview for Data Analyst',
+            ),
+            message(
+              'lambda-1',
+              'Hiring Team <no-reply@us.greenhouse-mail.io>',
+              'Unfortunately, about your application',
+              {
+                html: '<a href="https://job-boards.greenhouse.io/lambdamail/jobs/4012399?gh_src=synthetic">The role</a>',
+              },
+            ),
+            message(
+              'sigma-1',
+              'Sigma Mail Works <no-reply@ashbyhq.com>',
+              'An odd update on your application',
+            ),
+            message('tau-1', 'Tau Mail Group <no-reply@ashbyhq.com>', 'Interview invite'),
+            message('news-1', 'Jobs Digest <alerts@indeed.com>', 'Kappa Mail Labs is hiring'),
+            message('omega-1', 'Calendar <calendar@omegamail.test>', 'Event at 10:00'),
+            message(
+              'omega-2',
+              'Omega Mail <calendar@omegamail.test>',
+              'Omega Mail reminder for Planner',
+            ),
+            message(
+              'kappa-spoof',
+              'Kappa Mail Labs <hr@kappamail.test>',
+              'Interview for Data Analyst',
+              {
+                auth: [gmailCheck('pass', 'evil.test')],
+              },
+            ),
+            message(
+              'kappa-code',
+              'Kappa Mail Labs <no-reply@kappamail.test>',
+              'Your Kappa Mail Labs sign-in code',
+            ),
+            message(
+              'kappa-held',
+              'Kappa Mail Labs <talent@kappamail.test>',
+              'Kappa Mail Labs: HELD update',
             ),
           );
+          const result = await match(m);
           assert.deepEqual(
             result.employerReplies.map(
               (entry: { company: string; label: string; posting: string | null; by: string }) => [
@@ -3357,9 +3499,23 @@ test(
               ['Sigma Mail Works', 'other', null, 'name'],
             ],
           );
-          assert.match(result.employerReplies[2].note, /wasn't interview, rejection or other/);
-          assert.equal(result.counts.ignored, 2);
-          assert.equal(labelled.length, 3);
+          assert.match(
+            result.employerReplies[2].note,
+            /wasn't interview, rejection, other or unrelated/,
+          );
+          assert.deepEqual(
+            [result.counts.ignored, result.counts.unverified, result.counts.withheld],
+            [5, 1, 1],
+          );
+          assert.deepEqual(
+            labelled.map((entry) => entry.input.email.subject),
+            [
+              'Interview for Data Analyst',
+              'Unfortunately, about your application',
+              'An odd update on your application',
+              'Omega Mail reminder for Planner',
+            ],
+          );
           for (const sentLabel of labelled) {
             assert.equal(sentLabel.task, 'classify');
             assert.deepEqual(Object.keys(sentLabel.input.email).sort(), [
@@ -3370,6 +3526,7 @@ test(
             ]);
             assert.doesNotMatch(JSON.stringify(sentLabel.input), /@/);
           }
+          assert.ok(checked.includes('Your Kappa Mail Labs sign-in code'));
           const outcome = async (table: string, id: string) =>
             (
               await db.pool.query(`SELECT outcome FROM ${table} WHERE owner_id=$1 AND id=$2`, [
@@ -3382,6 +3539,16 @@ test(
           assert.equal(await outcome('job_postings', lambdaOther), 'rejection');
           assert.equal(await outcome('job_companies', sigma.companyId), 'other');
           assert.equal(await outcome('job_companies', tau.companyId), null);
+          assert.equal(await outcome('job_companies', omega), null);
+          assert.deepEqual(
+            await claimed(m, ['omega-1', 'omega-2', 'kappa-spoof', 'kappa-code', 'kappa-held']),
+            [
+              { source_ref: 'kappa-code', kind: 'mail_ignored' },
+              { source_ref: 'kappa-spoof', kind: 'mail_unverified' },
+              { source_ref: 'omega-1', kind: 'mail_ignored' },
+              { source_ref: 'omega-2', kind: 'mail_ignored' },
+            ],
+          );
           const sent = (await pings(m)).slice(before);
           assert.deepEqual(
             sent.map((ping) => ping.text.split('\n')[0]),
@@ -3392,20 +3559,26 @@ test(
             ],
           );
           assert.ok(sent.every((ping) => /didn't reply or change your calendar/.test(ping.text)));
-          await match(
-            m,
-            owner,
-            gmail(
-              email(
-                'kappa-1',
-                'Kappa Talent <talent@kappamail.test>',
-                'Interview for Data Analyst',
-                { auth: null },
-              ),
+          labelFails = true;
+          deliver(
+            'gmail-connection-one',
+            message(
+              'kappa-2',
+              'Kappa Talent <talent@kappamail.test>',
+              'Second interview for Data Analyst',
             ),
           );
-          assert.equal((await pings(m)).length, before + 3);
-          assert.equal(labelled.length, 3);
+          const failed = await match(m);
+          assert.deepEqual(failed.employerReplies, []);
+          assert.match(failed.reasons.join(' '), /couldn't label 1 employer email.*HTTP 503/);
+          assert.deepEqual(await claimed(m, ['kappa-2']), []);
+          labelFails = false;
+          const retried = await match(m);
+          assert.deepEqual(
+            retried.employerReplies.map((entry: { label: string }) => entry.label),
+            ['interview'],
+          );
+          assert.equal((await pings(m)).length, before + 4);
           const list = (await request(m, 'GET', '/api/jobs/companies?filter=replied')).json();
           assert.ok(
             list.companies.some(
@@ -3425,17 +3598,15 @@ test(
           });
           const before = (await pings(m)).length;
           const messages = 'LinkedIn <messages-noreply@linkedin.com>';
-          const result = await match(
-            m,
-            await mailOwner(m),
-            gmail(
-              email('msg-hal', messages, 'Synthetic hal-example sent you a new message', {
-                html: profileLink('hal-example'),
-              }),
-              email('msg-stranger', messages, 'Someone Else sent you a new message'),
-              email('msg-digest', messages, 'You have 3 new messages'),
-            ),
+          deliver(
+            'gmail-connection-one',
+            message('msg-hal', messages, 'Synthetic hal-example sent you a new message', {
+              html: profileLink('hal-example'),
+            }),
+            message('msg-stranger', messages, 'Someone Else sent you a new message'),
+            message('msg-digest', messages, 'You have 3 new messages'),
           );
+          const result = await match(m);
           assert.deepEqual(
             result.personReplies.map((entry: { personId: string }) => entry.personId),
             [hal.id],
@@ -3449,11 +3620,7 @@ test(
             /^Synthetic hal-example replied to you on LinkedIn \(Eta Mail Co\)\./,
           );
           assert.match(sent[0]!.text, /recipient=ACoAASyntheticMemberHHHH01/);
-          await match(
-            m,
-            await mailOwner(m),
-            gmail(email('msg-hal', messages, 'Synthetic hal-example sent you a new message')),
-          );
+          await match(m);
           assert.equal((await pings(m)).length, before + 1);
         },
       );
@@ -3461,34 +3628,55 @@ test(
       await t.test(
         'match_mail runs only for the owner’s own work and their Job mail schedule',
         async () => {
-          const quiet = (id: string) =>
-            gmail(email(id, 'News <news@example.test>', 'Hello', { auth: null }));
-          const scheduleOf = async (title: string) => {
+          const ownerWords = async () => {
+            const at = await mailOwner(m);
             const id = randomUUID();
             await db.pool.query(
-              `INSERT INTO schedules(id,owner_id,title,prompt,cron,time_zone) VALUES($1,$2,$3,'synthetic','*/30 8-22 * * *','UTC')`,
-              [id, m.ownerId, title],
+              `INSERT INTO messages(id,owner_id,role,text,thread_id) VALUES($1,$2,'user','Yes, check my job mail',$3)`,
+              [id, m.ownerId, at.threadId],
+            );
+            await db.pool.query('UPDATE turns SET message_id=$2 WHERE id=$1', [at.turnId, id]);
+            return {
+              at,
+              authority: {
+                messages: [{ id, at: new Date().toISOString(), text: 'Yes, check my job mail' }],
+              },
+              id,
+            };
+          };
+          const scheduleOf = async (title: string, authority: unknown) => {
+            const id = randomUUID();
+            await db.pool.query(
+              `INSERT INTO schedules(id,owner_id,title,prompt,cron,time_zone,authority) VALUES($1,$2,$3,'synthetic','*/30 8-22 * * *','UTC',$4)`,
+              [id, m.ownerId, title, JSON.stringify(authority)],
             );
             return id;
           };
-          const run = async (scheduleId: string | null) => {
+          const yes = await ownerWords();
+          const other = await ownerWords();
+          const jobMail = await scheduleOf('Job mail', yes.authority);
+          const summary = await scheduleOf('Inbox summary', other.authority);
+          const run = async (scheduleId: string | null, authority: unknown = yes.authority) => {
             const at = await turn(m, 'schedule');
             if (scheduleId)
               await db.pool.query(
-                `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone)
-                 VALUES($1,$2,$3,0,$4,'Synthetic',$5,now(),'UTC')`,
-                [randomUUID(), m.ownerId, scheduleId, randomUUID(), at.turnId],
+                `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority)
+                 VALUES($1,$2,$3,0,$4,'Synthetic',$5,now(),'UTC',$6)`,
+                [
+                  randomUUID(),
+                  m.ownerId,
+                  scheduleId,
+                  randomUUID(),
+                  at.turnId,
+                  JSON.stringify(authority),
+                ],
               );
             return at;
           };
-          const jobMail = await scheduleOf('Job mail');
-          const radar = await scheduleOf('Job radar');
-          const setup = {
-            action: 'mail_setup',
-            scheduleId: jobMail,
-            account: 'gmail-connection-one',
-          };
-          await assert.rejects(m.jobs.execute(await run(jobMail), setup), /owner message/);
+          await assert.rejects(
+            m.jobs.execute(await run(jobMail), { action: 'mail_setup', scheduleId: jobMail }),
+            /owner message/,
+          );
           await assert.rejects(
             m.jobs.execute(await mailOwner(m), {
               action: 'mail_setup',
@@ -3496,42 +3684,43 @@ test(
             }),
             /connected Gmail accounts/,
           );
-          const status = records(await m.jobs.execute(await mailOwner(m), setup));
+          await assert.rejects(
+            m.jobs.execute(yes.at, { action: 'mail_setup', scheduleId: summary }),
+            /wasn't set up from the owner's message in this chat/,
+          );
+          const status = records(
+            await m.jobs.execute(yes.at, { action: 'mail_setup', scheduleId: jobMail }),
+          );
           assert.deepEqual(
-            [status.account.address, status.schedule.id, status.offer],
-            ['sam.jobs@example.test', jobMail, false],
+            [status.account.address, status.schedule.id, status.offer, status.query],
+            ['sam.jobs@example.test', jobMail, false, undefined],
           );
-          assert.match(status.query, /from:invitations@linkedin\.com/);
-          assert.match(status.query, /from:kappamail\.test/);
-          assert.match(status.query, /after:\d+$/);
           const scheduled = await run(jobMail);
-          assert.equal(
-            records(
-              await m.jobs.execute(scheduled, { action: 'match_mail', emails: quiet('ok-1') }),
-            ).counts.ignored,
-            1,
-          );
+          assert.equal(typeof (await match(m, scheduled)).counts.emails, 'number');
+          assert.match(searches.at(-1)!, /from:kappamail\.test/);
           const task = await turn(m, 'task', { message: false, parent: scheduled.turnId });
-          assert.equal(
-            records(await m.jobs.execute(task, { action: 'match_mail', emails: quiet('ok-2') }))
-              .counts.ignored,
-            1,
-          );
+          assert.equal(typeof (await match(m, task)).counts.emails, 'number');
+          await db.pool.query('UPDATE messages SET hidden_at=now() WHERE id=$1', [yes.id]);
+          await assert.rejects(match(m, await run(jobMail)), /can't apply job mail/);
+          await db.pool.query('UPDATE messages SET hidden_at=NULL WHERE id=$1', [yes.id]);
           const event = await turn(m, 'event');
           const observer = await turn(m, 'event');
           await db.pool.query('UPDATE turns SET proactive=true WHERE id=$1', [observer.turnId]);
-          for (const other of [
-            await run(radar),
+          const searched = searches.length;
+          for (const blocked of [
+            await run(summary, other.authority),
+            await run(jobMail, null),
             await run(null),
             event,
             observer,
             await turn(m, 'task', { message: false, parent: event.turnId }),
           ])
             await assert.rejects(
-              m.jobs.execute(other, { action: 'match_mail', emails: quiet(`no-${randomUUID()}`) }),
+              match(m, blocked),
               (error: Error & { statusCode?: number }) =>
                 error.statusCode === 403 && /Job mail schedule/.test(error.message),
             );
+          assert.equal(searches.length, searched);
           const helperTurn = {
             execution: { parentRunId: 'helper' },
             context: { manage: async () => 'records' },
@@ -3541,15 +3730,6 @@ test(
             await assert.rejects(runJobsTool(helperTurn, { action }), /subagent can only read/);
           for (const action of ['mail_status', 'report'])
             assert.equal(await runJobsTool(helperTurn, { action }), 'records');
-          assert.equal(
-            (
-              await db.pool.query(
-                "SELECT count(*)::int AS n FROM job_events WHERE owner_id=$1 AND source='gmail' AND source_ref LIKE 'no-%'",
-                [m.ownerId],
-              )
-            ).rows[0].n,
-            0,
-          );
         },
       );
 
@@ -3739,8 +3919,13 @@ test(
         assert.equal(mine.account.id, 'gmail-connection-one');
         const theirs = (await request(n, 'GET', '/api/jobs/mail')).json();
         assert.deepEqual(
-          [theirs.account, theirs.schedule, theirs.lastRun, theirs.accounts],
-          [null, null, null, []],
+          [
+            theirs.account,
+            theirs.schedule,
+            theirs.lastRun,
+            theirs.accounts.map((entry: { id: string }) => entry.id),
+          ],
+          [null, null, null, ['gmail-connection-three']],
         );
         assert.equal(
           (
@@ -3751,15 +3936,23 @@ test(
           ).statusCode,
           404,
         );
-        const result = await match(
-          n,
-          await turn(n, 'user'),
-          gmail(
-            email('acc-slug', invitations, 'Synthetic ada-example accepted your invitation', {
-              html: profileLink('ada-example'),
-            }),
-          ),
+        await assert.rejects(match(n), /hasn't chosen the Gmail account/);
+        assert.equal(
+          (
+            await request(n, 'PUT', '/api/jobs/mail', {
+              account: 'gmail-connection-three',
+              revision: 0,
+            })
+          ).statusCode,
+          200,
         );
+        deliver(
+          'gmail-connection-three',
+          message('acc-slug', invitations, 'Synthetic ada-example accepted your invitation', {
+            html: profileLink('ada-example'),
+          }),
+        );
+        const result = await match(n);
         assert.deepEqual(
           [result.counts.seenBefore, result.accepted.length, result.toAsk.length],
           [0, 0, 1],
