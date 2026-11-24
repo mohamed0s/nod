@@ -28,6 +28,7 @@ import {
   type JobTemplatesView,
 } from '../shared/jobs.ts';
 import type { ArtifactService } from './artifacts.ts';
+import { logFailure } from './failure-log.ts';
 import { createJobCompanies, jobCompanyTables, linkPostings } from './job-companies.ts';
 import { createJobPostings, jobPostingTables } from './job-postings.ts';
 import { careerOpsFiles, scanConfig, scanSummary } from './jobs-files.ts';
@@ -1205,6 +1206,13 @@ export function createJobs(options: {
     applyLimits,
     registerRoutes,
     setup: () => setup(pool),
-    initialize: () => owned((client) => linkPostings(client, ownerId)),
+    initialize: async () => {
+      try {
+        return await owned((client) => linkPostings(client, ownerId));
+      } catch (error) {
+        logFailure('job_postings_link_failed', error);
+        return 0;
+      }
+    },
   };
 }
