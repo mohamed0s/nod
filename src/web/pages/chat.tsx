@@ -54,6 +54,7 @@ import { NodGlyph, Rise, prefersReducedMotion } from '../components/motion';
 import { LiveLine } from '../components/live-line';
 import { TaskChip, TaskLine, TaskStackCard } from '../components/task-stack';
 import { TaskCard } from './tasks';
+import { MainChatModel, NewChatModel, TaskChatModel } from '../components/chat-model';
 import { recordingSource } from '../lib/recording';
 import { money } from '../lib/money';
 import type { ImagePreview } from '../components/attachment-images';
@@ -377,6 +378,7 @@ export function Chat({
       ? {}
       : { task: 'main' };
   const [startedChat, setStartedChat] = useState<string>();
+  const [newChatModel, setNewChatModel] = useState<ModelSelection | null>(null);
   const { data: connections } = usePageData<Connection[]>('/api/apps');
   const { data: trust, refresh: refreshTrust } = usePageData<TrustView>('/api/trust');
   const trustRefreshKey = state.turns.map((turn) => `${turn.id}:${turn.status}`).join(',');
@@ -1619,6 +1621,7 @@ export function Chat({
           ...(questionAnswer ? { questionAnswer } : {}),
           ...(approvalAnswer ? { approvalAnswer } : {}),
           ...(startsChat ? { newChat: true } : {}),
+          ...(startsChat && newChatModel ? { chatModel: newChatModel } : {}),
         });
       submittedBody = messageBody;
       let body: string | FormData = messageBody;
@@ -2396,6 +2399,7 @@ export function Chat({
                   live={live.find((item) => item.taskId === chatTask.id)}
                   pinned
                 />
+                <TaskChatModel task={chatTask} />
                 {browserLink && (
                   <a
                     href={`/browser?task=${encodeURIComponent(chatTask.id)}`}
@@ -2406,6 +2410,11 @@ export function Chat({
                   </a>
                 )}
               </div>
+            )}
+            {startsChat ? (
+              <NewChatModel value={newChatModel} onChange={setNewChatModel} />
+            ) : (
+              !chatId && <MainChatModel />
             )}
             {unreadError && (
               <div className="history-control">

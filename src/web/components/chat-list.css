@@ -124,6 +124,12 @@
   align-self: flex-start;
   font-size: var(--text-control);
 }
+.conversation-column > .chat-model {
+  margin-bottom: 16px;
+}
+.chat-model > a {
+  margin-left: auto;
+}
 @media (max-width: 640px) {
   .chat-split {
     flex-direction: column;

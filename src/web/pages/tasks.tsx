@@ -302,7 +302,7 @@ export function TaskCard({
                 )}
               </ul>
             )}
-            {!closed(task) && task.work && <WorkModel task={task} />}
+            {!pinned && !closed(task) && task.work && <WorkModel task={task} />}
             {(task.revision ?? 0) > (task.appliedRevision ?? 0) && !closed(task) && (
               <p className="task-preview-meta">Owner update queued</p>
             )}
