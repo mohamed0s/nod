@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Pool, PoolClient } from 'pg';
 import {
   createCipheriv,
+  createDecipheriv,
   createHash,
   createHmac,
   pbkdf2,
@@ -22,6 +23,7 @@ import type {
 import { linkedInPerson, type JobCompaniesHelper } from './job-companies.ts';
 import { clean } from './jobs-parsers.ts';
 import { failure, parse, type Query } from './jobs-shared.ts';
+import { validateRequestText } from './request-text.ts';
 
 export const jobHelperTables = `
   CREATE TABLE IF NOT EXISTS job_helper_tokens (
@@ -128,6 +130,57 @@ async function pairingKeys(code: string, clientNonce: string, serverNonce: strin
   return { proof: key('proof'), encrypt: key('encrypt'), mac: key('mac') };
 }
 
+export const helperRoutes = new Set([
+  '/api/helper-pairing/start',
+  '/api/helper-pairing/finish',
+  '/api/helper/hello',
+  '/api/helper/company',
+  '/api/helper/invites',
+  '/api/helper/accepted',
+  '/api/helper/people/:id/status',
+  '/api/helper/profile',
+  '/api/helper/connections',
+  '/api/helper/cv',
+  '/api/helper/companies/:id/no-luck',
+]);
+
+export function helperKeys(base: Buffer) {
+  const key = (label: string) => createHmac('sha256', base).update(label).digest();
+  return { mac: key('nod-helper-mac'), encrypt: key('nod-helper-encrypt') };
+}
+
+function seal(key: Buffer, plain: Buffer, context: string) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  cipher.setAAD(Buffer.from(context));
+  const data = Buffer.concat([cipher.update(plain), cipher.final(), cipher.getAuthTag()]);
+  return JSON.stringify({ iv: iv.toString('base64url'), data: data.toString('base64url') });
+}
+
+const envelope = z
+  .object({
+    iv: z.string().regex(/^[A-Za-z0-9_-]{16}$/),
+    data: z
+      .string()
+      .regex(/^[A-Za-z0-9_-]{22,}$/)
+      .max(120_000),
+  })
+  .strict();
+
+function open(key: Buffer, value: unknown, context: string) {
+  const parsed = envelope.safeParse(value);
+  if (!parsed.success) return null;
+  const data = Buffer.from(parsed.data.data, 'base64url');
+  try {
+    const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(parsed.data.iv, 'base64url'));
+    decipher.setAAD(Buffer.from(context));
+    decipher.setAuthTag(data.subarray(data.length - 16));
+    return Buffer.concat([decipher.update(data.subarray(0, data.length - 16)), decipher.final()]);
+  } catch {
+    return null;
+  }
+}
+
 export function createJobHelper(options: {
   pool: Pool;
   ownerId: string;
@@ -137,11 +190,18 @@ export function createJobHelper(options: {
   owned: <T>(operation: (client: PoolClient) => Promise<T>) => Promise<T>;
 }) {
   const { pool, ownerId, companies } = options;
-  type Signed = { id: string; key: Buffer; signature: string; time: string };
+  type Signed = {
+    id: string;
+    keys: ReturnType<typeof helperKeys>;
+    signature: string;
+    time: string;
+  };
   const signed = new WeakMap<FastifyRequest, Signed>();
+  const authentic = new WeakSet<FastifyRequest>();
   const verified = new WeakSet<FastifyRequest>();
   const bodies = new WeakMap<FastifyRequest, string>();
   const replays = new Map<string, number>();
+  const windows = new Map<string, { count: number; reset: number }>();
   const challenges = new Map<
     string,
     { clientNonce: string; extensionId: string; expires: number }
@@ -152,10 +212,39 @@ export function createJobHelper(options: {
   const routeKind = (request: FastifyRequest) =>
     (request.routeOptions.config as { helper?: unknown } | undefined)?.helper;
 
+  const busy = (message: string) => failure(message, 429);
+
+  function limit(name: string, max: number) {
+    const now = Date.now();
+    if (windows.size > 1000)
+      for (const [key, value] of windows) if (value.reset <= now) windows.delete(key);
+    if (windows.size > 5000) throw busy('Nod is getting too many helper requests. Wait a minute.');
+    const window = windows.get(name);
+    if (!window || window.reset <= now) windows.set(name, { count: 1, reset: now + 60_000 });
+    else if (++window.count > max)
+      throw busy('Nod is getting too many helper requests. Wait a minute.');
+  }
+
+  const requestContext = (request: FastifyRequest, time: string) =>
+    ['nod-helper-request', request.method, request.headers.host ?? '', request.url, time].join(
+      '\n',
+    );
+
   async function exempt(request: FastifyRequest) {
     const kind = routeKind(request);
     if (kind !== 'pairing' && kind !== 'paired') return false;
+    if (!helperRoutes.has(request.routeOptions.url ?? '')) return false;
     if (request.method !== 'POST') throw failure('Helper routes take only POST requests.', 405);
+    const socket = request.raw.socket;
+    if (
+      socket.localAddress !== '127.0.0.1' ||
+      request.headers.host !== `127.0.0.1:${socket.localPort}`
+    )
+      throw failure(
+        'Helper requests must reach Nod at its 127.0.0.1 address, by that address.',
+        403,
+      );
+    limit(`remote:${request.ip}`, 1200);
     if (kind === 'pairing') {
       const site = request.headers['sec-fetch-site'];
       if (request.headers.origin !== undefined || (site !== undefined && site !== 'none'))
@@ -180,6 +269,7 @@ export function createJobHelper(options: {
         'This helper request is not signed. Pair the helper again on the Jobs page.',
         401,
       );
+    limit(`key:${id}`, 600);
     if (Math.abs(Date.now() - Number(time)) > clockSkew)
       throw failure(
         "This helper request's time is more than a minute away from Nod's clock. Check the computer's time.",
@@ -196,7 +286,12 @@ export function createJobHelper(options: {
         'This helper is not paired, or its pairing was revoked. Pair it again on the Jobs page.',
         401,
       );
-    signed.set(request, { id: row.id, key: Buffer.from(row.token_hash, 'hex'), signature, time });
+    signed.set(request, {
+      id: row.id,
+      keys: helperKeys(Buffer.from(row.token_hash, 'hex')),
+      signature,
+      time,
+    });
     return true;
   }
 
@@ -205,12 +300,9 @@ export function createJobHelper(options: {
     const pending = signed.get(request);
     if (!pending)
       throw failure('This helper is not paired. Pair it again on the Jobs page, Helper tab.', 401);
-    const expected = mac(pending.key, [
-      'nod-helper-request',
-      request.method,
-      request.headers.host ?? '',
-      request.url,
-      pending.time,
+    const context = requestContext(request, pending.time);
+    const expected = mac(pending.keys.mac, [
+      context,
       sha256(bodies.get(request) ?? '').toString('hex'),
     ]);
     if (!same(pending.signature, expected))
@@ -218,12 +310,25 @@ export function createJobHelper(options: {
         "This helper request's signature doesn't match. Pair the helper again on the Jobs page.",
         401,
       );
+    authentic.add(request);
     const now = Date.now();
-    if (replays.size > 2000)
+    if (replays.size > 1000)
       for (const [signature, expires] of replays) if (expires < now) replays.delete(signature);
+    if (replays.size > 10_000)
+      throw busy('Nod is getting too many helper requests. Wait a minute.');
     if (replays.has(pending.signature))
       throw failure('This helper request was already received once.', 401);
     replays.set(pending.signature, now + 2 * clockSkew);
+    const plain = open(pending.keys.encrypt, request.body, context);
+    if (!plain) throw failure("This helper request's body couldn't be decrypted.", 400);
+    let body: unknown;
+    try {
+      body = JSON.parse(plain.toString('utf8'));
+    } catch {
+      throw failure("This helper request's body isn't JSON.", 400);
+    }
+    validateRequestText(body);
+    request.body = body;
     verified.add(request);
     await pool.query(
       `UPDATE job_helper_tokens SET last_used_at=now()
@@ -232,26 +337,47 @@ export function createJobHelper(options: {
     );
   }
 
-  function signReply(request: FastifyRequest, reply: FastifyReply, payload: unknown) {
+  function sealReply(request: FastifyRequest, reply: FastifyReply, payload: unknown) {
     const pending = signed.get(request);
-    if (!pending || !verified.has(request)) return payload;
+    if (!pending || !authentic.has(request)) return payload;
     const body =
-      typeof payload === 'string' || Buffer.isBuffer(payload)
-        ? payload
-        : payload === null || payload === undefined
-          ? ''
-          : null;
+      typeof payload === 'string'
+        ? Buffer.from(payload)
+        : Buffer.isBuffer(payload)
+          ? payload
+          : payload === null || payload === undefined
+            ? Buffer.alloc(0)
+            : null;
     if (body === null) return payload;
+    const header = (name: string) => {
+      const value = reply.getHeader(name);
+      return value === undefined ? '' : String(value);
+    };
+    const sealed = seal(
+      pending.keys.encrypt,
+      Buffer.from(
+        JSON.stringify({
+          type: header('content-type'),
+          disposition: header('content-disposition'),
+          retryAfter: header('retry-after'),
+          body: body.toString('base64'),
+        }),
+      ),
+      `nod-helper-response\n${pending.signature}`,
+    );
+    reply.removeHeader('content-disposition');
+    reply.removeHeader('retry-after');
+    reply.header('content-type', 'application/json; charset=utf-8');
     reply.header(
       'x-nod-signature',
-      mac(pending.key, [
+      mac(pending.keys.mac, [
         'nod-helper-response',
         pending.signature,
         String(reply.statusCode),
-        sha256(body).toString('hex'),
+        sha256(sealed).toString('hex'),
       ]),
     );
-    return payload;
+    return sealed;
   }
 
   function helperOf(request: FastifyRequest) {
@@ -261,14 +387,24 @@ export function createJobHelper(options: {
     return pending.id;
   }
 
-  async function used(client: Query, kind: 'apply' | 'company', tokenId?: string) {
-    const { rows } = await client.query<{ count: number }>(
-      `SELECT count(*)::int AS count FROM job_helper_uses
+  async function capped(
+    client: Query,
+    reply: FastifyReply,
+    kind: 'apply' | 'company',
+    max: number,
+    message: string,
+    tokenId?: string,
+  ) {
+    const { rows } = await client.query<{ created_at: Date }>(
+      `SELECT created_at FROM job_helper_uses
        WHERE owner_id=$1 AND kind=$2 AND ($3::uuid IS NULL OR token_id=$3)
-         AND created_at>now()-interval '1 day'`,
+         AND created_at>now()-interval '1 day' ORDER BY created_at`,
       [ownerId, kind, tokenId ?? null],
     );
-    return rows[0]?.count ?? 0;
+    if (rows.length < max) return;
+    const frees = rows[rows.length - max]!.created_at.getTime() + 86_400_000;
+    reply.header('retry-after', String(Math.max(1, Math.ceil((frees - Date.now()) / 1000))));
+    throw failure(message, 429);
   }
 
   const use = (client: Query, kind: 'apply' | 'company', tokenId: string) =>
@@ -302,13 +438,16 @@ export function createJobHelper(options: {
     };
   }
 
+  const noCode = () =>
+    failure(
+      'No pairing code is waiting. On the Jobs page, open Helper, select Pair the Edge panel, then run the script again.',
+      410,
+    );
+
   function waiting() {
     if (!pairing || pairing.expires <= Date.now()) {
       pairing = null;
-      throw failure(
-        'No pairing code is waiting. On the Jobs page, open Helper, select Pair the Edge panel, then run the script again.',
-        410,
-      );
+      throw noCode();
     }
     return pairing;
   }
@@ -348,7 +487,7 @@ export function createJobHelper(options: {
         409,
       );
     const keys = await pairingKeys(current.code, input.clientNonce, input.serverNonce);
-    if (pairing !== current) waiting();
+    if (pairing !== current) throw noCode();
     const proof = mac(keys.proof, [input.extensionId, input.clientNonce, input.serverNonce]);
     if (!same(input.proof, proof)) {
       current.tries += 1;
@@ -386,6 +525,15 @@ export function createJobHelper(options: {
   }
 
   function registerRoutes(app: FastifyInstance) {
+    app.addHook('onRoute', (route) => {
+      if (
+        (route.config as { helper?: unknown } | undefined)?.helper !== undefined &&
+        !(route.method === 'POST' && helperRoutes.has(route.url))
+      )
+        throw new Error(
+          `Only the job search helper's own routes may skip the owner key, not ${String(route.method)} ${route.url}.`,
+        );
+    });
     app.get('/api/jobs/helper', view);
     app.post('/api/jobs/helper/pairing', async (): Promise<JobHelperPairing> => {
       const code = Array.from({ length: 8 }, () => codeLetters[randomInt(codeLetters.length)]).join(
@@ -429,7 +577,7 @@ export function createJobHelper(options: {
       );
       scope.addHook('preValidation', checkSignature);
       scope.addHook('onSend', async (request, reply, payload) =>
-        signReply(request, reply, payload),
+        sealReply(request, reply, payload),
       );
 
       const pairingRoute = {
@@ -447,7 +595,7 @@ export function createJobHelper(options: {
       );
 
       const helperRoute = {
-        bodyLimit: 64 * 1024,
+        bodyLimit: 160 * 1024,
         config: {
           helper: 'paired',
           rateLimit: {
@@ -477,7 +625,7 @@ export function createJobHelper(options: {
         ]);
         return { company, invites: { ...counts, ...limits } };
       });
-      scope.post('/api/helper/invites', helperRoute, async (request) => {
+      scope.post('/api/helper/invites', helperRoute, async (request, reply) => {
         const token = helperOf(request);
         const input = parse(
           z
@@ -491,10 +639,13 @@ export function createJobHelper(options: {
         );
         return options.owned(async (client) => {
           const known = await companies.find(client, input.company);
-          if (!known && (await used(client, 'company')) >= dailyCompanies)
-            throw failure(
-              `The panel added ${dailyCompanies} new companies in the last day. Add more in Nod's chat, or try again tomorrow.`,
-              429,
+          if (!known)
+            await capped(
+              client,
+              reply,
+              'company',
+              dailyCompanies,
+              `The panel added ${dailyCompanies} new companies in the last day. It sends this invite once the limit frees up; add the company in Nod's chat to save it sooner.`,
             );
           const result = await companies.invites(client, input.company, input.people);
           if (!known) await use(client, 'company', token);
@@ -570,7 +721,7 @@ export function createJobHelper(options: {
       scope.post<{ Params: { id: string } }>(
         '/api/helper/companies/:id/no-luck',
         helperRoute,
-        async (request): Promise<JobNoLuckResult> => {
+        async (request, reply): Promise<JobNoLuckResult> => {
           const token = helperOf(request);
           const { noLuck, revision } = parse(
             z
@@ -584,10 +735,14 @@ export function createJobHelper(options: {
             'The no-luck choice',
           );
           const run = applying.then(async () => {
-            if (noLuck === true && (await used(pool, 'apply', token)) >= dailyApplyChats)
-              throw failure(
+            if (noLuck === true)
+              await capped(
+                pool,
+                reply,
+                'apply',
+                dailyApplyChats,
                 `This panel started ${dailyApplyChats} apply chats in the last day. Tick the company on Nod's Jobs page to start more.`,
-                429,
+                token,
               );
             const result = await companies.markNoLuck(request.params.id, noLuck, revision);
             if (result.apply?.state === 'started') await use(pool, 'apply', token);
