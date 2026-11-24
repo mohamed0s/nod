@@ -2886,6 +2886,7 @@ test(
           const runChecked = await checked(runMessage, runTask);
           assert.ok(runChecked.includes('Synthetic reply inside a run'));
           assert.ok(runChecked.includes('Synthetic main chat follow-up'));
+          assert.ok(!runChecked.some((text) => /bicycles|canoes/.test(text)));
           const languages: string[][] = [];
           const communication = createCommunication({
             pool: db.pool,
