@@ -32,6 +32,7 @@ const untraced = new Set([
   'ideas',
   'classify',
   'title',
+  'referral',
   'check',
 ]);
 
@@ -172,7 +173,8 @@ export function createPiMemoryCurator(options: {
         task === 'attention' ||
         task === 'check' ||
         task === 'activity' ||
-        task === 'title';
+        task === 'title' ||
+        task === 'referral';
       const turnBound =
         signal !== undefined && ['review', 'access', 'skill', 'remember'].includes(task);
       if (options.resolve) loaded = undefined;
@@ -340,7 +342,9 @@ export function createPiMemoryCurator(options: {
                   ? 'The selected model is unavailable.'
                   : task === 'title'
                     ? 'The chat title model is unavailable.'
-                    : 'The memory model is unavailable.';
+                    : task === 'referral'
+                      ? 'The referral message model is unavailable.'
+                      : 'The memory model is unavailable.';
         const detail =
           reply.stopReason === 'error' && reply.errorMessage
             ? ` The provider said: ${reply.errorMessage.trim().slice(0, 300)}`
