@@ -2056,7 +2056,12 @@ async function initializeApplication(
       } else await integrations.prepare(ownerId, action, args, undefined, undefined, false, client);
     },
     (reply) => ledger.forOwner(() => trust.answer(reply)),
-    communication.describe,
+    (proposal, signal) =>
+      proposal.action === 'NOD_agent_update'
+        ? agents.describe(proposal, signal, communication.describe, (channel, text, literal) =>
+            Boolean(channels?.canDeliverLiteral(channel, text, literal)),
+          )
+        : communication.describe(proposal, signal),
     captureAnalytics,
     createErrorRedactor(secrets),
     (input, signal) => ledger.forOwner(() => trust.classifyRepeatedAction(input, signal)),
@@ -2830,23 +2835,17 @@ async function initializeApplication(
       audioReplies: async () => (await speechPreferences.get()).speechReply,
       manage: async (turn, action, args, { admit, signal, ...provenance }) => {
         if (action === 'pages') return pages.execute({ ...turn, signal }, args);
-        if (action === 'agent_update') {
-          const { input, current } = await agents.review(turn.turnId, args);
-          const verdict = await trust.check(
-            turn,
-            'NOD_agent_update',
-            { ...input, currentAgent: current },
-            signal,
-          );
-          return approvals.request(turn, 'NOD_agent_update', input, {
-            ...provenance,
-            signal,
-            allowed: !verdict.confirm,
-            ...(verdict.confirm ? {} : { basis: verdict.basis }),
-            admit,
-            details: { current, ...(verdict.confirm ? { reason: verdict.reason } : {}) },
+        if (action === 'agent_update')
+          return agents.request(turn.turnId, args, {
+            check: (input) => trust.check(turn, 'NOD_agent_update', input, signal),
+            ask: (input, decision) =>
+              approvals.request(turn, 'NOD_agent_update', input, {
+                ...provenance,
+                signal,
+                admit,
+                ...decision,
+              }),
           });
-        }
         if (action === 'jobs')
           return jobs.execute(turn, args, {
             signal,

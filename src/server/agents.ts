@@ -4,8 +4,15 @@ import type { Pool, PoolClient } from 'pg';
 import { z } from 'zod';
 import { agentLimits, type Agent } from '../shared/agents.ts';
 import { afterCommit, transaction } from './transaction.ts';
+import type { ApprovalDescription, ApprovalPresentation } from './approvals.ts';
+import { channelText } from './channel-text.ts';
+import { publicText } from './communication.ts';
+import type { TrustReason } from './trust.ts';
+import type { TrustBasis } from './trust-basis.ts';
 
 type Client = Pick<PoolClient, 'query'>;
+
+const hidden = /(?![\u200c\u200d])\p{Cf}/u;
 
 const oneLine = (max: number) =>
   z
@@ -188,7 +195,16 @@ export function createAgents(options: {
     );
   }
 
-  async function review(turnId: string, raw: Record<string, unknown>) {
+  async function taken(client: Client, id: string, name: string | undefined) {
+    if (name === undefined) return;
+    const other = await client.query(
+      'SELECT 1 FROM agents WHERE owner_id=$1 AND lower(name)=lower($2) AND id<>$3',
+      [ownerId, name, id],
+    );
+    if (other.rowCount) throw failure('Another agent already has this name.', 409);
+  }
+
+  async function proposed(turnId: string, raw: Record<string, unknown>) {
     const input = profile.partial().strict().parse(raw);
     const agent = (
       await pool.query<{
@@ -213,23 +229,106 @@ export function createAgents(options: {
       Object.entries(input).filter(
         ([key, value]) => current[key as keyof typeof current] !== value,
       ),
-    );
+    ) as Partial<z.infer<typeof profile>>;
     if (!Object.keys(changes).length) throw new Error('Choose a detail of the agent to change.');
+    for (const [key, value] of Object.entries(changes))
+      if (publicText(value) !== value || hidden.test(value))
+        throw new Error(
+          `The new ${key} has a secret, a private Nod link or invisible characters, so the owner could not read it exactly before approving. Write it without them.`,
+        );
+    await taken(pool, id, changes.name);
     return { input: { id, revision, ...changes }, current };
   }
 
+  async function request(
+    turnId: string,
+    args: Record<string, unknown>,
+    review: {
+      check(
+        input: Record<string, unknown>,
+      ): Promise<{ confirm: false; basis: TrustBasis } | { confirm: true; reason: TrustReason }>;
+      ask(
+        input: Record<string, unknown>,
+        decision: { allowed: boolean; basis?: TrustBasis; details: Record<string, unknown> },
+      ): Promise<unknown>;
+    },
+  ) {
+    const { input, current } = await proposed(turnId, args);
+    const verdict = await review.check({ ...input, currentAgent: current });
+    const allowed =
+      !verdict.confirm && (!('instructions' in input) || verdict.basis.kind === 'message');
+    return review.ask(input, {
+      allowed,
+      ...(!verdict.confirm && allowed ? { basis: verdict.basis } : {}),
+      details: { current, ...(verdict.confirm ? { reason: verdict.reason } : {}) },
+    });
+  }
+
+  async function describe(
+    proposal: ApprovalDescription,
+    signal: AbortSignal | undefined,
+    base: (proposal: ApprovalDescription, signal?: AbortSignal) => Promise<ApprovalPresentation>,
+    canDeliverLiteral: (channel: string, text: string, literal: string) => boolean,
+  ): Promise<ApprovalPresentation> {
+    const change = approvedChange.parse(proposal.args);
+    const literal = [
+      change.name !== undefined && `Name: ${change.name}`,
+      change.description !== undefined && `What it's for: ${change.description}`,
+      change.instructions !== undefined && `Instructions:\n${change.instructions}`,
+    ]
+      .filter(Boolean)
+      .join('\n');
+    const fence = '`'.repeat(
+      Math.max(3, ...(literal.match(/`+/g) ?? []).map((run) => run.length + 1)),
+    );
+    const presentation = await base(proposal, signal);
+    const text = `${presentation.question}\n\nThe exact new text:\n\n${fence}\n${literal}\n${fence}`;
+    const channel = proposal.channel;
+    const shown =
+      !channel ||
+      channel === 'web' ||
+      (channelText(text).text === text.trim() && canDeliverLiteral(channel, text, literal));
+    return {
+      ...presentation,
+      question: shown
+        ? text
+        : `${presentation.question}\n\nOpen this chat in the Nod app to read the exact new text before you answer.`,
+    };
+  }
+
   async function validate(raw: Record<string, unknown>, client: Client = pool) {
-    const { id, revision } = approvedChange.parse(raw);
+    const { id, revision, name } = approvedChange.parse(raw);
     const current = await client.query(
       'SELECT 1 FROM agents WHERE id=$1 AND owner_id=$2 AND revision=$3',
       [id, ownerId, revision],
     );
     if (!current.rowCount) throw failure('This agent changed. Review it before asking again.', 409);
+    await taken(client, id, name);
   }
 
   async function apply(raw: Record<string, unknown>, client: Client) {
     const { id, revision, ...input } = approvedChange.parse(raw);
     return { agent: await change(client, id, revision, input), changed: Object.keys(input) };
+  }
+
+  async function forTopic(topic: {
+    provider: string;
+    account_id: string;
+    sender_id: string;
+    topic_id: string | null;
+  }) {
+    if (!topic.topic_id) return undefined;
+    return (
+      await pool.query<{ id: string }>(
+        `SELECT a.id FROM channel_topics c
+         JOIN agents a ON a.owner_id=c.owner_id AND a.chat_id=c.task_id
+         JOIN tasks t ON t.id=c.task_id AND t.owner_id=c.owner_id
+         JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
+         JOIN threads th ON th.id=u.thread_id AND th.owner_id=u.owner_id AND th.archived_at IS NOT NULL
+         WHERE c.owner_id=$1 AND c.provider=$2 AND c.account_id=$3 AND c.sender_id=$4 AND c.topic_id=$5`,
+        [ownerId, topic.provider, topic.account_id, topic.sender_id, topic.topic_id],
+      )
+    ).rows[0]?.id;
   }
 
   function registerRoutes(app: FastifyInstance) {
@@ -254,5 +353,16 @@ export function createAgents(options: {
     });
   }
 
-  return { initialize, list, context, attach, review, validate, apply, registerRoutes };
+  return {
+    initialize,
+    list,
+    context,
+    attach,
+    request,
+    describe,
+    validate,
+    apply,
+    forTopic,
+    registerRoutes,
+  };
 }
