@@ -138,13 +138,13 @@ The panel is the extension in the `extensions/linkedin-helper` folder of your No
 
 1. In Edge, open `edge://extensions`, turn on **Developer mode**, select **Load unpacked** and choose the `extensions\linkedin-helper` folder. You do this once.
 2. On the **Jobs** page, open **Helper** and select **Pair the Edge panel**. Nod shows a one-time code and copies it.
-3. From your checkout, run `powershell -ExecutionPolicy Bypass -File scripts\windows\pair-helper.ps1`. It takes the code from the clipboard, or asks for it, finds Nod on this computer and saves the panel's key with Nod's address in `extensions\linkedin-helper\pairing.json`.
+3. From your checkout, run `powershell -ExecutionPolicy Bypass -File scripts\windows\pair-helper.ps1`. It takes the code from the clipboard, or asks for it, and saves the panel's key with Nod's address in `extensions\linkedin-helper\.pairing.json`.
 
 Select the extension's button in Edge's toolbar to open the panel. It connects within 20 seconds.
 
-The key never appears on screen or in the terminal. Git ignores `pairing.json`, and only your Windows user can open it. Nod keeps only a hash of the key. A code works once, for 10 minutes, and five wrong codes cancel it. Pairing again replaces the panel's old key, and **Revoke** on the **Helper** tab cuts a panel off at once.
+The script finds the desktop app from the port file the app writes to its profile at each start, and stops if another program holds that port. It proves it has the code without sending it, and Nod sends the key back encrypted under the code, so a program pretending to be Nod learns neither. The key never appears on screen or in the terminal, and it never travels after pairing: the panel signs each request with it. Git ignores `.pairing.json`, only your Windows user can open it, and Nod's own **Local files** never read it. A code works once, for 10 minutes, and five wrong codes cancel it. Pairing again replaces the panel's old key, and **Revoke** on the **Helper** tab cuts a panel off at once.
 
-The desktop app uses port `4310` when it's free, so the panel finds Nod after every restart. If Nod had to take another port, the panel says Nod isn't answering: run the script again. A source run at `http://localhost:4310` works too. After you update Nod, select **Reload** on the extension in `edge://extensions`.
+The desktop app uses port `4310` when it's free, so the panel finds Nod after every restart. If Nod had to take another port, or another program answers at the panel's address, the panel says it can't confirm Nod and sends nothing: run the script again. For a source run, pass its address: `pair-helper.ps1 -Nod http://localhost:4310`. The panel works only with a Nod on this computer, not with a self-hosted server that has a public address or a server token. After you update Nod, select **Reload** on the extension in `edge://extensions`.
 
 ### What the panel shows
 
@@ -154,6 +154,8 @@ The desktop app uses port `4310` when it's free, so the panel finds Nod after ev
 
 **CV** downloads your main CV, so you can drag it from Edge's downloads into the LinkedIn chat. You paste the message and attach the CV yourself: the panel never sends anything. Arabic and other right-to-left messages are shown right to left, and the panel follows Edge's light or dark theme.
 
+When Nod isn't running, the panel keeps the invites it saw and sends them once Nod answers. It retries an invite Nod couldn't save for a few hours, and drops one only when Nod refuses it, telling you which. Each paired panel can start at most 5 apply chats and add at most 30 new companies in a day; past that, tick the company on the **Companies** tab, or tell Nod in chat.
+
 ### What it reads
 
 The panel only reads pages you open in your own Edge, while you look at them:
@@ -161,12 +163,12 @@ The panel only reads pages you open in your own Edge, while you look at them:
 | Page you open              | What it reads                                                                                                          | What Nod saves                                                                                    |
 | -------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | A company's **People** tab | A card whose button turns to **Pending** after you invite: the name, headline and profile link, and the company's name | The person, as invited under that company. Someone Nod already has keeps their status and company |
-| A person's profile         | The profile link and the member ID in the page's own **Message** link                                                  | The member ID, only for someone you invited, so **Message** can open a chat with them             |
+| A person's profile         | The profile link and the member ID in the page's own **Message** link to `linkedin.com/messaging/compose`              | The member ID, only for someone you invited who has none yet, so **Message** can open a chat      |
 | Your connections list      | The profile links on the page                                                                                          | People you invited who appear there become accepted. Nobody else is saved                         |
 
 The connections list is a backup check for accepts, on until you turn it off with the switch at the bottom of the panel. A later update spots accepts mainly from LinkedIn's "accepted your invitation" emails.
 
-Nod treats everything the panel reads as data from LinkedIn, never as your words. Names and headlines are saved as plain text, profile links must be `https://www.linkedin.com/in/…`, and anything too long or shaped differently is refused.
+Nod treats everything the panel reads as data from LinkedIn, never as your words. Names and headlines are saved as plain text, profile links must be `https://www.linkedin.com/in/…`, and anything too long or shaped differently is refused. What the panel reads never replaces a member ID Nod already has or joins two people into one; Nod refuses it and keeps both as they are.
 
 ### What it never does
 
