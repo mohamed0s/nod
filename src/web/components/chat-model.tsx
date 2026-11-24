@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useEffect, type ReactNode } from 'react';
 import type { Task } from '../../shared/contracts';
 import { appPages } from '../../shared/app-links';
 import { routeModel, type ModelSelection, type WorkUsageResponse } from '../../shared/models';
@@ -66,8 +66,22 @@ export function NewChatModel({
   onChange(value: ModelSelection | null): void;
 }) {
   const { data } = useModels();
+  const chosen = Boolean(
+    value &&
+    data?.connections.some(
+      (item) =>
+        item.id === value.connectionId &&
+        item.status === 'connected' &&
+        item.models.some(
+          (model) =>
+            model.id === value.modelId && !model.audio && model.efforts.includes(value.effort),
+        ),
+    ),
+  );
+  useEffect(() => {
+    if (data && value && !chosen) onChange(null);
+  }, [data, value, chosen]);
   if (!data?.selection) return null;
-  const chosen = value && data.connections.some((item) => item.id === value.connectionId);
   const target: ModelTarget = {
     title: 'Model for this chat',
     value: chosen ? value : null,
