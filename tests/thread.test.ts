@@ -2458,6 +2458,29 @@ test(
           });
           assert.equal(await approvalStatus(), 'confirmed');
           await waitFor(settled(confirmed.turnId));
+          const asked = await chatMessages.submit('Synthetic chat approval', [], {
+            sessionId: randomUUID(),
+          });
+          await waitFor(settled(asked.turnId));
+          const hidden = (
+            await db.pool.query<{ id: string; confirmation_message_id: string }>(
+              'SELECT id,confirmation_message_id FROM approvals WHERE turn_id=$1',
+              [asked.turnId],
+            )
+          ).rows[0]!;
+          const hiddenStatus = async () =>
+            (await db.pool.query('SELECT status FROM approvals WHERE id=$1', [hidden.id])).rows[0]
+              .status;
+          assert.notEqual((await chatMessages.answer(consent))?.approvalId, hidden.id);
+          const plain = await chatMessages.submit(consent);
+          assert.equal(await hiddenStatus(), 'pending');
+          assert.equal(await turnStatus(asked.turnId), 'waiting');
+          await waitFor(settled(plain.turnId));
+          const answered = await chatMessages.submit(consent, [], {
+            replyToMessageId: hidden.confirmation_message_id,
+          });
+          assert.equal(await hiddenStatus(), 'confirmed');
+          await waitFor(settled(answered.turnId));
         },
       );
 
@@ -2622,6 +2645,74 @@ test(
             main.some(({ id }) => id === update),
             false,
           );
+        },
+      );
+
+      await t.test(
+        'a web message without a reply pairs only with a Nod message from its own chat',
+        async (t) => {
+          const { recentOwnerWords } = await import('../src/server/owner-instructions.ts');
+          const current = (await thread.activeThread(db.pool)).id;
+          const [askTurn, pairTask, pairTurn, yesTurn, freshTask, freshTurn] = [
+            randomUUID(),
+            randomUUID(),
+            randomUUID(),
+            randomUUID(),
+            randomUUID(),
+            randomUUID(),
+          ];
+          const turns = [askTurn, pairTurn, yesTurn, freshTurn];
+          t.after(async () => {
+            await db.pool.query('UPDATE turns SET task_id=NULL WHERE id=ANY($1::uuid[])', [turns]);
+            await db.pool.query('DELETE FROM tasks WHERE id=ANY($1::uuid[])', [
+              [pairTask, freshTask],
+            ]);
+            await db.pool.query('DELETE FROM messages WHERE turn_id=ANY($1::uuid[])', [turns]);
+            await db.pool.query('DELETE FROM turns WHERE id=ANY($1::uuid[])', [turns]);
+          });
+          const addTurn = (id: string, session: string) =>
+            db.pool.query(
+              "INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,background) VALUES($1,$2,$3,$4,'user','Synthetic pairing','succeeded',$5)",
+              [id, ownerId, current, session, session !== current],
+            );
+          const addMessage = async (turnId: string, role: string, text: string) => {
+            const id = randomUUID();
+            await db.pool.query(
+              'INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id) VALUES($1,$2,$3,$4,$5,$6)',
+              [id, ownerId, role, text, current, turnId],
+            );
+            return id;
+          };
+          const addChat = async (task: string, turn: string, text: string) => {
+            await addTurn(turn, task);
+            const start = await addMessage(turn, 'user', text);
+            await db.pool.query(
+              "INSERT INTO tasks(id,owner_id,turn_id,session_id,source_message_id,title,done_when,now_text) VALUES($1,$2,$3,$1,$4,$5,'Checked','Checking')",
+              [task, ownerId, turn, start, text],
+            );
+            await db.pool.query('UPDATE turns SET task_id=$1 WHERE id=$2', [task, turn]);
+            return start;
+          };
+          const checked = async (messageId: string, task: string | null) =>
+            (
+              (await recentOwnerWords(db.pool, ownerId, current, [messageId], task)).words
+                .userMessages ?? []
+            )
+              .filter(({ id }) => id === messageId)
+              .map(({ text, replyTo }) => ({ text, replyTo }));
+          await addTurn(askTurn, current);
+          await addMessage(askTurn, 'assistant', 'Shall I archive the synthetic receipts?');
+          await addChat(pairTask, pairTurn, 'Synthetic pairing chat');
+          await addMessage(pairTurn, 'assistant', 'Shall I sell the synthetic bicycle?');
+          await addTurn(yesTurn, current);
+          const yes = await addMessage(yesTurn, 'user', 'yes');
+          assert.deepEqual(await checked(yes, null), [
+            { text: 'yes', replyTo: 'Shall I archive the synthetic receipts?' },
+          ]);
+          const fresh = await addChat(freshTask, freshTurn, 'yes, do it');
+          assert.deepEqual(await checked(fresh, freshTask), [
+            { text: 'yes, do it', replyTo: undefined },
+          ]);
         },
       );
 
