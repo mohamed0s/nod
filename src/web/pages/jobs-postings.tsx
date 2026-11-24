@@ -63,7 +63,7 @@ function sourceText(source: JobPosting['sources'][number]) {
     : sourceLabels[source.kind];
 }
 
-function PostingCard({ posting, onChanged }: { posting: JobPosting; onChanged(): void }) {
+export function PostingCard({ posting, onChanged }: { posting: JobPosting; onChanged(): void }) {
   const format = useDateFormat();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
