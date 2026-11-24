@@ -173,8 +173,7 @@ export function createPiMemoryCurator(options: {
         task === 'attention' ||
         task === 'check' ||
         task === 'activity' ||
-        task === 'title' ||
-        task === 'referral';
+        task === 'title';
       const turnBound =
         signal !== undefined && ['review', 'access', 'skill', 'remember'].includes(task);
       if (options.resolve) loaded = undefined;
@@ -265,7 +264,7 @@ export function createPiMemoryCurator(options: {
                   AbortSignal.timeout(bounded ? 10_000 : 45_000),
                   ...(signal ? [signal] : []),
                 ]),
-            maxTokens: bounded ? 512 : task === 'ideas' ? 2048 : 8192,
+            maxTokens: bounded ? 512 : task === 'ideas' || task === 'referral' ? 2048 : 8192,
             ...(sessionId ? { sessionId } : {}),
             ...(bounded ? { maxRetries: 0, timeoutMs: 10_000 } : {}),
             reasoning: effort === 'off' ? undefined : effort,
