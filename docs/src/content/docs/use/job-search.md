@@ -95,7 +95,7 @@ The **Sources** tab lists your Telegram channels, with when Nod last read each o
 
 ## Companies and people
 
-The **Companies** tab lists each company with open postings or people, with its best score and how many people you invited, how many accepted, how many you asked for a referral and how many replied. Every posting joins its company by name, so "Example Co" and "Example Co, Inc." are one company.
+The **Companies** tab lists each company with open postings or people, with its best score and how many people you invited, how many accepted, how many you asked for a referral and how many replied. Every posting joins its company by name, so "Example Co" and "Example Co, Inc." are one company. A posting whose company is hidden, such as "Confidential" or "N/A", joins no company.
 
 Filter the list:
 
@@ -120,11 +120,11 @@ Nod counts a company as **no luck** when nobody there referred you and each pers
 - didn't reply within 5 days of your referral request, or
 - declined.
 
-The days are the no-luck days on the **Profile** tab. Nod only shows that a company counts as no luck; it doesn't apply anywhere until you tick the box. Select **Keep trying** to keep a company open, and **Let Nod decide** to go back to the days.
+While someone there has replied, or accepted and is waiting for your request, the company doesn't count as no luck. The days are the no-luck days on the **Profile** tab. Nod only shows that a company counts as no luck; it doesn't apply anywhere until you tick the box. Select **Keep trying** to keep a company open, and **Let Nod decide** to go back to the days.
 
 ### No luck, apply here
 
-Tick **No luck, apply here** on a company to give up on referrals there. Nod opens one chat for it, **Apply for the company I marked no luck**, and **Open the apply chat** takes you to it. Ticking again, or from two windows at once, never opens a second chat. Unticking keeps the chat.
+Tick **No luck, apply here** on a company to give up on referrals there. Nod opens one chat for it, **Apply for the company I marked no luck**, and **Open the apply chat** takes you to it. Ticking again, or from two windows at once, never opens a second chat. Unticking keeps the chat. If the chat couldn't start, or was deleted, select **Start the apply chat**.
 
 Applying on a company's own site comes in a later update. For now that chat lists the company's open postings with their scores and links, and Nod asks you before anything is submitted.
 
