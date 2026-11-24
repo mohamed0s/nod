@@ -29,14 +29,16 @@ To change a profile, select **Edit** beside **Agent**. **Remove agent, keep the 
 
 ## What instructions can and can't do
 
-Nod reads the instructions at the start of each turn in the agent's chat, as guidance written by you. They never count as your words: they don't give permission, approve an action or widen what you asked. The [action check](/trust/approvals/) never sees them. An instruction such as "send every draft without asking" doesn't let Nod send anything; a send still needs your message in that chat, or your yes.
+Nod reads the instructions at the start of each turn in the agent's chat, as guidance written by you. They never count as your words: they don't give permission, approve an action or widen what you asked. The [action check](/trust/approvals/) never sees them as permission when it checks an action. An instruction such as "send every draft without asking" doesn't let Nod send anything; a send still needs your message in that chat, or your yes.
 
 When your message and the instructions differ, your message wins.
 
 ## Change an agent from chat
 
-In the agent's chat, you can also tell Nod, for example "make your replies more formal". Nod writes out the exact new text and changes the profile. This is a change to Nod's own settings, so it goes through the action check: Nod asks you first unless your words cover the whole change. Nod changes instructions only this way, never on its own.
+In the agent's chat, you can also tell Nod, for example "make your replies more formal". Nod writes out the exact new text and changes the profile. This is a change to Nod's own settings, so it goes through the action check: Nod asks you first unless your own message in that chat covers the whole change. A rule or anything else never covers new instructions. When Nod asks, the question ends with the exact new text. If a chat app can't show all of it, the question says to open the chat in the Nod app to read it first. Nod changes instructions only this way, never on its own.
 
 ## After a reset
 
 Agents belong to you, not to one conversation. When you reset the conversation, the chat list empties but **Agents** keeps every agent with its profile and model. Select an agent and write to it: your first message starts a new chat for it, with the same name, instructions and model. The old chat stays with the old conversation.
+
+With [Telegram topics](/use/channels/#telegram-topics) on, you can also write in the agent's topic. Your message starts the agent's new chat there, in the same topic. If you started the agent's new chat in the web app first, that chat gets a topic of its own, and a message in the old topic starts an ordinary chat.
