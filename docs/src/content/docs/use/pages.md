@@ -46,7 +46,7 @@ A page shows in the same sandbox as an HTML file in chat. Its scripts run apart 
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Anything on the Pages tab | You                                                                                                                                                                                                                                          |
 | Make or update a page     | Nod, in work that started from your message, such as a chat or a task you asked for, and in your schedules. Never in work started by an app event or by Nod's own [proactive checks](/how-it-works/proactivity/), and never in helper agents |
-| Read a page               | Nod, in any work, including helper agents                                                                                                                                                                                                    |
+| Read a page               | Nod, including helper agents. Nod's proactive checks can't use pages                                                                                                                                                                         |
 
 Pages are your own private records, so publishing one skips the [trust check](/trust/). A page grants no permission: Nod treats what it shows as data, like any other content.
 
