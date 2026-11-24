@@ -5,6 +5,7 @@ import { posix } from 'node:path';
 import { z } from 'zod';
 import { appConfirmation } from '../ports/agent.ts';
 import type { TelegramChannels } from '../ports/job-sources.ts';
+import type { MemoryCurator } from '../ports/memory-curator.ts';
 import type { Artifact } from '../shared/contracts.ts';
 import { fileBytes, fileName } from '../shared/files.ts';
 import { untrustedBlock } from '../shared/untrusted.ts';
@@ -30,6 +31,7 @@ import {
 import type { ArtifactService } from './artifacts.ts';
 import { logFailure } from './failure-log.ts';
 import { createJobCompanies, jobCompanyTables, linkPostings } from './job-companies.ts';
+import { createJobDrafts, jobDraftTables, validZone } from './job-drafts.ts';
 import { createJobHelper, jobHelperTables } from './job-helper.ts';
 import { createJobPostings, jobPostingTables } from './job-postings.ts';
 import { careerOpsFiles, scanConfig, scanSummary } from './jobs-files.ts';
@@ -69,6 +71,7 @@ export const jobTables = `
   ALTER TABLE job_cvs ADD COLUMN IF NOT EXISTS conversion_started_at timestamptz;
   ${jobPostingTables}
   ${jobCompanyTables}
+  ${jobDraftTables}
   ${jobHelperTables}
 `;
 
@@ -76,7 +79,12 @@ export const exampleTemplates: JobTemplate[] = [
   {
     language: 'en',
     body: "{greeting} {first_name},\n\nI'm {my_name}, {my_intro}. I'm applying for the {role} role at {company} through {programme} ({track}), and I'd be grateful for a referral if you're comfortable giving one.\n\nI can send my CV whenever it helps. Thank you for your time.",
-    greetings: { morning: 'Good morning', evening: 'Good evening', default: 'Hi' },
+    greetings: {
+      morning: 'Good morning',
+      afternoon: 'Good afternoon',
+      evening: 'Good evening',
+      default: 'Hi',
+    },
   },
   {
     language: 'ar',
@@ -103,29 +111,36 @@ export const jobLimitsInput = z
   .object({
     inviteLimits: jobProfileFields.inviteLimits.partial().optional(),
     noLuck: jobProfileFields.noLuck.partial().optional(),
+    waves: jobProfileFields.waves.partial().optional(),
   })
   .strict()
-  .refine((value) => value.inviteLimits !== undefined || value.noLuck !== undefined, {
-    message: 'A limits change needs inviteLimits, noLuck or both.',
-  });
+  .refine(
+    (value) =>
+      value.inviteLimits !== undefined || value.noLuck !== undefined || value.waves !== undefined,
+    { message: 'A limits change needs inviteLimits, noLuck, waves or more than one of them.' },
+  );
 type JobLimits = z.infer<typeof jobLimitsInput>;
-type JobLimitValues = Pick<JobProfile, 'inviteLimits' | 'noLuck'>;
+type JobLimitValues = Pick<JobProfile, 'inviteLimits' | 'noLuck' | 'waves'>;
 
 const liveLimits = (profile: JobProfile): JobLimitValues => ({
   inviteLimits: profile.inviteLimits,
   noLuck: profile.noLuck,
+  waves: profile.waves,
 });
 
 function limitsKey(value: unknown) {
   const limits = (value ?? {}) as Partial<{
     inviteLimits: Partial<JobLimitValues['inviteLimits']>;
     noLuck: Partial<JobLimitValues['noLuck']>;
+    waves: Partial<JobLimitValues['waves']>;
   }>;
   return JSON.stringify([
     limits.inviteLimits?.daily,
     limits.inviteLimits?.weekly,
     limits.noLuck?.noAcceptDays,
     limits.noLuck?.noReplyDays,
+    limits.waves?.size,
+    limits.waves?.max,
   ]);
 }
 
@@ -306,10 +321,15 @@ export function createJobs(options: {
     signal?: AbortSignal,
   ) => Promise<T>;
   telegram?: TelegramChannels;
+  curator?: MemoryCurator;
+  timeZone?: () => Promise<string | null | undefined>;
+  signal?: AbortSignal;
   changed?: () => void;
 }) {
   const { pool, ownerId } = options;
   const changed = options.changed ?? (() => {});
+  const timeZone = async () =>
+    validZone(await (options.timeZone?.() ?? Promise.resolve(null)).catch(() => null));
   const lock = (client: Query) => lockKey(client, `jobs:${ownerId}`);
   const owned = <T>(operation: (client: PoolClient) => Promise<T>) =>
     transaction(async (client) => {
@@ -346,10 +366,28 @@ export function createJobs(options: {
     owned,
     changed,
   });
+  const drafts = createJobDrafts({
+    pool,
+    ownerId,
+    profile: async (client) => (await profileState(client)).profile,
+    templates: async (client) =>
+      (
+        await client.query<JobTemplate & { revision: number }>(
+          'SELECT language,body,greetings,revision FROM job_templates WHERE owner_id=$1 ORDER BY language',
+          [ownerId],
+        )
+      ).rows,
+    timeZone,
+    ...(options.curator ? { curator: options.curator } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
+    owned,
+  });
   const companies = createJobCompanies({
     pool,
     ownerId,
-    noLuck: async (client) => (await profileState(client)).profile.noLuck,
+    settings: async (client) => liveLimits((await profileState(client)).profile),
+    timeZone,
+    drafts,
     postings: postings.ofCompany,
     ...(options.startChat ? { startChat: options.startChat } : {}),
     turnWrite,
@@ -888,7 +926,7 @@ export function createJobs(options: {
     const profile = parse(jobProfileSchema, merged(current.profile, input), 'The job profile');
     const revision = await saveProfile(client, { profile }, 'nod');
     afterCommit(client, changed);
-    return { revision, inviteLimits: profile.inviteLimits, noLuck: profile.noLuck };
+    return { revision, ...liveLimits(profile) };
   }
 
   async function updateProfile(
@@ -1232,7 +1270,11 @@ export function createJobs(options: {
     registerRoutes,
     helperAccess: helper.exempt,
     setup: () => setup(pool),
+    drafts: { idle: drafts.idle },
     initialize: async () => {
+      await drafts
+        .initialize()
+        .catch((error: unknown) => logFailure('job_drafts_resume_failed', error));
       try {
         return await owned((client) => linkPostings(client, ownerId));
       } catch (error) {

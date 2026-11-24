@@ -14,6 +14,7 @@ import {
 import { promisify } from 'node:util';
 import { z } from 'zod';
 import { jobPersonStatuses, type JobNoLuckResult } from '../shared/job-companies.ts';
+import { languageTag } from '../shared/jobs.ts';
 import type {
   JobHelperAccepted,
   JobHelperCompany,
@@ -658,7 +659,10 @@ export function createJobHelper(options: {
         async (request): Promise<JobHelperAccepted> => {
           helperOf(request);
           parse(empty, request.body ?? {}, 'The request');
-          return { people: await companies.accepted(pool) };
+          return {
+            people: await companies.accepted(pool),
+            languages: await companies.languages(pool),
+          };
         },
       );
       scope.post<{ Params: { id: string } }>(
@@ -666,16 +670,21 @@ export function createJobHelper(options: {
         helperRoute,
         async (request) => {
           helperOf(request);
-          const input = parse(
-            z.object({ status: z.enum(jobPersonStatuses), revision: z.int().min(0) }).strict(),
+          const { revision, ...change } = parse(
+            z
+              .object({
+                status: z.enum(jobPersonStatuses).optional(),
+                language: z.union([languageTag, z.literal('')]).optional(),
+                revision: z.int().min(0),
+              })
+              .strict()
+              .refine((value) => value.status !== undefined || value.language !== undefined, {
+                message: 'Send a status, a language or both.',
+              }),
             request.body,
             'The status change',
           );
-          return companies.updatePerson(
-            request.params.id,
-            { status: input.status },
-            input.revision,
-          );
+          return companies.updatePerson(request.params.id, change, revision);
         },
       );
       scope.post('/api/helper/profile', helperRoute, async (request) => {

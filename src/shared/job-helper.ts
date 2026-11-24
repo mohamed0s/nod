@@ -1,4 +1,4 @@
-import type { JobCompanyView, JobPerson } from './job-companies';
+import type { JobCompanyView, JobPerson, JobWaves } from './job-companies';
 
 export type JobHelper = {
   id: string;
@@ -21,4 +21,7 @@ export type JobHelperCompany = {
   invites: JobHelperInvites;
 };
 
-export type JobHelperAccepted = { people: Array<JobPerson & { company: string }> };
+export type JobHelperAccepted = {
+  people: Array<JobPerson & { company: string; waves: JobWaves }>;
+  languages: string[];
+};

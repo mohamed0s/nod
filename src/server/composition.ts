@@ -1248,6 +1248,9 @@ async function initializeApplication(
     withTurnLock: (turnId, operation, signal) =>
       withTurnLock(signal ? { turnId, signal } : turnId, operation),
     telegram: createTelegramChannels(),
+    curator,
+    timeZone: async () => (await getPreferences()).timeZone,
+    signal: closing.signal,
     changed: () => jobsChanged(ownerId),
   });
   await jobs.initialize();

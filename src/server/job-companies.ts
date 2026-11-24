@@ -14,11 +14,13 @@ import {
   type JobNoLuckResult,
   type JobPerson,
   type JobPersonStatus,
+  type JobWaves,
 } from '../shared/job-companies.ts';
 import type { JobPosting } from '../shared/job-postings.ts';
 import { languageTag, type JobProfile } from '../shared/jobs.ts';
 import { untrustedBlock } from '../shared/untrusted.ts';
-import { companyKey } from './job-urls.ts';
+import { tailoringRules, type JobDrafts } from './job-drafts.ts';
+import { companyKey, linkedInMessageUrl, linkedInProfileUrl } from './job-urls.ts';
 import { clean } from './jobs-parsers.ts';
 import { failure, parse, rootedIn, type Query, type TurnRef } from './jobs-shared.ts';
 
@@ -53,7 +55,13 @@ export const jobCompanyTables = `
   CREATE INDEX IF NOT EXISTS job_postings_company ON job_postings(owner_id,company_id);
 `;
 
-export const companyActions = new Set(['companies', 'company', 'person_update']);
+export const companyActions = new Set([
+  'companies',
+  'company',
+  'person_update',
+  'draft_prepare',
+  'draft_save',
+]);
 
 export const applyRequest = (companyId: string) =>
   `Apply for the company I marked no luck\nCompany id: ${companyId}. Ask me before you submit anything.`;
@@ -144,9 +152,6 @@ export function memberUrn(raw: string) {
   return memberId.test(id) ? id : null;
 }
 
-const profileUrl = (key: string) => `https://www.linkedin.com/in/${encodeURIComponent(key)}/`;
-const messageUrl = (urn: string) =>
-  `https://www.linkedin.com/messaging/compose/?recipient=${encodeURIComponent(urn)}`;
 const companyPage = (slug: string) =>
   `https://www.linkedin.com/company/${encodeURIComponent(slug)}/`;
 
@@ -156,31 +161,130 @@ type PersonState = {
   asked_at: string | null;
   declined_at: string | null;
 };
+type WaveSettings = Pick<JobProfile, 'noLuck' | 'waves' | 'inviteLimits'>;
+
+function chanceEnd(person: PersonState, limits: JobProfile['noLuck']) {
+  const after = (value: string | null, days: number) =>
+    value ? Date.parse(value) + days * day : Number.NaN;
+  if (person.status === 'invited') return after(person.invited_at, limits.noAcceptDays);
+  if (person.status === 'asked') return after(person.asked_at, limits.noReplyDays);
+  if (person.status === 'declined') return person.declined_at ? Date.parse(person.declined_at) : 0;
+  return Number.NaN;
+}
 
 export function automaticNoLuck(
   people: PersonState[],
-  limits: JobProfile['noLuck'],
+  limits: Pick<JobProfile, 'noLuck' | 'waves'>,
   now = Date.now(),
 ) {
-  if (!people.length || people.some((person) => person.status === 'referred')) return null;
+  if (people.length < limits.waves.max || people.some((person) => person.status === 'referred'))
+    return null;
   let since = 0;
   for (const person of people) {
-    const after = (value: string | null, days: number) =>
-      value ? Date.parse(value) + days * day : Number.NaN;
-    const end =
-      person.status === 'invited'
-        ? after(person.invited_at, limits.noAcceptDays)
-        : person.status === 'asked'
-          ? after(person.asked_at, limits.noReplyDays)
-          : person.status === 'declined'
-            ? person.declined_at
-              ? Date.parse(person.declined_at)
-              : 0
-            : Number.NaN;
+    const end = chanceEnd(person, limits.noLuck);
     if (!(end <= now)) return null;
     since = Math.max(since, end);
   }
   return new Date(since);
+}
+
+export function companyWaves(
+  people: PersonState[],
+  settings: WaveSettings,
+  invites: { today: number; week: number },
+  now = Date.now(),
+): JobWaves {
+  const { size, max } = settings.waves;
+  const { daily, weekly } = settings.inviteLimits;
+  const invited = people.length;
+  const ends = people.map((person) => chanceEnd(person, settings.noLuck));
+  const within = ends.filter((end) => !(end <= now));
+  const allowance = Math.max(0, Math.min(daily - invites.today, weekly - invites.week));
+  const inWave = invited % size;
+  const full = invited > 0 && inWave === 0;
+  const wave = Math.max(1, Math.ceil(invited / size));
+  const base = {
+    invited,
+    size,
+    max,
+    today: invites.today,
+    week: invites.week,
+    daily,
+    weekly,
+    over:
+      invites.today > daily ? ('day' as const) : invites.week > weekly ? ('week' as const) : null,
+    until: null,
+    owed: people.filter(
+      (person, index) =>
+        !Number.isFinite(ends[index]!) &&
+        (person.status === 'accepted' || person.status === 'replied'),
+    ).length,
+  };
+  const closed = { wave, inWave: full ? size : inWave, left: 0, more: 0 };
+  const room = (left: number) => ({ left, more: Math.min(left, allowance) });
+  if (people.some((person) => person.status === 'referred'))
+    return { ...base, ...closed, state: 'stopped' };
+  if (!full && invited < max)
+    return {
+      ...base,
+      state: 'open',
+      wave: Math.floor(invited / size) + 1,
+      inWave,
+      ...room(Math.min(size - inWave, max - invited)),
+    };
+  if (within.length)
+    return {
+      ...base,
+      ...closed,
+      state: 'waiting',
+      until: within.every(Number.isFinite) ? new Date(Math.max(...within)).toISOString() : null,
+    };
+  if (invited < max)
+    return {
+      ...base,
+      state: 'next',
+      wave: wave + 1,
+      inWave: 0,
+      ...room(Math.min(size, max - invited)),
+    };
+  return { ...base, ...closed, state: 'done' };
+}
+
+export function localDayStart(timeZone: string, at: Date, daysBack = 0) {
+  const format = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: 'numeric',
+    second: 'numeric',
+  });
+  const parts = (time: number) =>
+    Object.fromEntries(
+      format
+        .formatToParts(time)
+        .filter((part) => part.type !== 'literal')
+        .map((part) => [part.type, Number(part.value)]),
+    ) as Record<'year' | 'month' | 'day' | 'hour' | 'minute' | 'second', number>;
+  const offset = (time: number) => {
+    const local = parts(time);
+    return (
+      Date.UTC(
+        local.year,
+        local.month - 1,
+        local.day,
+        local.hour % 24,
+        local.minute,
+        local.second,
+      ) -
+      Math.floor(time / 1000) * 1000
+    );
+  };
+  const today = parts(at.getTime());
+  const target = Date.UTC(today.year, today.month - 1, today.day - daysBack);
+  return new Date(target - offset(target - offset(target)));
 }
 
 function keyOf(name: string) {
@@ -296,7 +400,29 @@ const toolInput = z.discriminatedUnion('action', [
       people: z.array(personEntry).min(1).max(50),
     })
     .strict(),
+  z
+    .object({
+      action: z.literal('draft_prepare'),
+      personId: z.uuid(),
+      postingId: z.uuid().optional(),
+      programme: text(160).optional(),
+      track: text(160).optional(),
+      role: text(160).optional(),
+      language: z.union([languageTag, z.literal('')]).optional(),
+      replace: z.boolean().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal('draft_save'),
+      personId: z.uuid(),
+      text: z.string().max(8000),
+      changes: z.string().max(1000).optional(),
+      revision: z.int().min(0),
+    })
+    .strict(),
 ]);
+type DraftRequest = Extract<z.infer<typeof toolInput>, { action: 'draft_prepare' }>;
 
 type CompanyRow = {
   id: string;
@@ -326,10 +452,20 @@ type PersonRow = {
   status: JobPersonStatus;
   draft: string;
   draft_revision: number;
+  draft_state: NonNullable<JobPerson['draftInfo']>['state'] | null;
+  draft_reason: string;
+  draft_note: string;
+  draft_language: string;
+  draft_language_by: NonNullable<JobPerson['draftInfo']>['languageBy'];
+  draft_template_revision: number | null;
+  draft_missing: string[];
+  draft_inputs: Record<string, string>;
+  draft_at: Date | null;
   revision: number;
   created_at: Date;
   updated_at: Date;
 } & Record<`${JobPersonStatus}_at`, Date | null>;
+type Show = Awaited<ReturnType<JobDrafts['viewer']>>;
 type Summary = { company: JobCompany; filters: Set<JobCompanyFilter>; active: number };
 
 function noLuckOf(row: CompanyRow, rule: Date | null): JobNoLuck {
@@ -345,13 +481,14 @@ function noLuckOf(row: CompanyRow, rule: Date | null): JobNoLuck {
   return { value: false, by: null, since: null, choice: row.status };
 }
 
-function personView(row: PersonRow): JobPerson {
+function personView(row: PersonRow, show: Show): JobPerson {
   const times = Object.fromEntries(
     jobPersonStatuses.flatMap((status) => {
       const at = row[`${status}_at`];
       return at ? [[status, at.toISOString()]] : [];
     }),
   ) as JobPerson['times'];
+  const draftInfo = show(row);
   return {
     id: row.id,
     companyId: row.company_id,
@@ -359,13 +496,14 @@ function personView(row: PersonRow): JobPerson {
     headline: row.headline,
     language: row.language,
     profileKey: row.profile_key,
-    profileUrl: profileUrl(row.profile_key),
-    messageUrl: row.member_urn ? messageUrl(row.member_urn) : null,
+    profileUrl: linkedInProfileUrl(row.profile_key),
+    messageUrl: row.member_urn ? linkedInMessageUrl(row.member_urn) : null,
     status: row.status,
     statusAt: times[row.status] ?? null,
     times,
-    draft: row.draft,
+    draft: draftInfo?.text ?? row.draft,
     draftRevision: row.draft_revision,
+    draftInfo,
     revision: row.revision,
     updatedAt: row.updated_at.toISOString(),
   };
@@ -382,7 +520,9 @@ const byActivity = (a: Summary, b: Summary) =>
 export function createJobCompanies(options: {
   pool: Pool;
   ownerId: string;
-  noLuck: (client: Query) => Promise<JobProfile['noLuck']>;
+  settings: (client: Query) => Promise<WaveSettings>;
+  timeZone: () => Promise<string>;
+  drafts: JobDrafts;
   postings: (client: Query, companyId: string) => Promise<JobPosting[]>;
   startChat?: (text: string, attachments: [], sessionId: string) => Promise<unknown>;
   turnWrite: <T>(
@@ -395,8 +535,21 @@ export function createJobCompanies(options: {
 }) {
   const { pool, ownerId } = options;
 
+  async function inviteCounts(client: Query) {
+    const zone = await options.timeZone();
+    const now = new Date();
+    const { rows } = await client.query<{ today: number; week: number }>(
+      `SELECT count(*) FILTER (WHERE invited_at>=$2)::int AS today,
+         count(*) FILTER (WHERE invited_at>=$3)::int AS week
+       FROM job_people WHERE owner_id=$1`,
+      [ownerId, localDayStart(zone, now), localDayStart(zone, now, 6)],
+    );
+    return rows[0] ?? { today: 0, week: 0 };
+  }
+
   async function summaries(client: Query, filter: { id?: string; search?: string } = {}) {
-    const limits = await options.noLuck(client);
+    const settings = await options.settings(client);
+    const invites = await inviteCounts(client);
     const search = filter.search?.toLowerCase() ?? null;
     const { rows } = await client.query<CompanyRow>(
       `SELECT c.id,c.name,c.linkedin_slug,c.careers_url,c.status,c.no_luck_at,c.no_luck_by,c.apply_session_id,
@@ -415,8 +568,9 @@ export function createJobCompanies(options: {
     );
     const now = Date.now();
     const list = rows.map((row): Summary => {
-      const rule = row.status === 'auto' ? automaticNoLuck(row.people, limits, now) : null;
+      const rule = row.status === 'auto' ? automaticNoLuck(row.people, settings, now) : null;
       const noLuck = noLuckOf(row, rule);
+      const waves = companyWaves(row.people, settings, invites, now);
       const statuses = new Set(row.people.map((person) => person.status));
       const filters = new Set<JobCompanyFilter>();
       if (row.people.length || row.open || row.status !== 'auto') filters.add('all');
@@ -425,6 +579,7 @@ export function createJobCompanies(options: {
         if (statuses.has('invited')) filters.add('waiting');
         if (statuses.has('accepted')) filters.add('to_ask');
         if (statuses.has('asked')) filters.add('asked');
+        if (waves.state === 'next') filters.add('next_wave');
       }
       const count = (from: number) =>
         row.people.filter((person) => stage[person.status] >= from).length;
@@ -454,19 +609,24 @@ export function createJobCompanies(options: {
             row.apply_session_id && row.apply_state
               ? { id: row.apply_session_id, state: row.apply_state }
               : null,
+          waves,
           revision: row.revision,
           lastActivityAt: active ? new Date(active).toISOString() : null,
         },
       };
     });
-    return { list, limits };
+    return {
+      list,
+      limits: { ...settings.noLuck, waves: settings.waves },
+      invites: { ...invites, ...settings.inviteLimits },
+    };
   }
 
   async function companies(
     client: Query,
     query: { filter?: JobCompanyFilter; search?: string; limit?: number },
   ): Promise<JobCompaniesView> {
-    const { list, limits } = await summaries(client, { search: query.search });
+    const { list, limits, invites } = await summaries(client, { search: query.search });
     const counts = Object.fromEntries(jobCompanyFilters.map((name) => [name, 0])) as Record<
       JobCompanyFilter,
       number
@@ -479,6 +639,7 @@ export function createJobCompanies(options: {
       total: chosen.length,
       counts,
       limits,
+      invites,
     };
   }
 
@@ -499,9 +660,10 @@ export function createJobCompanies(options: {
     const { list, limits } = await summaries(client, { id: parse(z.uuid(), id, 'The company id') });
     const found = list[0];
     if (!found) throw failure('Company not found.', 404);
+    const show = await options.drafts.viewer(client);
     return {
       ...found.company,
-      people: (await personRows(client, found.company.id)).map(personView),
+      people: (await personRows(client, found.company.id)).map((row) => personView(row, show)),
       postings: await options.postings(client, found.company.id),
       limits,
     };
@@ -602,6 +764,14 @@ export function createJobCompanies(options: {
           next.at ?? null,
         ],
       );
+      const after = await onePerson(client, current.id);
+      if (after.status === 'accepted' && current.status !== 'accepted')
+        await options.drafts.accepted(client, after.id);
+      else if (
+        after.language !== current.language &&
+        (after.draft || after.draft_state || after.status === 'accepted')
+      )
+        await options.drafts.make(client, after.id);
       return onePerson(client, current.id);
     });
   }
@@ -650,6 +820,22 @@ export function createJobCompanies(options: {
     ) as [PersonRow, PersonRow];
     const status =
       mergeOrder.indexOf(drop.status) > mergeOrder.indexOf(keep.status) ? drop.status : keep.status;
+    await client.query(
+      `UPDATE job_people k SET draft_state=d.draft_state,draft_reason=d.draft_reason,draft_note=d.draft_note,
+         draft_language=d.draft_language,draft_language_by=d.draft_language_by,
+         draft_template_revision=d.draft_template_revision,draft_missing=d.draft_missing,
+         draft_inputs=d.draft_inputs,draft_at=d.draft_at
+       FROM job_people d WHERE k.owner_id=$1 AND k.id=$2 AND d.owner_id=$1 AND d.id=$3
+         AND k.draft='' AND k.draft_state IS NULL AND d.draft_state IS NOT NULL`,
+      [ownerId, keep.id, drop.id],
+    );
+    await client.query(
+      `INSERT INTO job_events(id,owner_id,kind,source,source_ref,person_id,detail,created_at)
+       SELECT gen_random_uuid(),owner_id,kind,source,$2,$4::uuid,detail,created_at FROM job_events
+       WHERE owner_id=$1 AND source IN ('draft','accept') AND source_ref=$3
+       ON CONFLICT (owner_id,source,source_ref) DO NOTHING`,
+      [ownerId, keep.id, drop.id, keep.id],
+    );
     await client.query('DELETE FROM job_people WHERE owner_id=$1 AND id=$2', [ownerId, drop.id]);
     await client.query(
       `UPDATE job_people SET profile_key=$3,member_urn=$4,status=$5,
@@ -757,6 +943,7 @@ export function createJobCompanies(options: {
         ],
       ),
     );
+    if (status === 'accepted') await options.drafts.accepted(client, id);
     return { created: true, row: await onePerson(client, id) };
   }
 
@@ -771,16 +958,108 @@ export function createJobCompanies(options: {
           );
         const saved = [];
         for (const [index, entry] of entries.entries()) {
-          const { created, row } = await savePerson(client, entry, `people.${index}`);
+          const { created, row: written } = await savePerson(client, entry, `people.${index}`);
+          const row = await onePerson(client, written.id);
           const name = (
             await client.query<{ name: string }>(
               'SELECT name FROM job_companies WHERE owner_id=$1 AND id=$2',
               [ownerId, row.company_id],
             )
           ).rows[0]?.name;
-          saved.push({ ...toolPerson(personView(row)), company: name ?? '', created });
+          saved.push({
+            ...toolPerson(personView(row, await options.drafts.viewer(client))),
+            company: name ?? '',
+            created,
+          });
         }
         return { saved };
+      },
+      signal,
+    );
+  }
+
+  async function ownerWork<T>(
+    turn: TurnRef,
+    what: string,
+    operation: (client: PoolClient) => Promise<T>,
+    signal?: AbortSignal,
+  ) {
+    return options.turnWrite(
+      turn,
+      async (client) => {
+        if ((await rootedIn(client, ownerId, turn)) !== 'owner')
+          throw failure(`Only work started by an owner message can ${what}.`, 403);
+        return operation(client);
+      },
+      signal,
+    );
+  }
+
+  async function draftResult(client: Query, id: string, extra: Record<string, unknown>) {
+    const row = await onePerson(client, id);
+    const view = personView(row, await options.drafts.viewer(client));
+    const waves = (await summaries(client, { id: row.company_id })).list[0]?.company.waves;
+    const draft = view.draftInfo;
+    return {
+      ...extra,
+      person: toolPerson(view),
+      draftRevision: row.draft_revision,
+      ...(draft
+        ? {
+            state: draft.state,
+            language: draft.language,
+            text: draft.text,
+            raw: draft.raw,
+            ...(draft.reason ? { reason: draft.reason } : {}),
+            ...(draft.note ? { note: draft.note } : {}),
+          }
+        : {}),
+      waves,
+    };
+  }
+
+  function prepareDraft(turn: TurnRef, request: DraftRequest, signal?: AbortSignal) {
+    return ownerWork(
+      turn,
+      'prepare referral messages',
+      async (client) => {
+        const row = await onePerson(client, request.personId);
+        if (row.draft_state === 'edited' && !request.replace)
+          throw failure(
+            'This message was edited after Nod made it. Ask the owner before replacing their version, then call draft_prepare again with replace: true.',
+            409,
+          );
+        if (request.language !== undefined && request.language !== row.language)
+          await client.query(
+            'UPDATE job_people SET language=$3,revision=revision+1,updated_at=now() WHERE owner_id=$1 AND id=$2',
+            [ownerId, row.id, request.language],
+          );
+        const made = await options.drafts.make(client, row.id, {
+          inputs: {
+            ...(request.postingId ? { postingId: request.postingId } : {}),
+            ...(request.programme ? { programme: request.programme } : {}),
+            ...(request.track ? { track: request.track } : {}),
+            ...(request.role ? { role: request.role } : {}),
+          },
+        });
+        return draftResult(client, row.id, {
+          saved: made.saved,
+          missing: made.missing,
+          ...(made.missing.includes('template')
+            ? {
+                next: 'The owner has no saved message template. Ask them to save one on the Jobs page, Templates tab.',
+              }
+            : made.missing.length
+              ? {
+                  next: `Nothing was saved. Ask the owner for ${made.missing.map((name) => `{${name}}`).join(', ')}, then call draft_prepare again with them.`,
+                }
+              : made.state === 'tailoring'
+                ? {
+                    next: "Nod's small model is tailoring it now, and the result reaches the owner on the Jobs page and on their chat channel. Change it in this chat only when the owner asks, following rules, with draft_save against draftRevision.",
+                    rules: tailoringRules,
+                  }
+                : { rules: tailoringRules }),
+        });
       },
       signal,
     );
@@ -861,7 +1140,8 @@ export function createJobCompanies(options: {
           'This person changed since you loaded the company. Reload it, then make your change again.',
           409,
         );
-      return personView(await change(client, current, next, 'The person'));
+      const row = await change(client, current, next, 'The person');
+      return personView(row, await options.drafts.viewer(client));
     });
   }
 
@@ -975,17 +1255,17 @@ export function createJobCompanies(options: {
        ORDER BY p.accepted_at DESC NULLS LAST,p.id LIMIT 50`,
       [ownerId],
     );
-    return rows.map((row) => ({ ...personView(row), company: row.company_name }));
-  }
-
-  async function inviteCounts(client: Query) {
-    const { rows } = await client.query<{ today: number; week: number }>(
-      `SELECT count(*) FILTER (WHERE invited_at>now()-interval '1 day')::int AS today,
-         count(*) FILTER (WHERE invited_at>now()-interval '7 days')::int AS week
-       FROM job_people WHERE owner_id=$1`,
-      [ownerId],
+    if (!rows.length) return [];
+    const show = await options.drafts.viewer(client);
+    const waves = new Map(
+      (await summaries(client)).list.map((entry) => [entry.company.id, entry.company.waves]),
     );
-    return rows[0] ?? { today: 0, week: 0 };
+    return rows.flatMap((row) => {
+      const company = waves.get(row.company_id);
+      return company
+        ? [{ ...personView(row, show), company: row.company_name, waves: company }]
+        : [];
+    });
   }
 
   async function profileTracked(client: Query, profileUrl: string, urn: string) {
@@ -1055,9 +1335,26 @@ export function createJobCompanies(options: {
         }
         case 'person_update':
           return updatePeople(turn, request.people, signal);
+        case 'draft_prepare':
+          return prepareDraft(turn, request, signal);
+        case 'draft_save':
+          return ownerWork(
+            turn,
+            'change referral messages',
+            async (client) => {
+              await options.drafts.save(client, request.personId, {
+                text: request.text,
+                ...(request.changes !== undefined ? { changes: request.changes } : {}),
+                revision: request.revision,
+                actor: 'nod',
+              });
+              return draftResult(client, request.personId, { saved: true });
+            },
+            signal,
+          );
       }
     })();
-    if (request.action === 'person_update') options.changed();
+    if (request.action !== 'companies' && request.action !== 'company') options.changed();
     return untrustedBlock('job search records', JSON.stringify(value));
   }
 
@@ -1116,6 +1413,45 @@ export function createJobCompanies(options: {
       );
       return updatePerson(request.params.id, next, revision);
     });
+    app.post<{ Params: { id: string } }>('/api/jobs/people/:id/draft', async (request) => {
+      const { draftRevision } = parse(
+        z.object({ draftRevision: z.int().min(0) }).strict(),
+        request.body,
+        'The remake',
+      );
+      return options.owned(async (client) => {
+        const current = await onePerson(client, request.params.id);
+        if (current.draft_revision !== draftRevision)
+          throw failure(
+            'This message changed since you opened it. Reload the company, then remake it again.',
+            409,
+          );
+        const made = await options.drafts.make(client, current.id);
+        return {
+          person: personView(
+            await onePerson(client, current.id),
+            await options.drafts.viewer(client),
+          ),
+          missing: made.missing,
+        };
+      });
+    });
+    app.put<{ Params: { id: string } }>('/api/jobs/people/:id/draft', async (request) => {
+      const { text: body, draftRevision } = parse(
+        z.object({ text: z.string().max(8000), draftRevision: z.int().min(0) }).strict(),
+        request.body,
+        'The message',
+      );
+      return options.owned(async (client) => {
+        const current = await onePerson(client, request.params.id);
+        await options.drafts.save(client, current.id, {
+          text: body,
+          revision: draftRevision,
+          actor: 'owner',
+        });
+        return personView(await onePerson(client, current.id), await options.drafts.viewer(client));
+      });
+    });
   }
 
   return {
@@ -1127,6 +1463,7 @@ export function createJobCompanies(options: {
       company: pageCompany,
       invites: logInvites,
       accepted: acceptedPeople,
+      languages: (client: Query) => options.drafts.languages(client),
       inviteCounts,
       updatePerson,
       markNoLuck,
