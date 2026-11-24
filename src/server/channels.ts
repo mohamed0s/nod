@@ -105,7 +105,9 @@ interface ChannelOptions {
     onInserted?: () => void,
     stopSignal?: AbortSignal,
     sessionId?: string,
+    chatAgent?: string,
   ) => Promise<string>;
+  topicAgent?: (topic: InboxRow) => Promise<string | undefined>;
   stopSignal?: () => AbortSignal;
   messageAccepted?: () => (channel: string) => void;
   answer?: (
@@ -1231,6 +1233,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     const topic = inMain ? null : pending.topic_id;
     const topicTarget = topic ? await taskInTopic(pending) : undefined;
     const newChat = Boolean(topic) && !topicTarget?.id;
+    const chatAgent = newChat ? await options.topicAgent?.(pending) : undefined;
     const native =
       pending.provider_reply_id && !newChat
         ? await nativeReply(pending, pending.thread_id, pending.provider_reply_id)
@@ -1387,6 +1390,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
         },
         stopSignal,
         newChat ? randomUUID() : undefined,
+        chatAgent,
       );
       if (newChat)
         await client.query(

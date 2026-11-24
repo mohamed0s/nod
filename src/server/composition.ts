@@ -3714,6 +3714,7 @@ async function initializeApplication(
         onInserted,
         stopSignal,
         sessionId,
+        chatAgent,
       ) =>
         (
           await userMessages.submit(text, attachments, {
@@ -3726,8 +3727,10 @@ async function initializeApplication(
             onInserted,
             stopSignal,
             ...(sessionId ? { sessionId } : {}),
+            ...(chatAgent ? { chatAgent } : {}),
           })
         ).turnId,
+      topicAgent: agents.forTopic,
       stopSignal,
       messageAccepted: ownerMessageAccepted,
       answer: (text, channel, replyToMessageId, shownMessageId) =>
