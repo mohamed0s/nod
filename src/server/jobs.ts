@@ -1230,7 +1230,7 @@ export function createJobs(options: {
     execute,
     applyLimits,
     registerRoutes,
-    helperAccess: helper.verify,
+    helperAccess: helper.exempt,
     setup: () => setup(pool),
     initialize: async () => {
       try {
