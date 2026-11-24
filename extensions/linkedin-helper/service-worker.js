@@ -1,7 +1,7 @@
 (() => {
   const panelUrl = chrome.runtime.getURL('sidepanel.html');
   const linkedIn = 'https://www.linkedin.com/';
-  const nodAddress = /^http:\/\/(?:127\.0\.0\.1|localhost):\d{2,5}$/;
+  const nodAddress = /^http:\/\/127\.0\.0\.1:\d{2,5}$/;
   const tokenShape = /^[A-Za-z0-9_-]{43}$/;
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   const statuses = new Set(['invited', 'accepted', 'asked', 'replied', 'referred', 'declined']);
@@ -24,12 +24,14 @@
 
   const hex = (buffer) =>
     [...new Uint8Array(buffer)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
-  const base64url = (buffer) =>
-    btoa(String.fromCharCode(...new Uint8Array(buffer)))
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .replace(/=+$/, '');
-  const fromBase64url = (value) =>
+  const base64url = (buffer) => {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    for (let start = 0; start < bytes.length; start += 0x8000)
+      binary += String.fromCharCode(...bytes.subarray(start, start + 0x8000));
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  };
+  const fromBase64 = (value) =>
     Uint8Array.from(atob(value.replace(/-/g, '+').replace(/_/g, '/')), (letter) =>
       letter.charCodeAt(0),
     );
@@ -42,38 +44,77 @@
       const value = await response.json();
       if (!nodAddress.test(value?.nod) || !uuid.test(value?.id) || !tokenShape.test(value?.token))
         return null;
-      const secret = await crypto.subtle.digest('SHA-256', encoder.encode(value.token));
-      const key = await crypto.subtle.importKey(
+      const base = await crypto.subtle.importKey(
         'raw',
-        secret,
+        await crypto.subtle.digest('SHA-256', encoder.encode(value.token)),
         { name: 'HMAC', hash: 'SHA-256' },
         false,
-        ['sign', 'verify'],
+        ['sign'],
       );
-      return { nod: value.nod, id: value.id, key };
+      const derived = (label) => crypto.subtle.sign('HMAC', base, encoder.encode(label));
+      return {
+        nod: value.nod,
+        id: value.id,
+        mac: await crypto.subtle.importKey(
+          'raw',
+          await derived('nod-helper-mac'),
+          { name: 'HMAC', hash: 'SHA-256' },
+          false,
+          ['sign', 'verify'],
+        ),
+        secret: await crypto.subtle.importKey(
+          'raw',
+          await derived('nod-helper-encrypt'),
+          { name: 'AES-GCM' },
+          false,
+          ['encrypt', 'decrypt'],
+        ),
+      };
     } catch {
       return null;
     }
   }
 
+  async function seal(paired, plain, context) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const data = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv, additionalData: encoder.encode(context) },
+      paired.secret,
+      plain,
+    );
+    return JSON.stringify({ iv: base64url(iv), data: base64url(data) });
+  }
+
+  async function unseal(paired, bytes, context) {
+    const envelope = JSON.parse(decoder.decode(bytes));
+    const plain = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: fromBase64(envelope.iv), additionalData: encoder.encode(context) },
+      paired.secret,
+      fromBase64(envelope.data),
+    );
+    return JSON.parse(decoder.decode(plain));
+  }
+
+  function distrust(paired, status) {
+    trusted = '';
+    return new Problem(
+      'unverified',
+      `What answers at ${paired.nod} didn't prove it is the Nod this panel is paired with${status ? ` (HTTP ${status})` : ''}. It got only encrypted requests it can't read. Start Nod, then run pair-helper.ps1 again.`,
+    );
+  }
+
   async function send(paired, path, body) {
-    const text = JSON.stringify(body);
     const url = new URL(`/api/helper/${path}`, paired.nod);
     const time = String(Date.now());
+    const context = ['nod-helper-request', 'POST', url.host, url.pathname + url.search, time].join(
+      '\n',
+    );
+    const text = await seal(paired, encoder.encode(JSON.stringify(body)), context);
     const signature = base64url(
       await crypto.subtle.sign(
         'HMAC',
-        paired.key,
-        encoder.encode(
-          [
-            'nod-helper-request',
-            'POST',
-            url.host,
-            url.pathname + url.search,
-            time,
-            await digest(encoder.encode(text)),
-          ].join('\n'),
-        ),
+        paired.mac,
+        encoder.encode(`${context}\n${await digest(encoder.encode(text))}`),
       ),
     );
     let response;
@@ -98,38 +139,47 @@
         `Nod isn't answering at ${paired.nod}. Start Nod, or run pair-helper.ps1 again if it now uses another address. (${error.message})`,
       );
     }
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    const answer = response.headers.get('x-nod-signature') || '';
-    const genuine =
-      tokenShape.test(answer) &&
-      (await crypto.subtle.verify(
-        'HMAC',
-        paired.key,
-        fromBase64url(answer),
-        encoder.encode(
-          ['nod-helper-response', signature, String(response.status), await digest(bytes)].join(
-            '\n',
+    let opened;
+    try {
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      const answer = response.headers.get('x-nod-signature') || '';
+      const genuine =
+        tokenShape.test(answer) &&
+        (await crypto.subtle.verify(
+          'HMAC',
+          paired.mac,
+          fromBase64(answer),
+          encoder.encode(
+            ['nod-helper-response', signature, String(response.status), await digest(bytes)].join(
+              '\n',
+            ),
           ),
-        ),
-      ));
-    if (!genuine) {
-      trusted = '';
-      throw new Problem(
-        'unverified',
-        `What answers at ${paired.nod} didn't prove it is the Nod this panel is paired with (HTTP ${response.status}), so the panel sends it nothing. Start Nod, then run pair-helper.ps1 again.`,
-      );
+        ));
+      if (!genuine) throw distrust(paired, response.status);
+      opened = await unseal(paired, bytes, `nod-helper-response\n${signature}`);
+    } catch (error) {
+      throw error instanceof Problem ? error : distrust(paired, response.status);
     }
-    if (response.ok) return { bytes, response };
+    const bytes = fromBase64(opened.body);
+    if (response.ok) return { bytes, type: opened.type, disposition: opened.disposition };
     let reason = '';
     try {
       reason = JSON.parse(decoder.decode(bytes))?.error || '';
     } catch {
       reason = '';
     }
-    throw new Problem(
-      response.status === 400 ? 'invalid' : 'error',
+    const problem = new Problem(
+      response.status === 400
+        ? 'invalid'
+        : response.status === 409
+          ? 'conflict'
+          : response.status === 429
+            ? 'busy'
+            : 'error',
       `${reason || 'Nod refused the request.'} (HTTP ${response.status})`,
     );
+    problem.retryAfter = Number(opened.retryAfter) || 0;
+    throw problem;
   }
 
   async function nod(path, body = {}) {
@@ -147,10 +197,8 @@
       await greeting;
       trusted = name;
     }
-    const { bytes, response } = await send(paired, path, body);
-    return path === 'cv'
-      ? { bytes, disposition: response.headers.get('content-disposition') }
-      : JSON.parse(decoder.decode(bytes));
+    const { bytes, type, disposition } = await send(paired, path, body);
+    return path === 'cv' ? { bytes, type, disposition } : JSON.parse(decoder.decode(bytes));
   }
 
   let chain = Promise.resolve();
@@ -183,11 +231,18 @@
         waiting.splice(index, 1);
         sent += 1;
       } catch (error) {
-        if (error.kind === 'invalid') {
+        if (error.kind === 'invalid' || error.kind === 'conflict') {
           waiting.splice(index, 1);
           await remember(
             `The invite for ${entry.invite.person.name} wasn't saved: ${error.message}`,
           );
+        } else if (error.kind === 'busy') {
+          waiting[index] = {
+            ...entry,
+            next: now + (error.retryAfter > 0 ? error.retryAfter * 1000 : 60_000),
+          };
+          await chrome.storage.local.set({ queue: waiting });
+          break;
         } else if (error.kind === 'error') {
           const tries = entry.tries + 1;
           if (tries >= retries) {
@@ -292,7 +347,9 @@
   }
 
   async function downloadCv() {
-    const { bytes, disposition } = await nod('cv');
+    const { bytes, type, disposition } = await nod('cv');
+    if (!/^application\/pdf(?:;|$)/i.test(type))
+      throw new Problem('error', "Nod's answer wasn't a PDF.");
     let binary = '';
     for (let start = 0; start < bytes.length; start += 0x8000)
       binary += String.fromCharCode(...bytes.subarray(start, start + 0x8000));

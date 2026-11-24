@@ -6,7 +6,7 @@
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmIYFTp63lDnqnIxSkcChHW4OTQjIDH0UcvMtE0s4k4jKMUZ3bj052pHwcq31nmn10ykA5T90tBWcWYto6zdjEJEeCAlxASTExakmxy6WkH46tt/OLeQ9iYwozJOv+9DTSM4ivnU7hrd2d3akrN2RU7uzSQIwUg6soR0Non0G7ljqG4+CC9lk7foqS9AUb3CdfKCB/7/SHRlfcgU+DT+zrb/JxH1uOg+HPU0g/gXygVcrjWkmHt9eXYz1LicxrRiFMsbUMYyAJLpLIPI5eQQX7JykYaIgLMgYnCO/+XmWQ3j530H78mzHUkrsYHYwPA+qFCgDU9yO14H8JAn+bbg7HQIDAQAB",
   "minimum_chrome_version": "116",
   "permissions": ["sidePanel", "storage", "downloads"],
-  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "https://www.linkedin.com/*"],
+  "host_permissions": ["http://127.0.0.1/*", "https://www.linkedin.com/*"],
   "background": {
     "service_worker": "service-worker.js"
   },
@@ -24,6 +24,6 @@
     }
   ],
   "content_security_policy": {
-    "extension_pages": "default-src 'self'; script-src 'self'; object-src 'none'; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    "extension_pages": "default-src 'self'; script-src 'self'; object-src 'none'; connect-src 'self' http://127.0.0.1:*; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
   }
 }
