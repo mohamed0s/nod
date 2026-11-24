@@ -2463,7 +2463,7 @@ test(
       });
 
       await t.test(
-        'an unusable trust check answer is asked again once, and only a valid second answer runs',
+        'only incomplete terms on an accepted source are asked again, once, for that same source',
         async () => {
           const { withFailureLog } = await import('../src/server/failure-log.ts');
           const logged: Array<{ event: string; error: unknown }> = [];
@@ -2492,19 +2492,26 @@ test(
             terms: [],
           });
           const unlisted = () => ({ run: true, source: 'message:99', terms: [] });
+          const read = () => ({ run: true, source: 'read' });
           const background = () => ({ run: true, source: 'schedule:0', terms: [] });
           const cronEdit = () => ({ run: true, source: 'schedule:2', terms: [] });
-          const read = () => ({ run: true, source: 'read' });
+          const instructed = () => ({ run: true, source: 'schedule:1' });
+          const invented = () => ({
+            run: true,
+            source: 'schedule:1',
+            terms: [{ user: 'my synthetic inbox', action: 'ana@example.test', same: true }],
+          });
           const check = async (
             turn: Awaited<ReturnType<typeof begin>>,
             action: string,
             args: Record<string, unknown>,
+            signal?: AbortSignal,
           ) => {
             logged.length = 0;
             const before = reviews.length;
-            const verdict = await withFailureLog(sink, () => trust.check(turn, action, args)).catch(
-              (error: unknown) => error,
-            );
+            const verdict = await withFailureLog(sink, () =>
+              trust.check(turn, action, args, signal),
+            ).catch((error: unknown) => error);
             return { verdict, asked: reviews.slice(before) };
           };
           const scheduled = async () => {
@@ -2529,16 +2536,14 @@ test(
             );
             return turn;
           };
-          const list = { query: 'newer_than:1d', max_results: 50 };
+          const send = () => email('ana@example.test');
 
           const chat = await begin('Email Ana the synthetic invoice.');
           sequence(untermed, sourced);
           const ran = calls.length;
           logged.length = 0;
           const before = reviews.length;
-          await withFailureLog(sink, () =>
-            approvals.request(chat, 'GMAIL_SEND_EMAIL', email('ana@example.test')),
-          );
+          await withFailureLog(sink, () => approvals.request(chat, 'GMAIL_SEND_EMAIL', send()));
           assert.equal(calls.length, ran + 1);
           assert.equal(reviews.length, before + 2);
           const [first, second] = reviews.slice(before);
@@ -2552,69 +2557,55 @@ test(
               message.canAuthorize === false ? [] : [`message:${index}`],
             ),
           ]);
-          assert.deepEqual(reasked(), [
-            { name: 'TrustCheckReask', code: 'accepted', reason: 'bad_terms' },
-          ]);
+          assert.deepEqual(reasked(), [{ name: 'TrustCheckReask', code: 'bad_terms:accepted' }]);
           await finish(chat.turnId, 'cancelled');
 
-          for (const [answers, code, reason] of [
-            [[unlisted, unlisted], 'basis_rejected', 'unlisted_source'],
-            [[unsourced, declined], 'declined', 'no_source'],
-            [[untermed, failure], 'failed', 'bad_terms'],
+          for (const [answers, asked, code] of [
+            [[unlisted, read], 1, 'unlisted_source:skipped'],
+            [[unlisted, sourced], 1, 'unlisted_source:skipped'],
+            [[unsourced, sourced], 1, 'no_source:skipped'],
+            [[untermed, read], 2, 'bad_terms:source_changed'],
+            [[untermed, unlisted], 2, 'bad_terms:basis_rejected'],
+            [[untermed, untermed], 2, 'bad_terms:basis_rejected'],
+            [[untermed, declined], 2, 'bad_terms:declined'],
+            [[untermed, failure], 2, 'bad_terms:failed'],
+            [[declined], 1, undefined],
+            [[failure], 1, undefined],
           ] as const) {
             const turn = await begin('Email Ana the synthetic invoice.');
             sequence(...answers);
-            const { verdict, asked } = await check(
-              turn,
-              'GMAIL_SEND_EMAIL',
-              email('ana@example.test'),
-            );
-            compareVerdict(verdict as Awaited<ReturnType<typeof trust.check>>, {
+            const outcome = await check(turn, 'GMAIL_SEND_EMAIL', send());
+            compareVerdict(outcome.verdict as Awaited<ReturnType<typeof trust.check>>, {
               confirm: true,
               reason: 'unrequested',
             });
-            assert.equal(asked.length, 2);
-            assert.deepEqual(reasked(), [{ name: 'TrustCheckReask', code, reason }]);
-            await finish(turn.turnId, 'cancelled');
-          }
-          for (const answer of [declined, failure]) {
-            const turn = await begin('Email Ana the synthetic invoice.');
-            sequence(answer);
-            const { verdict, asked } = await check(
-              turn,
-              'GMAIL_SEND_EMAIL',
-              email('ana@example.test'),
-            );
-            compareVerdict(verdict as Awaited<ReturnType<typeof trust.check>>, {
-              confirm: true,
-              reason: 'unrequested',
-            });
-            assert.equal(asked.length, 1);
-            assert.deepEqual(reasked(), []);
+            assert.equal(outcome.asked.length, asked, code);
+            assert.deepEqual(reasked(), code ? [{ name: 'TrustCheckReask', code }] : []);
             await finish(turn.turnId, 'cancelled');
           }
 
           const nightly = await scheduled();
-          sequence(background, read);
-          const accepted = await check(nightly, 'GMAIL_LIST_THREADS', list);
+          sequence(instructed, invented);
+          const accepted = await check(nightly, 'GMAIL_SEND_EMAIL', send());
           compareVerdict(accepted.verdict as Awaited<ReturnType<typeof trust.check>>, {
             confirm: false,
-            basis: { kind: 'read' },
+            basis: { kind: 'schedule', quote: 'Every evening, rank my synthetic inbox.' },
           });
           assert.equal(accepted.asked.length, 2);
           assert.deepEqual(accepted.asked[0]!.validSources, ['read', 'schedule:1']);
-          assert.deepEqual(reasked(), [
-            { name: 'TrustCheckReask', code: 'accepted', reason: 'unlisted_source' },
-          ]);
+          assert.deepEqual(reasked(), [{ name: 'TrustCheckReask', code: 'bad_terms:accepted' }]);
           await finish(nightly.turnId, 'cancelled');
           for (const [answers, asked] of [
-            [[background, cronEdit], 2],
-            [[untermed, untermed], 2],
+            [[background, invented], 1],
+            [[background, read], 1],
+            [[cronEdit, read], 1],
+            [[instructed, read], 2],
+            [[instructed, instructed], 2],
             [[failure], 1],
           ] as const) {
             const turn = await scheduled();
             sequence(...answers);
-            const outcome = await check(turn, 'GMAIL_LIST_THREADS', list);
+            const outcome = await check(turn, 'GMAIL_SEND_EMAIL', send());
             assert.ok(outcome.verdict instanceof Error);
             assert.match(outcome.verdict.message, /couldn't decide this action/);
             assert.equal(outcome.asked.length, asked);
@@ -2622,7 +2613,7 @@ test(
           }
           const refused = await scheduled();
           sequence(declined);
-          const outcome = await check(refused, 'GMAIL_LIST_THREADS', list);
+          const outcome = await check(refused, 'GMAIL_SEND_EMAIL', send());
           compareVerdict(outcome.verdict as Awaited<ReturnType<typeof trust.check>>, {
             confirm: true,
             reason: 'schedule',
@@ -2631,10 +2622,11 @@ test(
           await finish(refused.turnId, 'cancelled');
 
           const changing = await begin('Email Ana the synthetic invoice.');
-          const args = email('ana@example.test');
+          const args = send();
+          let reviewed = 0;
           sequence(untermed, sourced);
           duringReview = async () => {
-            if (reviews.at(-1)?.correction) args.recipient_email = 'unreviewed@example.test';
+            if (++reviewed === 2) args.recipient_email = 'unreviewed@example.test';
           };
           const changed = await check(changing, 'GMAIL_SEND_EMAIL', args);
           assert.ok(changed.verdict instanceof Error);
@@ -2644,13 +2636,14 @@ test(
 
           const stopping = await begin('Email Ana the synthetic invoice.');
           const stop = new AbortController();
+          reviewed = 0;
           sequence(untermed, sourced);
           duringReview = async () => {
-            if (reviews.at(-1)?.correction) stop.abort();
+            if (++reviewed === 2) stop.abort();
           };
-          await assert.rejects(
-            trust.check(stopping, 'GMAIL_SEND_EMAIL', email('ana@example.test'), stop.signal),
-          );
+          const stopped = await check(stopping, 'GMAIL_SEND_EMAIL', send(), stop.signal);
+          assert.ok(stopped.verdict instanceof Error);
+          assert.equal(stopped.asked.length, 2);
           await finish(stopping.turnId, 'cancelled');
         },
       );

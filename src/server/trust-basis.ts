@@ -105,7 +105,8 @@ type BasisWords = TrustWords & {
   action?: { name: string; arguments?: Record<string, unknown> };
 };
 
-function citedSource(answer: object) {
+export function citedSource(answer: unknown) {
+  if (!answer || typeof answer !== 'object') return undefined;
   const { because, source } = answer as { because?: unknown; source?: unknown };
   return typeof source === 'string'
     ? source
@@ -128,7 +129,7 @@ export function trustSources(words: BasisWords) {
 }
 
 export function trustBasisProblem(answer: unknown, words: BasisWords) {
-  const cited = answer && typeof answer === 'object' ? citedSource(answer) : undefined;
+  const cited = citedSource(answer);
   if (!cited) return 'no_source';
   return trustSources(words).includes(cited) ? 'bad_terms' : 'unlisted_source';
 }
