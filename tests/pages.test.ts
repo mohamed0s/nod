@@ -39,6 +39,58 @@ test('subagents can only list and read pages', async () => {
   assert.deepEqual(calls, ['list', 'get', 'publish']);
 });
 
+test('a page opens only public https addresses written in its own source', async () => {
+  const { pageLink } = await import('../src/shared/pages.ts');
+  const origin = 'http://127.0.0.1:4310';
+  const source = [
+    '<a href="https://example.test/item-one">One</a>',
+    '<a href="https://example.test/search?a=1&amp;b=2">Two</a>',
+    '<script type="application/json">{"url":"https:\\/\\/example.test\\/from-json"}</script>',
+    ...[
+      'http://example.test/plain',
+      'https://user:secret@example.test/',
+      'http://127.0.0.1:4310/settings',
+      'https://127.0.0.1/',
+      'https://[::1]/',
+      'https://localhost/',
+      'https://10.0.0.8/',
+      'https://172.20.1.1/',
+      'https://192.168.1.10/',
+      'https://169.254.169.254/latest',
+      'https://[fc00::1]/',
+      'https://[fe80::1]/',
+      'https://printer.local/',
+      'https://intranet/',
+    ].map((address) => `<a href="${address}">x</a>`),
+  ].join('');
+  for (const [href, opened] of [
+    ['https://example.test/item-one', 'https://example.test/item-one'],
+    ['https://example.test/search?a=1&b=2', 'https://example.test/search?a=1&b=2'],
+    ['https://example.test/from-json', 'https://example.test/from-json'],
+  ])
+    assert.equal(pageLink(href, source, origin), opened);
+  for (const href of [
+    'https://example.test/item-one?d=private',
+    'https://example.test/item',
+    'https://example.test/built',
+    'http://example.test/plain',
+    'https://user:secret@example.test/',
+    'http://127.0.0.1:4310/settings',
+    'https://127.0.0.1/',
+    'https://[::1]/',
+    'https://localhost/',
+    'https://10.0.0.8/',
+    'https://172.20.1.1/',
+    'https://192.168.1.10/',
+    'https://169.254.169.254/latest',
+    'https://[fc00::1]/',
+    'https://[fe80::1]/',
+    'https://printer.local/',
+    'https://intranet/',
+  ])
+    assert.equal(pageLink(href, source, origin), null, href);
+});
+
 test(
   'pages stay with their owner and only owner-started or scheduled work publishes them',
   { skip: !process.env.TEST_DATABASE_URL, timeout: 90_000 },

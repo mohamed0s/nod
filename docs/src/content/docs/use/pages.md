@@ -25,7 +25,7 @@ The list shows each page with when it was last updated and by which chat or sche
 
 - **Open chat** or **Open schedules** goes to the chat or the schedules that publish the page.
 - **History** lists the kept versions. **View** shows an earlier one, and **Make it the current version** brings it back as a new version. If Nod published a newer version since you opened the page, Nod doesn't change it and asks you to look at the new version first.
-- **Rename** changes the page's name. A schedule that updates the page keeps your name.
+- **Rename** changes the page's name. Nod keeps the name when it updates the page; only you rename pages.
 - **Archive** takes a page off the list, under **Archived**. Nod can't update an archived page until you select **Unarchive**.
 - **Delete** removes the page and its versions. Nod deletes their files at its next file cleanup, unless a chat message still shows them.
 
@@ -37,7 +37,7 @@ A page shows in the same sandbox as an HTML file in chat. Its scripts run apart 
 
 - **No network.** A page can't load scripts, fonts, images or data from the internet, so Nod puts everything into the file. Charts drawn in the page work.
 - **Read-only.** Forms don't submit, and nothing a page saves is kept.
-- **Links.** Select a link to an `https://` address to open it in a new browser tab, or in your default browser in the desktop app. A link opens only when you click it: a page can't open a website by itself. Links within the page scroll to their place. Other links, such as email links, don't open. If a page tries to load a website in its place, Nod stops showing it.
+- **Links.** When you click in a page, it can open a public `https://` address written in the page's own file, in a new browser tab, or in your default browser in the desktop app. A page can't open an address it builds while it runs, a local or private address, an `http://` address or Nod itself, and it can't open anything without your click. Links within the page move to their place. Other links, such as email links, don't open. If a page tries to load a website in its place, Nod stops showing it.
 - **Light and dark.** Pages follow your computer's light or dark setting.
 
 ## Who can change pages

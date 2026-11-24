@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   pageBytes,
+  pageLink,
   pageTitleLength,
   type PageFile,
   type PageSource,
@@ -21,24 +22,7 @@ import './pages.css';
 const listPath = '/api/pages';
 const refreshList = () => void pageDataCache.refresh(listPath, true);
 const linkCatcher =
-  "<script>addEventListener('click',function(e){var a=e.target&&e.target.closest&&e.target.closest('a[href]');if(!a)return;var h=a.getAttribute('href')||'';e.preventDefault();if(h.charAt(0)==='#'){try{var t=document.getElementById(decodeURIComponent(h.slice(1)));if(t)t.scrollIntoView()}catch(x){}}else if(/^https?:\\/\\//i.test(h))parent.postMessage({'nod:link':h},'*')},true)</script>";
-
-function openLink(href: string) {
-  let url: URL;
-  try {
-    url = new URL(href);
-  } catch {
-    return;
-  }
-  if (
-    !['http:', 'https:'].includes(url.protocol) ||
-    url.username ||
-    url.password ||
-    url.origin === window.location.origin
-  )
-    return;
-  window.open(url.href, '_blank', 'noopener,noreferrer');
-}
+  "<script>addEventListener('click',function(e){var a=e.target&&e.target.closest&&e.target.closest('a[href],area[href]');if(!a)return;var h=a.getAttribute('href')||'';e.preventDefault();if(h.charAt(0)==='#'){try{location.hash=h}catch(x){}}else if(/^\\s*https:\\/\\//i.test(h))parent.postMessage({'nod:link':h},'*')},true)</script>";
 
 function publisher(source: PageSource) {
   if (source.kind === 'schedule') return source.title ?? 'a schedule';
@@ -80,6 +64,13 @@ function Frame({ file, title }: { file: PageFile; title: string }) {
   }, [file.url]);
   const html = useMemo(() => (text === null ? null : sandboxedDocument(text, linkCatcher)), [text]);
   const leave = useCallback(() => setLeft(true), []);
+  const open = useCallback(
+    (href: string) => {
+      const url = text === null ? null : pageLink(href, text, window.location.origin);
+      if (url) window.open(url, '_blank', 'noopener,noreferrer');
+    },
+    [text],
+  );
   if (error) return <Notice>Could not load this page. {error}</Notice>;
   if (left)
     return (
@@ -92,14 +83,7 @@ function Frame({ file, title }: { file: PageFile; title: string }) {
     );
   if (html === null) return <Loading label="Loading the page…" />;
   return (
-    <SandboxedFrame
-      key={file.id}
-      html={html}
-      title={title}
-      scripts
-      onLeave={leave}
-      onLink={openLink}
-    />
+    <SandboxedFrame key={file.id} html={html} title={title} scripts onLeave={leave} onLink={open} />
   );
 }
 
