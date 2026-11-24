@@ -73,6 +73,10 @@ export function jobMailMessage(message: Message): JobMailMessage | null {
     id: message.id,
     receivedAt: Number(message.internalDate),
     sender: single ? (mailbox(from[0]!) ?? null) : null,
+    recipients: [...headers('to'), ...headers('cc')]
+      .flatMap((value) => value.split(','))
+      .flatMap((value) => mailbox(value) ?? [])
+      .slice(0, 100),
     senderName: single
       ? (/^\s*"?([^"<]*?)"?\s*<[^<>]+>\s*$/.exec(from[0]!)?.[1]?.trim() ?? '')
       : '',

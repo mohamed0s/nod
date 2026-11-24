@@ -2,6 +2,7 @@ export interface JobMailMessage {
   id: string;
   receivedAt: number;
   sender: string | null;
+  recipients: string[];
   senderName: string;
   subject: string;
   authenticatedDomain: string | null;
