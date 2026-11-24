@@ -64,6 +64,8 @@ export const mailActions = new Set([
   'report',
 ]);
 
+export type JobMailCheck = MailCheck;
+
 export type JobMailAccess = {
   list(
     connectionId: string,

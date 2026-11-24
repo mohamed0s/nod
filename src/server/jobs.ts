@@ -30,11 +30,10 @@ import {
 } from '../shared/jobs.ts';
 import type { ArtifactService } from './artifacts.ts';
 import { logFailure } from './failure-log.ts';
-import type { MailCheck } from './integration-result.ts';
 import { createJobCompanies, jobCompanyTables, linkPostings } from './job-companies.ts';
 import { createJobDrafts, jobDraftTables, validZone, type DraftNotice } from './job-drafts.ts';
 import { createJobHelper, jobHelperTables } from './job-helper.ts';
-import { createJobMail, jobMailTables, type JobMailAccess } from './job-mail.ts';
+import { createJobMail, jobMailTables, type JobMailAccess, type JobMailCheck } from './job-mail.ts';
 import { createJobPostings, jobPostingTables } from './job-postings.ts';
 import { careerOpsFiles, scanConfig, scanSummary } from './jobs-files.ts';
 import { failure, parse, rootedIn as lineage, type Query, type TurnRef } from './jobs-shared.ts';
@@ -327,7 +326,7 @@ export function createJobs(options: {
   curator?: MemoryCurator;
   mailboxes?: () => Promise<Array<{ id: string; address: string }>>;
   mail?: JobMailAccess;
-  mailCheck?: MailCheck;
+  mailCheck?: JobMailCheck;
   notify?: (client: Query, notice: DraftNotice) => Promise<boolean>;
   timeZone?: () => Promise<string | null | undefined>;
   signal?: AbortSignal;
