@@ -3418,6 +3418,7 @@ async function initializeApplication(
   const app = await createApp({
     failureLog: diagnostics.failure,
     rateLimit: options.rateLimit,
+    helperAccess: jobs.helperAccess,
     analytics: captureAnalytics,
     admission,
     artifacts,

@@ -37,7 +37,13 @@ export const accessCookie = (port: number) => `nod-access-${port}`;
 export function registerLocalAccess(
   app: FastifyInstance,
   port: number,
-  access: { key: string; desktop?: boolean; origin?: string; bearer?: boolean },
+  access: {
+    key: string;
+    desktop?: boolean;
+    origin?: string;
+    bearer?: boolean;
+    helper?: (request: FastifyRequest) => Promise<boolean>;
+  },
 ) {
   const desktop = access.desktop === true;
   const origin = access.origin ? new URL(access.origin) : undefined;
@@ -94,6 +100,15 @@ export function registerLocalAccess(
     const path = request.url.split('?')[0];
     if (!hosts.has(request.headers.host || ''))
       return reply.code(403).send({ error: 'This host is not permitted.' });
+    if (request.routeOptions.url?.startsWith('/api/helper/')) {
+      if (!/^chrome-extension:\/\/[a-p]{32}$/.test(request.headers.origin ?? ''))
+        return reply
+          .code(403)
+          .send({ error: 'Helper requests must come from a paired extension.' });
+      if (!(await access.helper?.(request)))
+        return reply.code(401).send({ error: 'Pair the helper again on the Jobs page.' });
+      return;
+    }
     if (
       !desktop &&
       request.method === 'POST' &&
@@ -136,6 +151,9 @@ export function registerLocalAccess(
     const open =
       appCallback ||
       connectionBridge ||
+      (access.helper !== undefined &&
+        request.method === 'POST' &&
+        path === '/api/helper-pairing') ||
       (!desktop &&
         ((request.method === 'POST' && path === '/api/access') ||
           (request.method === 'GET' && path === '/api/privacy')));

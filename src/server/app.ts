@@ -6,7 +6,7 @@ import {
   type AnswerChoice,
 } from '../shared/answer-choices.ts';
 import { approvalContent, approvalTitle } from './action-presentation.ts';
-import Fastify, { type FastifyReply } from 'fastify';
+import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
 import { randomUUID } from 'node:crypto';
@@ -228,6 +228,7 @@ export interface AppDependencies {
   activity?: () => Promise<Activity[]>;
   planningTasks?: () => string | undefined;
   rateLimit?: boolean;
+  helperAccess?: (request: FastifyRequest) => Promise<boolean>;
 }
 
 export async function createApp(dependencies: AppDependencies = {}) {
@@ -290,11 +291,12 @@ export async function createApp(dependencies: AppDependencies = {}) {
     app,
     port,
     desktopAccess
-      ? { key: desktopAccess.token, desktop: true }
+      ? { key: desktopAccess.token, desktop: true, helper: dependencies.helperAccess }
       : {
           key: authToken ?? (await accessKey(dataRoot)),
           origin: accessOrigin,
           bearer: authToken !== undefined,
+          helper: dependencies.helperAccess,
         },
   );
   app.addHook('preValidation', async (request) => {

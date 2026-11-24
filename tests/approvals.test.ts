@@ -1513,6 +1513,72 @@ test('localhost access requires the owner key and rejects foreign Host, Origin a
   }
 });
 
+test('helper routes take only a paired extension token, and that token opens no other route', async (t) => {
+  const key = randomBytes(32).toString('base64url');
+  const token = randomBytes(32).toString('base64url');
+  const origin = `chrome-extension://${'c'.repeat(32)}`;
+  const helper = async (request: { headers: Record<string, unknown> }) =>
+    request.headers.origin === origin && request.headers.authorization === `Bearer ${token}`;
+  for (const desktop of [true, false]) {
+    const app = Fastify();
+    t.after(() => app.close());
+    registerLocalAccess(app, 4310, { key, desktop, helper });
+    for (const path of ['/api/helper/fixture', '/api/fixture', '/api/helper-pairing'])
+      app.post(path, async () => ({ ok: true }));
+    const host = desktop ? '127.0.0.1:4310' : 'localhost:4310';
+    const owner: Record<string, string> = desktop
+      ? { 'x-nod-desktop-token': key }
+      : { cookie: `${accessCookie(4310)}=${key}` };
+    const paired = { host, origin, authorization: `Bearer ${token}` };
+    const post = async (url: string, headers: Record<string, string>) =>
+      (await app.inject({ method: 'POST', url, headers })).statusCode;
+    assert.equal(await post('/api/helper/fixture', paired), 200);
+    for (const [headers, status] of [
+      [{ ...paired, host: 'attacker.example:4310' }, 403],
+      [{ ...paired, origin: `chrome-extension://${'d'.repeat(32)}` }, 401],
+      [{ ...paired, origin: `chrome-extension://${'c'.repeat(31)}q` }, 403],
+      [{ ...paired, origin: 'https://www.linkedin.com' }, 403],
+      [{ host, authorization: paired.authorization }, 403],
+      [{ host, origin }, 401],
+      [{ host, origin, ...owner }, 401],
+      [{ host, ...owner }, 403],
+    ] as const)
+      assert.equal(await post('/api/helper/fixture', headers), status, JSON.stringify(headers));
+    for (const [headers, status] of [
+      [paired, 403],
+      [{ host, authorization: paired.authorization }, 401],
+      [{ host, ...owner }, 200],
+    ] as const)
+      assert.equal(await post('/api/fixture', headers), status, JSON.stringify(headers));
+    assert.equal(await post('/api/helper/unrouted', paired), 403);
+    assert.equal(await post('/api/helper-pairing', { host }), 200);
+    assert.equal(
+      await post('/api/helper-pairing', { host, origin: 'https://attacker.example' }),
+      403,
+    );
+    assert.equal(await post('/api/helper-pairing', { host, 'sec-fetch-site': 'cross-site' }), 403);
+  }
+  const unpaired = Fastify();
+  t.after(() => unpaired.close());
+  registerLocalAccess(unpaired, 4310, { key, desktop: true });
+  for (const path of ['/api/helper/fixture', '/api/helper-pairing'])
+    unpaired.post(path, async () => ({ ok: true }));
+  for (const [url, headers] of [
+    ['/api/helper/fixture', { origin, authorization: `Bearer ${token}` }],
+    ['/api/helper-pairing', {}],
+  ] as const)
+    assert.equal(
+      (
+        await unpaired.inject({
+          method: 'POST',
+          url,
+          headers: { host: '127.0.0.1:4310', ...headers },
+        })
+      ).statusCode,
+      401,
+    );
+});
+
 test('approval cards shorten long recipients and bodies, skip blank bodies and title MCP tools', () => {
   const many = Array.from({ length: 40 }, (_, index) => `person${index}@example.test`);
   const long = approvalContent('GMAIL_SEND_EMAIL', {
