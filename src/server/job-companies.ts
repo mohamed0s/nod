@@ -22,7 +22,7 @@ import { untrustedBlock } from '../shared/untrusted.ts';
 import { tailoringRules, type JobDrafts } from './job-drafts.ts';
 import { companyKey, linkedInMessageUrl, linkedInProfileUrl } from './job-urls.ts';
 import { clean } from './jobs-parsers.ts';
-import { failure, parse, rootedIn, type Query, type TurnRef } from './jobs-shared.ts';
+import { companyLabel, failure, parse, rootedIn, type Query, type TurnRef } from './jobs-shared.ts';
 
 export const jobCompanyTables = `
   CREATE TABLE IF NOT EXISTS job_companies (
@@ -1233,7 +1233,7 @@ export function createJobCompanies(options: {
       );
       await start(client, {
         sessionId,
-        title: `Apply at ${entry.name}`,
+        title: `Apply at ${companyLabel(entry.name)}`,
         brief: automaticApplyRequest(entry.id),
         sourceId: `job-apply:${sessionId}`,
       });
