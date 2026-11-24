@@ -295,11 +295,18 @@ test('a tailored message keeps the owner’s fields, links and length', async ()
     [{ text: base.replace('Robin', '{first_name}') }, /left \{first_name\}/],
     [{ text: base.replace('{greeting} ', '') }, /dropped the greeting/],
     [{ text: `${base} See https://example.net/x` }, /added a link/],
-    [{ text: `${base} www.example.net` }, /added a link/],
+    [{ text: `${base} www.example.net` }, /added a web address/],
     [{ text: `${base} ${'Truly grateful. '.repeat(10)}` }, /much longer/],
-    [{ text: '{greeting} Robin.' }, /cut much/],
+    [{ text: '{greeting} Robin.' }, /much shorter/],
     [{ changes: 'See https://example.net' }, /note/],
     [{ text: 42 }, /JSON/],
+    [{ text: `${base} Write to sam@example.net.` }, /email address/],
+    [{ text: `${base} Find me at sam-example.dev now.` }, /web address/],
+    [{ text: `${base} DM @sam_example.` }, /handle/],
+    [{ text: `${base} Call +20 100 000 0000.` }, /phone number/],
+    [{ text: `${base} See [my page](https://example.com/sam).` }, /formatted link/],
+    [{ text: `${base} Open tg://resolve?domain=x` }, /link/],
+    [{ text: `${base} hxxps://example.org` }, /link/],
   ] as const)
     assert.match(
       (checkTailoring(reply(change), offered) as { problem?: string }).problem ?? '',
@@ -374,6 +381,10 @@ test('waves pace the invites at a company and decide no luck', async () => {
   assert.equal(
     localDayStart('America/New_York', new Date('2026-03-09T12:00:00Z')).toISOString(),
     '2026-03-09T04:00:00.000Z',
+  );
+  assert.equal(
+    localDayStart('America/Santiago', new Date('2026-09-06T12:00:00Z')).toISOString(),
+    '2026-09-06T04:00:00.000Z',
   );
 });
 
@@ -666,7 +677,14 @@ test(
     const owner = (
       ownerId: string,
       turnLock = false,
-      extra: { curator?: MemoryCurator; timeZone?: () => Promise<string> } = {},
+      extra: {
+        curator?: MemoryCurator;
+        timeZone?: () => Promise<string>;
+        notify?: (
+          client: Pick<pg.PoolClient, 'query'>,
+          notice: { text: string; literal?: string; fallback: string },
+        ) => Promise<boolean>;
+      } = {},
     ) => {
       const artifacts = createArtifactService({ database: db.pool, ownerId, localRoot: root });
       const jobs = createJobs({
@@ -2147,11 +2165,31 @@ test(
           return tailorReply(request.input as Record<string, any>);
         },
       };
+      await db.pool.query(
+        `CREATE TABLE synthetic_notices(id uuid PRIMARY KEY DEFAULT gen_random_uuid(), owner_id text NOT NULL,
+           text text NOT NULL, literal text, fallback text NOT NULL, at timestamptz NOT NULL DEFAULT clock_timestamp())`,
+      );
+      const notify =
+        (ownerId: string) =>
+        async (
+          client: Pick<pg.PoolClient, 'query'>,
+          notice: { text: string; literal?: string; fallback: string },
+        ) => {
+          await client.query(
+            'INSERT INTO synthetic_notices(owner_id,text,literal,fallback) VALUES($1,$2,$3,$4)',
+            [ownerId, notice.text, notice.literal ?? null, notice.fallback],
+          );
+          return true;
+        };
       const f = owner('synthetic-owner-f', false, {
         curator,
+        notify: notify('synthetic-owner-f'),
         timeZone: async () => 'Asia/Tokyo',
       });
-      const g = owner('synthetic-owner-g', false, { timeZone: async () => 'America/Sao_Paulo' });
+      const g = owner('synthetic-owner-g', false, {
+        notify: notify('synthetic-owner-g'),
+        timeZone: async () => 'America/Sao_Paulo',
+      });
       await Promise.all([f.app.ready(), g.app.ready()]);
       const englishBody =
         "{greeting} {first_name},\n\nI'm {my_name}, {my_intro}. I'm applying for {role} at {company} through {programme} ({track}).\n\nThank you for your time.";
@@ -2226,28 +2264,10 @@ test(
             values.track ?? '',
           ],
         );
-      await db.pool.query(`
-        CREATE TABLE IF NOT EXISTS channel_inbox (
-          source_id text PRIMARY KEY, provider text NOT NULL, account_id text NOT NULL, sender_id text NOT NULL,
-          thread_id text NOT NULL, text text NOT NULL, received_at timestamptz NOT NULL, state text NOT NULL DEFAULT 'pending',
-          owner_id text NOT NULL, channel text, topic_id text, created_at timestamptz NOT NULL DEFAULT now());
-        CREATE TABLE IF NOT EXISTS channel_outbox (
-          message_id uuid PRIMARY KEY, source_id text NOT NULL REFERENCES channel_inbox(source_id),
-          state text NOT NULL DEFAULT 'pending', presentation jsonb, created_at timestamptz NOT NULL DEFAULT now());
-        CREATE TABLE IF NOT EXISTS channel_main_topics (
-          owner_id text NOT NULL, provider text NOT NULL, account_id text NOT NULL, sender_id text NOT NULL,
-          topic_id text NOT NULL, PRIMARY KEY(owner_id,provider,account_id,sender_id));`);
-      await db.pool.query(
-        `INSERT INTO channel_inbox(source_id,provider,account_id,sender_id,thread_id,text,received_at,state,owner_id,topic_id)
-         VALUES('synthetic:task','telegram','1','2','3','task message',now(),'submitted',$1,'77'),
-           ('synthetic:main','telegram','1','2','3','main message',now()-interval '1 hour','submitted',$1,NULL)`,
-        [f.ownerId],
-      );
       const pings = async (side: Side) =>
         (
-          await db.pool.query<{ text: string; source_id: string; thread_id: string | null }>(
-            `SELECT m.text,o.source_id,m.thread_id FROM channel_outbox o JOIN messages m ON m.id=o.message_id
-             WHERE m.owner_id=$1 ORDER BY m.created_at`,
+          await db.pool.query<{ text: string; literal: string | null; fallback: string }>(
+            'SELECT text,literal,fallback FROM synthetic_notices WHERE owner_id=$1 ORDER BY at,id',
             [side.ownerId],
           )
         ).rows;
@@ -2312,15 +2332,16 @@ test(
           const sentPings = await pings(f);
           assert.equal(sentPings.length, 1);
           const [ping] = sentPings;
-          assert.equal(ping!.source_id, 'synthetic:main');
-          assert.equal(ping!.thread_id, null);
+          assert.equal(ping!.literal, kept.draft);
+          assert.ok(ping!.text.includes(['```', kept.draft, '```'].join('\n')));
+          assert.doesNotMatch(ping!.fallback, /Many thanks/);
+          assert.match(ping!.fallback, /copy it from there/);
           assert.match(
             ping!.text,
             /^Synthetic kim-example accepted your invite at Kappa Example\./,
           );
           assert.match(ping!.text, /Open profile: https:\/\/www\.linkedin\.com\/in\/kim-example\//);
           assert.match(ping!.text, /recipient=ACoAASyntheticMemberKKKK11/);
-          assert.ok(ping!.text.includes(kept.draft));
           assert.match(ping!.text, /What Nod changed and why: Said many thanks/);
           assert.equal(
             (
@@ -2674,7 +2695,7 @@ test(
             changes: 'Added a link.',
             revision: current.draftRevision,
           }),
-          /doesn't take links/,
+          /doesn't add a link/,
         );
         await assert.rejects(
           owned({
@@ -2684,13 +2705,17 @@ test(
           }),
           /\{first_name\}/,
         );
+        const shorter = (current.draftInfo.raw as string).replace(
+          'Thank you for your time.',
+          'Thanks for your time.',
+        );
         await assert.rejects(
-          owned({ text: '{greeting} Tia, hello', revision: current.draftRevision }),
+          owned({ text: shorter, revision: current.draftRevision }),
           /first 10 messages/,
         );
         await assert.rejects(
           owned({
-            text: '{greeting} Tia, hello',
+            text: shorter,
             changes: 'Shorter.',
             revision: current.draftRevision - 1,
           }),
@@ -2698,7 +2723,7 @@ test(
         );
         const saved = records(
           await owned({
-            text: '{greeting} Tia, hello',
+            text: shorter,
             changes: 'Made it shorter.',
             revision: current.draftRevision,
           }),
@@ -2722,11 +2747,129 @@ test(
           b.jobs.execute(await turn(b, 'user'), { action: 'draft_prepare', personId: tia.id }),
           /not found/,
         );
+        assert.equal((await personOf(f, tia.companyId, tia.id)).draftInfo.raw, shorter);
+      });
+
+      await t.test(
+        'a message that couldn’t be filled still reaches the owner once it’s made',
+        async () => {
+          const uma = await invite(g, 'umi-example', 'Tau Example');
+          const accepted = await request(g, 'PATCH', `/api/jobs/people/${uma.id}`, {
+            status: 'accepted',
+            revision: uma.revision,
+          });
+          assert.equal(accepted.statusCode, 200, accepted.body);
+          assert.deepEqual(accepted.json().draftInfo.missing, ['role']);
+          const sent = async () =>
+            (await pings(g)).filter((entry) => entry.text.includes('umi-example accepted'));
+          assert.equal((await sent()).length, 1);
+          assert.match(
+            (await sent())[0]!.text,
+            /couldn't fill your referral message: it needs \{role\}/,
+          );
+          const made = await prepare(g, { personId: uma.id, role: 'Given Role' });
+          assert.equal(made.saved, true);
+          const after = await sent();
+          assert.equal(after.length, 2);
+          assert.equal(after[1]!.literal, made.text);
+          await prepare(g, { personId: uma.id, role: 'Other Role' });
+          assert.equal((await sent()).length, 2);
+        },
+      );
+
+      await t.test('only the owner replaces the owner’s own edit', async () => {
+        const vera = await invite(g, 'vera-example', 'Upsilon Example');
+        const made = await prepare(g, { personId: vera.id, role: 'Given Role' });
+        const own =
+          '{greeting} Vera, these are my own words about the Given Role at Upsilon Example.';
+        const edited = await request(g, 'PUT', `/api/jobs/people/${vera.id}/draft`, {
+          text: own,
+          draftRevision: made.draftRevision,
+        });
+        assert.equal(edited.statusCode, 200, edited.body);
+        assert.equal(edited.json().draftInfo.editedBy, 'owner');
+        records(
+          await g.jobs.execute(await turn(g, 'user'), {
+            action: 'person_update',
+            people: [{ id: vera.id, language: 'ar' }],
+          }),
+        );
+        const kept = await personOf(g, vera.companyId, vera.id);
+        assert.deepEqual([kept.language, kept.draftInfo.raw], ['ar', own]);
+        const save = async (input: Record<string, unknown>) =>
+          g.jobs.execute(await turn(g, 'user'), {
+            action: 'draft_save',
+            personId: vera.id,
+            changes: 'Synthetic change.',
+            revision: kept.draftRevision,
+            ...input,
+          });
+        await assert.rejects(save({ text: own.replace('Vera', 'Vera!') }), /owner edited/);
+        await assert.rejects(
+          save({ text: `${own} ${'More words. '.repeat(10)}`, replace: true }),
+          /much longer/,
+        );
+        await assert.rejects(
+          save({ text: `${own} Reach me at sam@example.net`, replace: true }),
+          /email address/,
+        );
+        const replaced = records(await save({ text: own.replace('Vera', 'Vera!'), replace: true }));
+        assert.deepEqual([replaced.state, replaced.person.draftInfo.editedBy], ['edited', 'nod']);
         assert.equal(
-          (await personOf(f, tia.companyId, tia.id)).draftInfo.raw,
-          '{greeting} Tia, hello',
+          records(
+            await g.jobs.execute(await turn(g, 'user'), {
+              action: 'draft_prepare',
+              personId: vera.id,
+            }),
+          ).saved,
+          true,
+        );
+        const fresh = await invite(g, 'wes-example', 'Upsilon Example');
+        await assert.rejects(
+          g.jobs.execute(await turn(g, 'user'), {
+            action: 'draft_save',
+            personId: fresh.id,
+            text: '{greeting} Wes',
+            changes: 'Synthetic.',
+            revision: 0,
+          }),
+          /no message yet/,
         );
       });
+
+      await t.test(
+        'a merged person keeps one whole message and resumes its tailoring',
+        async () => {
+          const mira = await invite(f, 'mira-example', 'Sigma Example');
+          assert.deepEqual((await prepare(f, { personId: mira.id })).missing, ['role']);
+          const urn = 'ACoAASyntheticMemberMMMM21';
+          const text = '{greeting} Mira, a synthetic message about Sigma Example.';
+          await db.pool.query(
+            `INSERT INTO job_people(id,owner_id,company_id,profile_key,member_urn,name,status,invited_at,
+             draft,draft_revision,draft_state,draft_language,draft_template_revision,draft_at)
+           VALUES($1,$2,$3,$4,$4,'Synthetic mira','invited',now(),$5,4,'tailoring','en',1,now())`,
+            [randomUUID(), f.ownerId, mira.companyId, urn, text],
+          );
+          const before = curated.length;
+          records(
+            await f.jobs.execute(await turn(f, 'user'), {
+              action: 'person_update',
+              people: [{ profileUrl: profile('mira-example'), memberUrn: urn }],
+            }),
+          );
+          await f.jobs.drafts.idle();
+          const rows = (
+            await db.pool.query(
+              'SELECT id,draft,draft_state,draft_missing FROM job_people WHERE owner_id=$1 AND company_id=$2',
+              [f.ownerId, mira.companyId],
+            )
+          ).rows;
+          assert.deepEqual(rows, [
+            { id: mira.id, draft: text, draft_state: 'tailored', draft_missing: [] },
+          ]);
+          assert.equal(curated.length - before, 1);
+        },
+      );
 
       await t.test('invites count by the owner’s local day and week', async () => {
         const offset = 9 * 3_600_000;
@@ -3463,6 +3606,12 @@ test(
             [samView.draftInfo?.state, samView.draftInfo?.missing, samView.waves.state],
             ['missing', ['template'], 'open'],
           );
+          assert.deepEqual(
+            ['raw', 'templateRevision', 'languageBy', 'at'].filter(
+              (key) => key in (samView.draftInfo ?? {}),
+            ),
+            [],
+          );
           assert.equal(
             samView.messageUrl,
             `https://www.linkedin.com/messaging/compose/?recipient=${memberA}`,
@@ -3478,6 +3627,12 @@ test(
           assert.equal(switched.statusCode, 200, switched.body);
           assert.deepEqual([switched.json().status, switched.json().language], ['asked', 'ar']);
           assert.equal((await status({ revision: switched.json().revision })).statusCode, 400);
+          const made = await status({ make: true, revision: switched.json().revision });
+          assert.equal(made.statusCode, 200, made.body);
+          assert.deepEqual(
+            [made.json().status, made.json().draftInfo.state, 'raw' in made.json().draftInfo],
+            ['asked', 'missing', false],
+          );
           assert.equal(
             (await status({ status: 'hired', revision: asked.json().revision })).statusCode,
             400,
