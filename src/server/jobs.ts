@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { posix } from 'node:path';
 import { z } from 'zod';
 import { appConfirmation } from '../ports/agent.ts';
+import type { TelegramChannels } from '../ports/job-sources.ts';
 import type { Artifact } from '../shared/contracts.ts';
 import { fileBytes, fileName } from '../shared/files.ts';
 import { untrustedBlock } from '../shared/untrusted.ts';
@@ -27,7 +28,9 @@ import {
   type JobTemplatesView,
 } from '../shared/jobs.ts';
 import type { ArtifactService } from './artifacts.ts';
-import { careerOpsFiles } from './jobs-files.ts';
+import { createJobPostings, jobPostingTables } from './job-postings.ts';
+import { careerOpsFiles, scanConfig, scanSummary } from './jobs-files.ts';
+import { failure, parse, rootedIn as lineage, type Query, type TurnRef } from './jobs-shared.ts';
 import { lockKey } from './locks.ts';
 import { withdrawnSql } from './turn-chain.ts';
 import { afterCommit, transaction } from './transaction.ts';
@@ -61,6 +64,7 @@ export const jobTables = `
   );
   CREATE INDEX IF NOT EXISTS job_revisions_owner ON job_revisions(owner_id,kind,cv_id,created_at DESC);
   ALTER TABLE job_cvs ADD COLUMN IF NOT EXISTS conversion_started_at timestamptz;
+  ${jobPostingTables}
 `;
 
 export const exampleTemplates: JobTemplate[] = [
@@ -185,8 +189,6 @@ const toolInput = z.discriminatedUnion('action', [
 ]);
 const quietActions = new Set(['setup_status', 'cv_get', 'cv_file', 'sync']);
 
-type Query = Pick<PoolClient, 'query'>;
-type TurnRef = { threadId: string; turnId: string };
 type Actor = 'owner' | 'nod';
 type CvRow = {
   id: string;
@@ -206,18 +208,6 @@ type CvRow = {
   converting: boolean;
 };
 type Synced = { thread?: string; files?: Record<string, string> };
-
-function failure(message: string, statusCode = 400) {
-  return Object.assign(new Error(message), { statusCode });
-}
-
-function parse<T extends z.ZodType>(schema: T, value: unknown, what: string): z.output<T> {
-  const parsed = schema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  const issue = parsed.error.issues[0]!;
-  const path = issue.path.join('.');
-  throw failure(`${what}${path ? ` (${path})` : ''}: ${issue.message}`);
-}
 
 function hash(text: string) {
   return createHash('sha256').update(text).digest('hex');
@@ -299,7 +289,12 @@ export function createJobs(options: {
     remove?(threadId: string, path: string, signal?: AbortSignal): Promise<void>;
   };
   startChat?: (text: string, attachments: Artifact[], sessionId: string) => Promise<unknown>;
-  withTurnLock?: <T>(turnId: string, operation: (client: PoolClient) => Promise<T>) => Promise<T>;
+  withTurnLock?: <T>(
+    turnId: string,
+    operation: (client: PoolClient) => Promise<T>,
+    signal?: AbortSignal,
+  ) => Promise<T>;
+  telegram?: TelegramChannels;
   changed?: () => void;
 }) {
   const { pool, ownerId } = options;
@@ -312,13 +307,34 @@ export function createJobs(options: {
       afterCommit(client, changed);
       return value;
     }, pool);
-  const turnWrite = <T>(turn: TurnRef, operation: (client: PoolClient) => Promise<T>) => {
+  const turnWrite = <T>(
+    turn: TurnRef,
+    operation: (client: PoolClient) => Promise<T>,
+    signal?: AbortSignal,
+  ) => {
     if (!options.withTurnLock) throw failure('Job records are unavailable in this runtime.', 503);
-    return options.withTurnLock(turn.turnId, async (client) => {
-      await lock(client);
-      return operation(client);
-    });
+    return options.withTurnLock(
+      turn.turnId,
+      async (client) => {
+        await lock(client);
+        return operation(client);
+      },
+      signal,
+    );
   };
+  const postings = createJobPostings({
+    pool,
+    ownerId,
+    ...(options.workspace ? { read: options.workspace.read } : {}),
+    ...(options.telegram ? { telegram: options.telegram } : {}),
+    scanSummary: async (client) => {
+      const state = await profileState(client);
+      return scanSummary(scanConfig(state.profile, state.portals));
+    },
+    turnWrite,
+    owned,
+    changed,
+  });
 
   async function cvs(client: Query, filter: { id?: string; archived?: boolean } = {}) {
     const { rows } = await client.query<CvRow>(
@@ -344,22 +360,7 @@ export function createJobs(options: {
     return row;
   }
 
-  async function rootedIn(client: Query, turn: TurnRef) {
-    const { rows } = await client.query<{ source: string; message_id: string | null }>(
-      `WITH RECURSIVE lineage AS (
-         SELECT id,parent_turn_id,source,message_id,0 AS depth FROM turns WHERE id=$1 AND owner_id=$2 AND thread_id=$3
-         UNION ALL SELECT p.id,p.parent_turn_id,p.source,p.message_id,c.depth+1 FROM turns p
-           JOIN lineage c ON c.parent_turn_id=p.id WHERE p.owner_id=$2 AND c.depth<100
-       ) SELECT source,message_id FROM lineage ORDER BY depth DESC LIMIT 1`,
-      [turn.turnId, ownerId, turn.threadId],
-    );
-    const root = rows[0];
-    return root?.source === 'user' && root.message_id
-      ? 'owner'
-      : root?.source === 'schedule'
-        ? 'schedule'
-        : 'other';
-  }
+  const rootedIn = (client: Query, turn: TurnRef) => lineage(client, ownerId, turn);
 
   async function ownerOnly(client: Query, turn: TurnRef, what: string) {
     if ((await rootedIn(client, turn)) !== 'owner')
@@ -907,6 +908,7 @@ export function createJobs(options: {
       reviewLimits?: (input: JobLimits, current: JobLimitValues) => Promise<unknown>;
     } = {},
   ) {
+    if (postings.handles(raw)) return postings.execute(turn, raw, context.signal);
     const request = parse(toolInput, raw, 'The jobs request');
     const result = async (): Promise<unknown> => {
       switch (request.action) {
@@ -1030,6 +1032,7 @@ export function createJobs(options: {
   }
 
   function registerRoutes(app: FastifyInstance) {
+    postings.registerRoutes(app);
     const body = <T extends z.ZodType>(schema: T, value: unknown, what: string) =>
       parse(schema, value, what);
     app.get('/api/jobs/setup', () => setup(pool));

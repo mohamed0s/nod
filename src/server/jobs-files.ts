@@ -82,6 +82,42 @@ ${bullets(profile.regions, 'Any.')}
 `;
 }
 
+const defaultBoards = [
+  { name: 'Remotive', provider: 'remotive' },
+  { name: 'Himalayas', provider: 'himalayas' },
+  { name: 'Jobicy', provider: 'jobicy' },
+  { name: 'Remote OK', provider: 'remoteok' },
+  { name: 'We Work Remotely', provider: 'weworkremotely' },
+  { name: 'Working Nomads', provider: 'workingnomads' },
+];
+
+export function scanConfig(profile: JobProfile, portals: Record<string, unknown>) {
+  if (!profile.targetRoles.length && !Object.keys(portals).length) return undefined;
+  return {
+    title_filter: { positive: profile.targetRoles, negative: [] },
+    ...(profile.regions.length
+      ? { location_filter: { allow: [...new Set([...profile.regions, 'Remote'])] } }
+      : {}),
+    tracked_companies: [],
+    job_boards: defaultBoards,
+    ...portals,
+  };
+}
+
+export function scanSummary(config: Record<string, unknown> | undefined) {
+  const named = (value: unknown) =>
+    (Array.isArray(value) ? value : []).filter(
+      (entry): entry is { name: string; enabled?: unknown } =>
+        Boolean(entry) && typeof entry === 'object' && typeof entry.name === 'string',
+    );
+  return {
+    boards: named(config?.job_boards)
+      .filter((entry) => entry.enabled !== false)
+      .map((entry) => entry.name),
+    companies: named(config?.tracked_companies).filter((entry) => entry.enabled !== false).length,
+  };
+}
+
 export function careerOpsFiles(input: {
   profile: JobProfile;
   portals: Record<string, unknown>;
@@ -97,11 +133,7 @@ export function careerOpsFiles(input: {
   if (main?.markdown) files['cv.md'] = `${main.markdown}\n`;
   else
     skipped['cv.md'] = main ? 'The main CV has no converted text yet.' : 'There is no main CV yet.';
-  const scan = Object.keys(portals).length
-    ? portals
-    : profile.targetRoles.length
-      ? { title_filter: { positive: profile.targetRoles, negative: [] } }
-      : undefined;
+  const scan = scanConfig(profile, portals);
   if (scan) files['portals.yml'] = `${JSON.stringify(scan, null, 2)}\n`;
   else skipped['portals.yml'] = 'The profile has no target roles or scan sources yet.';
   return { files, skipped };
