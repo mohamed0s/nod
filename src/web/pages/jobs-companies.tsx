@@ -6,6 +6,7 @@ import {
   type JobCompany,
   type JobCompanyFilter,
   type JobCompanyView,
+  type JobNoLuckResult,
   type JobPerson,
   type JobPersonStatus,
 } from '../../shared/job-companies';
@@ -273,10 +274,13 @@ function PersonCard({ person, onChanged }: { person: JobPerson; onChanged(): voi
 function noLuckText(company: JobCompany, limits: Limits, format: ReturnType<typeof useDateFormat>) {
   const since = company.noLuck.since ? formatDateTime(company.noLuck.since, format) : '';
   const rule = `nobody accepted within ${plural(limits.noAcceptDays, 'day')}, or replied within ${plural(limits.noReplyDays, 'day')} of being asked`;
+  const marked = `You marked it no luck${since ? ` on ${since}` : ''}`;
   if (company.noLuck.choice === 'no_luck')
-    return company.applySessionId
-      ? `You marked it no luck${since ? ` on ${since}` : ''}. Nod opened one chat to apply on the company's own site, and asks you before anything is submitted.`
-      : `You marked it no luck${since ? ` on ${since}` : ''}, but its apply chat hasn't started.`;
+    return company.applyChat?.state === 'open'
+      ? `${marked}. Nod opened one chat to apply on the company's own site, and asks you before anything is submitted.`
+      : company.applyChat?.state === 'starting'
+        ? `${marked}. Nod is opening its apply chat.`
+        : `${marked}, but its apply chat isn't open.`;
   if (company.noLuck.choice === 'keep_trying')
     return "You're keeping this company open, so Nod doesn't count it as no luck.";
   if (company.noLuck.value)
@@ -304,17 +308,19 @@ function CompanyDetail({ id, onBack }: { id: string; onBack(): void }) {
     setBusy(true);
     setMessage(null);
     try {
-      const result = await api<{ company: JobCompanyView; apply: string | null }>(
-        `${path}/no-luck`,
-        { method: 'PUT', body: JSON.stringify({ noLuck }) },
-      );
+      const result = await api<JobNoLuckResult>(`${path}/no-luck`, {
+        method: 'PUT',
+        body: JSON.stringify(
+          noLuck === true ? { noLuck } : { noLuck, revision: data.data?.revision ?? 0 },
+        ),
+      });
       data.update(() => result.company);
-      if (result.apply === 'started')
+      if (result.apply?.state === 'started')
         setMessage({ kind: 'info', text: 'Nod opened a chat to apply to this company.' });
-      else if (result.apply && result.apply !== 'reused')
+      else if (result.apply?.state === 'failed')
         setMessage({
           kind: 'error',
-          text: `The company is marked no luck, but its apply chat didn't start: ${result.apply}`,
+          text: `The company is marked no luck, but its apply chat didn't start: ${result.apply.error}`,
         });
     } catch (cause) {
       setMessage({ kind: 'error', text: errorMessage(cause) });
@@ -347,6 +353,7 @@ function CompanyDetail({ id, onBack }: { id: string; onBack(): void }) {
     );
   const company = data.data;
   const ticked = company.noLuck.choice === 'no_luck';
+  const chat = company.applyChat;
   return (
     <div className="jobs-panel">
       {back}
@@ -386,22 +393,20 @@ function CompanyDetail({ id, onBack }: { id: string; onBack(): void }) {
         </label>
         <p className="jobs-meta">{noLuckText(company, company.limits, format)}</p>
         <div className="jobs-actions">
-          {ticked && company.applySessionId && company.applyChat && (
+          {chat?.state === 'open' && (
             <Button
               size="sm"
               variant="secondary"
               onClick={() =>
                 window.dispatchEvent(
-                  new CustomEvent('nod:open-chat', {
-                    detail: { taskId: company.applySessionId },
-                  }),
+                  new CustomEvent('nod:open-chat', { detail: { taskId: chat.id } }),
                 )
               }
             >
               Open the apply chat
             </Button>
           )}
-          {ticked && !company.applySessionId && (
+          {ticked && (!chat || chat.state === 'lost') && (
             <Button size="sm" variant="secondary" disabled={busy} onClick={() => void choose(true)}>
               Start the apply chat
             </Button>
