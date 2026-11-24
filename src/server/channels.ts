@@ -8,7 +8,7 @@ import pg, { type Pool, type PoolClient } from 'pg';
 import { z } from 'zod';
 import { classifyVerificationReply, securityCodeIn } from '../shared/verification-code.ts';
 import { isMessageReaction } from '../shared/emoji.ts';
-import { transaction } from './transaction.ts';
+import { afterCommit, transaction } from './transaction.ts';
 import { logFailure, logRepeatedFailure } from './failure-log.ts';
 import { languageText } from './communication.ts';
 import { ChannelMediaFailure, type ChannelMedia } from './channel-media.ts';
@@ -416,7 +416,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
   const modeRetry = new Map<string, number>();
   const sendRetry = new Map<string, { at: number; tries: number }>();
   async function saveReply(
-    client: PoolClient,
+    client: Pick<PoolClient, 'query'>,
     sourceId: string,
     threadId: string | null,
     reply: {
@@ -580,7 +580,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
         `SELECT o.message_id FROM channel_outbox o JOIN channel_inbox i ON i.source_id=o.source_id
          JOIN messages m ON m.id=o.message_id AND m.owner_id=i.owner_id
          WHERE i.owner_id=$1 AND i.provider=$2 AND i.account_id=$3 AND i.sender_id=$4
-           AND i.thread_id=$5 AND $6=ANY(o.provider_message_ids) AND o.state='sent'
+           AND i.thread_id=$5 AND $6=ANY(o.provider_message_ids) AND o.state='sent' AND m.thread_id IS NOT NULL
          UNION ALL
          SELECT message_id FROM channel_inbox WHERE owner_id=$1 AND provider=$2 AND account_id=$3
            AND sender_id=$4 AND thread_id=$5 AND source_id=$7 AND state='submitted'
@@ -2621,6 +2621,37 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     announcePairing,
     react,
     renameTopic,
+    async notice(
+      client: Pick<PoolClient, 'query'>,
+      message: { text: string; literal?: string; fallback: string },
+    ) {
+      if (closed || replacing) return false;
+      const { rows } = await client.query<ChannelIdentity & { source_id: string }>(
+        `SELECT i.source_id,i.provider,i.account_id,i.sender_id FROM channel_inbox i
+         WHERE i.owner_id=$1 AND i.state='submitted'
+           AND (i.topic_id IS NULL OR i.topic_id=(SELECT t.topic_id FROM channel_main_topics t
+             WHERE t.owner_id=i.owner_id AND t.provider=i.provider AND t.account_id=i.account_id
+               AND t.sender_id=i.sender_id))
+         ORDER BY i.received_at DESC LIMIT 20`,
+        [ownerId],
+      );
+      const source = rows.find((row) => permitted(row));
+      if (!source) return false;
+      const literal =
+        message.literal === undefined ||
+        (channelText(message.text).text === message.text.trim() &&
+          (transport.canDeliverLiteral?.({
+            channelId: source.provider,
+            text: message.text,
+            literal: message.literal,
+          }) ??
+            false));
+      await saveReply(client, source.source_id, null, {
+        text: literal ? message.text : message.fallback,
+      });
+      afterCommit(client, () => void drain());
+      return true;
+    },
     async pairing() {
       if (closed || replacing || !transport.pairing) throw new Error('QR pairing is unavailable.');
       return transport.pairing();

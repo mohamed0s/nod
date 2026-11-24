@@ -6005,6 +6005,34 @@ test(
           await thread.stopThread();
         },
       );
+
+      await t.test(
+        'a notice sent outside the chat keeps a bare yes from answering an older question',
+        async () => {
+          const reply = 'synthetic yes after a notice';
+          replyAnswers[reply] = 'yes';
+          const channel = 'telegram:fixture-notice';
+          const asked = await begin('Synthetic chat-app request', { channel });
+          const id = await propose(asked, 'NOD_notification_preferences_update', {
+            notificationRule: 'Asked before a notice',
+          });
+          await finish(asked.turnId);
+          const input = { threadId: asked.threadId, channel, text: reply };
+          assert.deepEqual(await approvals.chat.answer(input), { approvalId: id, approved: true });
+          await db.pool.query(
+            "INSERT INTO messages(id,owner_id,role,text,thread_id,delivered_channel,created_at) VALUES($1,$2,'assistant','Synthetic notice',NULL,'telegram:elsewhere',clock_timestamp())",
+            [randomUUID(), ownerId],
+          );
+          assert.deepEqual(await approvals.chat.answer(input), { approvalId: id, approved: true });
+          await db.pool.query(
+            "INSERT INTO messages(id,owner_id,role,text,thread_id,delivered_channel,created_at) VALUES($1,$2,'assistant','Synthetic notice',NULL,$3,clock_timestamp())",
+            [randomUUID(), ownerId, channel],
+          );
+          assert.equal(await approvals.chat.answer(input), undefined);
+          assert.equal((await stored(id)).status, 'pending');
+          delete replyAnswers[reply];
+        },
+      );
     } finally {
       await app.close();
       await thread.stopThreadWorkers();
