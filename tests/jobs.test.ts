@@ -701,6 +701,7 @@ test(
           notice: { text: string; literal?: string; fallback: string },
         ) => Promise<boolean>;
         automatic?: Automatic;
+        continueChat?: (text: string, sessionId: string) => Promise<boolean>;
       } = {},
     ) => {
       const artifacts = createArtifactService({ database: db.pool, ownerId, localRoot: root });
@@ -2998,7 +2999,8 @@ test(
       const queue = await import('../src/server/thread.ts');
       const { turnOrigin } = await import('../src/server/approvals.ts');
       const { rootedIn } = await import('../src/server/jobs-shared.ts');
-      const { automaticApplyRequest } = await import('../src/server/job-companies.ts');
+      const { applyRequest, automaticApplyRequest } =
+        await import('../src/server/job-companies.ts');
       await queue.initializeThreads();
       queueStarted = true;
       const automatic: Automatic = {
@@ -3368,6 +3370,158 @@ test(
             first.jobs.execute(mine, applied(own, { appliedAt: '2999-01-01T00:00:00Z' })),
             /not in the future/,
           );
+        },
+      );
+
+      await t.test('an apply chat asks the owner before it first uses a careers site', async () => {
+        const work = (
+          await db.pool.query<{ id: string; thread_id: string }>(
+            'SELECT id,thread_id FROM turns WHERE owner_id=$1 AND session_id=$2 ORDER BY created_at LIMIT 1',
+            [a.ownerId, kappaChat],
+          )
+        ).rows[0]!;
+        const chat = { threadId: work.thread_id, turnId: work.id };
+        const asked: Array<{ companyId: string; site: string }> = [];
+        const question = { [appConfirmation]: 'Synthetic site question' };
+        const ask = async (target: { companyId: string; site: string }) => {
+          asked.push(target);
+          return question;
+        };
+        const step = (url: string, action: string, subagent = false) => ({
+          step: { action },
+          page: { origin: new URL(url).origin, url },
+          subagent,
+        });
+        const site = (url: string, action = 'fill', subagent = false) =>
+          first.jobs.apply.siteStep(chat, step(url, action, subagent), ask);
+        const elsewhere = await turn(first, 'user');
+        for (const action of ['fill', 'type', 'upload', 'click'])
+          assert.equal(
+            await first.jobs.apply.siteStep(
+              elsewhere,
+              step('https://jobs.lever.co/elsewhere/1', action),
+              ask,
+            ),
+            undefined,
+          );
+        assert.equal(asked.length, 0);
+        for (const action of ['fill', 'type', 'upload', 'click'])
+          assert.equal(
+            await site('https://jobs.lever.co/Kappa-Hiring/123/apply', action),
+            question,
+          );
+        assert.deepEqual(asked.at(-1), {
+          companyId: kappa.id,
+          site: 'https://jobs.lever.co/kappa-hiring',
+        });
+        assert.deepEqual(await first.jobs.apply.siteQuestion(asked.at(-1)), {
+          question:
+            "Apply at Kappa Example on `https://jobs.lever.co/kappa-hiring`? Nod would enter your details and upload your CV on that site. Say yes only if it is Kappa Example's own careers site.",
+          action: 'Apply on this site',
+        });
+        assert.equal(await site('https://jobs.lever.co/kappa-hiring/9', 'upload', true), 'refused');
+        await assert.rejects(
+          transaction(
+            (client) => first.jobs.apply.approveSite(asked.at(-1), elsewhere, client),
+            db.pool,
+          ),
+          /own apply chat/,
+        );
+        assert.equal(
+          (
+            await transaction(
+              (client) => first.jobs.apply.approveSite(asked.at(-1), chat, client),
+              db.pool,
+            )
+          ).approved,
+          'https://jobs.lever.co/kappa-hiring',
+        );
+        assert.deepEqual(
+          (await db.pool.query('SELECT apply_origins FROM job_companies WHERE id=$1', [kappa.id]))
+            .rows[0].apply_origins,
+          ['https://jobs.lever.co/kappa-hiring'],
+        );
+        const before = asked.length;
+        for (const action of ['fill', 'type', 'upload', 'click'])
+          assert.equal(
+            await site('https://jobs.lever.co/kappa-hiring/456/apply', action),
+            undefined,
+          );
+        assert.equal(asked.length, before);
+        assert.equal(await site('https://jobs.lever.co/kappa-copy/1'), question);
+        assert.equal(asked.at(-1)!.site, 'https://jobs.lever.co/kappa-copy');
+        await db.pool.query(
+          `INSERT INTO approvals(id,owner_id,thread_id,turn_id,action,args,status)
+           VALUES($1,$2,$3,$4,'NOD_job_apply_site',$5,'declined')`,
+          [randomUUID(), a.ownerId, chat.threadId, chat.turnId, asked.at(-1)],
+        );
+        await assert.rejects(site('https://jobs.lever.co/kappa-copy/2', 'type'), /said no/);
+        assert.equal(await site('https://careers.kappa.example.test/jobs/9'), question);
+        const page = (await request(first, 'GET', '/api/jobs/profile')).json();
+        assert.equal(
+          (
+            await request(first, 'PUT', '/api/jobs/profile', {
+              revision: page.revision,
+              profile: page.profile,
+              portals: {
+                ...page.portals,
+                tracked_companies: [
+                  { name: 'Kappa Example', careers_url: 'https://careers.kappa.example.test/' },
+                ],
+              },
+            })
+          ).statusCode,
+          200,
+        );
+        assert.equal(await site('https://careers.kappa.example.test/jobs/9'), undefined);
+      });
+
+      await t.test('Nod opens no apply chat while preparation is paused', async () => {
+        await pastStarts();
+        const phi = await giveUp(first, 'Phi Example');
+        const resting = owner(a.ownerId, true, {
+          automatic: { ...automatic, paused: async () => true },
+        });
+        assert.deepEqual(await resting.jobs.apply.detect(), []);
+        assert.equal((await chatOf(phi.id)).apply_session_id, null);
+        assert.deepEqual(await first.jobs.apply.detect(), [phi.id]);
+      });
+
+      await t.test(
+        'a tick passes the owner’s words to a chat Nod started or one that’s done',
+        async () => {
+          await pastStarts();
+          const continued: Array<{ text: string; sessionId: string }> = [];
+          let answered = true;
+          const ticker = owner(a.ownerId, true, {
+            automatic,
+            continueChat: async (text, sessionId) => {
+              continued.push({ text, sessionId });
+              return answered;
+            },
+          });
+          await ticker.app.ready();
+          const tau = await giveUp(ticker, 'Tau Example');
+          assert.deepEqual(await ticker.jobs.apply.detect(), [tau.id]);
+          const { apply_session_id: session } = await chatOf(tau.id);
+          const tick = () =>
+            request(ticker, 'PUT', `/api/jobs/companies/${tau.id}/no-luck`, { noLuck: true });
+          answered = false;
+          assert.deepEqual((await tick()).json().apply, { state: 'reused' });
+          assert.equal((await chatOf(tau.id)).apply_by, 'rule');
+          answered = true;
+          const before = chats.length;
+          assert.deepEqual((await tick()).json().apply, { state: 'resumed' });
+          assert.deepEqual(continued.at(-1), { text: applyRequest(tau.id), sessionId: session });
+          assert.equal((await chatOf(tau.id)).apply_by, 'owner');
+          const count = continued.length;
+          assert.deepEqual((await tick()).json().apply, { state: 'reused' });
+          assert.equal(continued.length, count);
+          await db.pool.query("UPDATE tasks SET state='done' WHERE id=$1", [session]);
+          assert.deepEqual((await tick()).json().apply, { state: 'resumed' });
+          assert.equal(continued.length, count + 1);
+          assert.equal(chats.length, before);
+          await ticker.app.close();
         },
       );
 
