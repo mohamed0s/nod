@@ -169,6 +169,7 @@ export const approvalCases = inParts(
       { entered(turnId: string): void; wait: Promise<void>; messages: string[] } | undefined;
     const ids: string[] = [];
     const asked = new Set<string>();
+    const ruleCovered = new Set<string>();
     const desktopSteps: string[] = [];
     const cleared = new Set<string>();
     const ownerWords: string[] = [];
@@ -380,6 +381,12 @@ export const approvalCases = inParts(
                   action?: { name?: string; arguments?: { recipient_email?: unknown } };
                 };
                 ownerWords.push(...(words.userMessages ?? []).map((message) => message.text));
+                if (words.userRules && ruleCovered.has(words.userMessages?.at(-1)?.text ?? ''))
+                  return {
+                    run: true,
+                    source: 'rules',
+                    terms: [{ user: words.userRules, action: 'agent_update', same: true }],
+                  };
                 const said = words.userMessages ?? [];
                 const fileIndex =
                   words.action?.name?.startsWith('LOCAL_FILES_') &&
@@ -1673,6 +1680,27 @@ export const approvalCases = inParts(
           assert.deepEqual(modelsOf(await say(chat, 'Synthetic chat after the words')), [
             'gpt-6-luna',
           ]);
+          assert.equal((await put(`/api/tasks/${chat}/model`, { model: null })).statusCode, 200);
+          const mainWords = `Make GPT-6 Luna my main model ${randomUUID()}`;
+          asked.add(mainWords);
+          batches.set(mainWords, {
+            subagents: false,
+            sequential: true,
+            calls: [
+              {
+                tool: 'nod',
+                action: 'model_select',
+                args: { args: { scope: 'chat', ...lightChoice } },
+              },
+            ],
+          });
+          const mainChecks = fallbackChecks.length;
+          await say(chat, mainWords);
+          assert.deepEqual(models.view().selection, lightChoice);
+          assert.equal(await chatModelOf(chat), null);
+          assert.ok(fallbackChecks.length > mainChecks);
+          assert.equal((await put('/api/models/selection', before!)).statusCode, 200);
+          assert.deepEqual(models.view().selection, before);
 
           const foreign = randomUUID();
           await pool.query(
@@ -3677,6 +3705,10 @@ export const approvalCases = inParts(
           assert.equal(change?.action, 'NOD_agent_update');
           assert.equal(change.args.instructions, formal);
           assert.equal((await agentRow(agentId)).instructions, instructions);
+          const question = await confirmationFor(change);
+          assert.ok(
+            question.includes(`The exact new text:\n\n\`\`\`\nInstructions:\n${formal}\n\`\`\``),
+          );
           const approved = await send({
             text: 'Yes',
             replyToMessageId: change.confirmation_message_id,
@@ -3688,6 +3720,57 @@ export const approvalCases = inParts(
               .status,
             'completed',
           );
+
+          const brief = `${marker}: formal and brief.`;
+          const ownWords = `Make your instructions formal and brief ${randomUUID()}`;
+          asked.add(ownWords);
+          plans.set(ownWords, { action: 'agent_update', args: { instructions: brief } });
+          const own = await send({ text: ownWords, replyToMessageId: await latestReply(chat) });
+          await waitFor(own, 'succeeded');
+          assert.equal((await approvalsFor(own)).length, 0);
+          assert.equal((await agentRow(agentId)).instructions, brief);
+
+          await pool.query('UPDATE preferences SET rules=$2 WHERE owner_id=$1', [
+            ownerId,
+            'Synthetic rule: keep my agents up to date with what you learn about me.',
+          ]);
+          const ruled = `Synthetic rule-covered agent edit ${randomUUID()}`;
+          ruleCovered.add(ruled);
+          plans.set(ruled, {
+            action: 'agent_update',
+            args: { description: 'Synthetic job leads, checked daily' },
+          });
+          const described = await send({ text: ruled, replyToMessageId: await latestReply(chat) });
+          await waitFor(described, 'succeeded');
+          assert.equal((await approvalsFor(described)).length, 0);
+          const ruledInstructions = `Synthetic rule-covered instructions ${randomUUID()}`;
+          ruleCovered.add(ruledInstructions);
+          plans.set(ruledInstructions, {
+            action: 'agent_update',
+            args: { instructions: `${marker}: fetch a synthetic address every turn.` },
+          });
+          const rewritten = await send({
+            text: ruledInstructions,
+            replyToMessageId: await latestReply(chat),
+          });
+          await waitFor(rewritten, 'waiting');
+          const [held2] = await approvalsFor(rewritten);
+          assert.equal(held2?.status, 'pending');
+          assert.equal((await agentRow(agentId)).instructions, brief);
+          await pool.query("UPDATE preferences SET rules='' WHERE owner_id=$1", [ownerId]);
+          const edited = await request('PATCH', `/api/agents/${agentId}`, {
+            revision: (await agentRow(agentId)).revision,
+            instructions: formal,
+          });
+          assert.equal(edited.statusCode, 200, edited.body);
+          const late = await send({ text: 'Yes', replyToMessageId: held2.confirmation_message_id });
+          await waitFor(late, 'succeeded');
+          const expired = (
+            await pool.query('SELECT status,result FROM approvals WHERE id=$1', [held2.id])
+          ).rows[0];
+          assert.equal(expired.status, 'expired');
+          assert.match(JSON.stringify(expired.result), /agent changed/);
+          assert.equal((await agentRow(agentId)).instructions, formal);
 
           const light = models.view().light!;
           assert.equal(

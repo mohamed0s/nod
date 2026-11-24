@@ -6481,7 +6481,9 @@ test(
         throw new Error('Unexpected fixture provider call.');
       },
     );
-    const submitted: Array<{ replyToMessageId?: string; sessionId?: string }> = [];
+    const submitted: Array<{ replyToMessageId?: string; sessionId?: string; chatAgent?: string }> =
+      [];
+    const topicAgentId = randomUUID();
     const answers: Array<{ replyToMessageId?: string; shownMessageId?: string }> = [];
     const commands: Array<{ replyToMessageId?: string; hasReply?: boolean }> = [];
     const codes: Array<string | undefined> = [];
@@ -6513,10 +6515,11 @@ test(
         commands.push({ replyToMessageId, hasReply });
         return { threadId, replies: [{ text: 'Synthetic task status' }] };
       },
+      topicAgent: async (topic) => (topic.topic_id === '900' ? topicAgentId : undefined),
       submit: async (text, sourceId, client, channel, ...rest) => {
-        const [, , replyToMessageId, , , , sessionId] = rest;
+        const [, , replyToMessageId, , , , sessionId, chatAgent] = rest;
         if (text === failText) throw new Error('Synthetic turn queue failure.');
-        submitted.push({ replyToMessageId, sessionId });
+        submitted.push({ replyToMessageId, sessionId, ...(chatAgent ? { chatAgent } : {}) });
         const task =
           sessionId ??
           (replyToMessageId
@@ -6717,6 +6720,7 @@ test(
     const chat = submitted.at(-1)!;
     assert.equal(chat.replyToMessageId, undefined);
     assert.ok(chat.sessionId);
+    assert.equal(chat.chatAgent, topicAgentId);
     assert.equal(
       (await pool.query('SELECT title_by FROM tasks WHERE id=$1', [chat.sessionId])).rows[0]
         .title_by,
