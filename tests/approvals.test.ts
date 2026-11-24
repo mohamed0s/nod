@@ -25,6 +25,7 @@ import remarkParse from 'remark-parse';
 import { unified } from 'unified';
 import type { ProductAnalytics } from '../src/ports/analytics.ts';
 import type { MemoryCurator } from '../src/ports/memory-curator.ts';
+import type { DecisionModel } from '../src/ports/decisions.ts';
 import { IntegrationConnectionError } from '../src/ports/integrations.ts';
 import { telegramText, whatsappText } from '../src/providers/chat-sdk/format.ts';
 import { createAnalytics, snapshotAnalytics } from '../src/server/analytics.ts';
@@ -2645,6 +2646,57 @@ test(
           assert.ok(stopped.verdict instanceof Error);
           assert.equal(stopped.asked.length, 2);
           await finish(stopping.turnId, 'cancelled');
+        },
+      );
+
+      await t.test(
+        'a decision check never sees validSources and is never asked again',
+        async () => {
+          const turn = await begin('Email Ana the synthetic invoice.');
+          const decided: object[] = [];
+          const reviewed: object[] = [];
+          let selected = true;
+          const decision: DecisionModel = {
+            async check(request) {
+              for (const selection of [
+                { provider: 'openai', model: 'decisions' },
+                { provider: 'typesafe', model: 'jev-1.14.0' },
+              ])
+                decided.push((request.forModel?.(selection) ?? request).input);
+              return { refused: true };
+            },
+          };
+          const checking = createTrust({
+            pool: db.pool,
+            ownerId,
+            review: async (_instructions, input) => {
+              reviewed.push(input);
+              return { run: true, source: cite(input as Record<string, any>) };
+            },
+            decisions: {
+              select: async () => (selected ? decision : undefined),
+              check: decision.check,
+            },
+          });
+          const unrequested = { confirm: true, reason: 'unrequested' };
+          compareVerdict(
+            await checking.check(turn, 'GMAIL_SEND_EMAIL', email('ana@example.test')),
+            unrequested,
+          );
+          assert.equal(decided.length, 2);
+          for (const input of decided) {
+            assert.equal('validSources' in input, false);
+            assert.equal('correction' in input, false);
+          }
+          assert.equal(reviewed.length, 0);
+          selected = false;
+          compareVerdict(
+            await checking.check(turn, 'GMAIL_SEND_EMAIL', email('ana@example.test')),
+            unrequested,
+          );
+          assert.equal(reviewed.length, 1);
+          assert.equal(decided.length, 2);
+          await finish(turn.turnId, 'cancelled');
         },
       );
 

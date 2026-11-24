@@ -39,7 +39,7 @@ export function createTrustReview(options: {
     signal?.throwIfAborted();
     if (!decisions) return options.review(instructions, input, signal, llmQuestion);
     if (decisions.configured === false) return undefined;
-    const { validSources: _, correction: __, ...checked } = input as Record<string, unknown>;
+    const { validSources: _, ...checked } = input as Record<string, unknown>;
     input = checked;
     const said = (input as TrustWords).userMessages;
     if (!question && said?.some((message) => message.replyTo !== undefined)) {

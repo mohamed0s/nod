@@ -261,7 +261,7 @@ export function createTrust(options: {
       const problem = trustBasisProblem(answer, basisWords);
       const source = citedSource(answer);
       let outcome = 'skipped';
-      if (problem === 'bad_terms' && source) {
+      if (problem === 'bad_terms' && source && !options.decisions) {
         const retry = await ask({ ...input, correction: correction(source) });
         signal?.throwIfAborted();
         unchanged();
