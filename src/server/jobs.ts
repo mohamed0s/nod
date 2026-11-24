@@ -30,6 +30,7 @@ import {
 import type { ArtifactService } from './artifacts.ts';
 import { logFailure } from './failure-log.ts';
 import { createJobCompanies, jobCompanyTables, linkPostings } from './job-companies.ts';
+import { createJobHelper, jobHelperTables } from './job-helper.ts';
 import { createJobPostings, jobPostingTables } from './job-postings.ts';
 import { careerOpsFiles, scanConfig, scanSummary } from './jobs-files.ts';
 import { failure, parse, rootedIn as lineage, type Query, type TurnRef } from './jobs-shared.ts';
@@ -68,6 +69,7 @@ export const jobTables = `
   ALTER TABLE job_cvs ADD COLUMN IF NOT EXISTS conversion_started_at timestamptz;
   ${jobPostingTables}
   ${jobCompanyTables}
+  ${jobHelperTables}
 `;
 
 export const exampleTemplates: JobTemplate[] = [
@@ -277,6 +279,12 @@ function cvView(row: CvRow): JobCv {
   };
 }
 
+function pdfName(row: CvRow, name: string) {
+  return fileName(
+    name.toLowerCase().endsWith('.pdf') ? name : `${row.label.replace(/[/\\]/g, '-')}.pdf`,
+  ).replace(/^\.+/, '');
+}
+
 function withoutText(row: CvRow) {
   const { markdown: text, ...view } = cvView(row);
   return { ...view, markdownCharacters: text.length };
@@ -347,6 +355,14 @@ export function createJobs(options: {
     turnWrite,
     owned,
     changed,
+  });
+  const helper = createJobHelper({
+    pool,
+    ownerId,
+    companies: companies.helper,
+    inviteLimits: async (client) => (await profileState(client)).profile.inviteLimits,
+    mainCv,
+    owned,
   });
 
   async function cvs(client: Query, filter: { id?: string; archived?: boolean } = {}) {
@@ -545,6 +561,18 @@ export function createJobs(options: {
        ON CONFLICT (owner_id) DO UPDATE SET templates_revision=job_profile.templates_revision+1`,
       [ownerId],
     );
+  }
+
+  async function mainCv() {
+    const row = (await cvs(pool)).find((entry) => entry.is_main);
+    if (!row) throw failure('There is no main CV yet. Add one on the Jobs page.', 404);
+    const pdf = cvView(row).pdf;
+    if (!pdf)
+      throw failure(
+        'The main CV has no PDF for its current text yet. Ask Nod to make it, or add the CV as a PDF on the Jobs page.',
+        409,
+      );
+    return { name: pdfName(row, pdf.name), bytes: await options.artifacts.readArtifact(pdf.id) };
   }
 
   async function setup(client: Query): Promise<JobSetup> {
@@ -972,11 +1000,7 @@ export function createJobs(options: {
                 : "This CV has no PDF for its current text yet. Make it as the job-search guide's cv-pdf reference describes.",
               409,
             );
-          const name = fileName(
-            pdf.name.toLowerCase().endsWith('.pdf')
-              ? pdf.name
-              : `${row.label.replace(/[/\\]/g, '-')}.pdf`,
-          ).replace(/^\.+/, '');
+          const name = pdfName(row, pdf.name);
           await options.workspace.write(
             turn.threadId,
             `${folder}/cv-pdf/${name}`,
@@ -1048,6 +1072,7 @@ export function createJobs(options: {
   function registerRoutes(app: FastifyInstance) {
     postings.registerRoutes(app);
     companies.registerRoutes(app);
+    helper.registerRoutes(app);
     const body = <T extends z.ZodType>(schema: T, value: unknown, what: string) =>
       parse(schema, value, what);
     app.get('/api/jobs/setup', () => setup(pool));
@@ -1205,6 +1230,7 @@ export function createJobs(options: {
     execute,
     applyLimits,
     registerRoutes,
+    helperAccess: helper.verify,
     setup: () => setup(pool),
     initialize: async () => {
       try {
