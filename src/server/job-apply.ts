@@ -1,12 +1,12 @@
 import type { Pool, PoolClient } from 'pg';
 import { z } from 'zod';
+import { isEnterKey } from '../shared/browser-keys.ts';
 import type { JobPosting } from '../shared/job-postings.ts';
 import { fileBytes, fileName } from '../shared/files.ts';
 import { untrustedBlock } from '../shared/untrusted.ts';
 import type { ArtifactService } from './artifacts.ts';
 import { logFailure } from './failure-log.ts';
 import type { StartWork } from './job-companies.ts';
-import { companyKey } from './job-urls.ts';
 import {
   applyChatOf,
   companyLabel,
@@ -42,8 +42,8 @@ export type Automatic = {
 };
 
 type SiteStep = {
-  step: { action: string };
-  page: { origin: string; url: string };
+  step: { action: string; key?: string };
+  page: { origin: string; url: string; controls?: Array<{ role: string }> };
   subagent: boolean;
 };
 
@@ -52,17 +52,32 @@ const tailoredPath = (postingId: string) => `${folder}/output/tailored-${posting
 const checkEvery = 10 * 60_000;
 const settle = 3_000;
 const toolInput = z.object({ action: z.literal('cv_tailored'), postingId: z.uuid() }).strict();
-const sharedHosts = new Set([
-  'jobs.lever.co',
-  'jobs.eu.lever.co',
+const tenantHosts = [
+  '.myworkdayjobs.com',
+  '.icims.com',
+  '.taleo.net',
+  '.bamboohr.com',
+  '.recruitee.com',
+  '.teamtailor.com',
+  '.breezy.hr',
+  '.applytojob.com',
+];
+const greenhouseHosts = new Set([
   'boards.greenhouse.io',
   'job-boards.greenhouse.io',
   'job-boards.eu.greenhouse.io',
-  'jobs.ashbyhq.com',
-  'apply.workable.com',
-  'jobs.smartrecruiters.com',
-  'careers.smartrecruiters.com',
-  'jobs.jobvite.com',
+]);
+const notTenants = new Set(['embed', 'j']);
+const plainControls = new Set(['button', 'link', 'tab']);
+const entryActions = new Set([
+  'fill',
+  'type',
+  'select',
+  'check',
+  'uncheck',
+  'upload',
+  'drag',
+  'evaluate',
 ]);
 const siteInput = z
   .object({
@@ -82,10 +97,24 @@ export function applySite(url: string) {
     return null;
   }
   if (page.protocol !== 'https:' && page.protocol !== 'http:') return null;
-  const first = page.pathname.split('/').find(Boolean);
-  return sharedHosts.has(page.hostname.toLowerCase()) && first
-    ? `${page.origin}/${first.toLowerCase()}`
-    : page.origin;
+  const host = page.hostname.toLowerCase();
+  if (tenantHosts.some((suffix) => host.endsWith(suffix))) return page.origin;
+  const first = page.pathname.split('/').find(Boolean)?.toLowerCase();
+  if (greenhouseHosts.has(host) && first === 'embed') {
+    const tenant = page.searchParams.get('for')?.toLowerCase();
+    return tenant && /^[a-z0-9_-]{1,100}$/.test(tenant) ? `${page.origin}/${tenant}` : null;
+  }
+  if (first && notTenants.has(first)) return null;
+  return first ? `${page.origin}/${first}` : page.origin;
+}
+
+export function entryStep(request: Pick<SiteStep, 'step' | 'page'>) {
+  const { action, key } = request.step;
+  if (entryActions.has(action)) return true;
+  if (action === 'press') return !isEnterKey(key);
+  if (action !== 'click') return false;
+  const controls = request.page.controls ?? [];
+  return !(controls.length === 1 && plainControls.has(controls[0]!.role));
 }
 
 function plainName(value: string) {
@@ -104,7 +133,6 @@ export function createJobApply(options: {
   startAutomatic: (client: PoolClient, start: StartWork) => Promise<string[]>;
   posting: (client: Query, id: string) => Promise<JobPosting>;
   profileName: (client: Query) => Promise<string>;
-  portals: (client: Query) => Promise<Record<string, unknown>>;
   artifacts: Pick<ArtifactService, 'retainArtifacts' | 'storeArtifact'>;
   workspace?: {
     write(threadId: string, path: string, bytes: Uint8Array, signal?: AbortSignal): Promise<void>;
@@ -264,17 +292,6 @@ export function createJobApply(options: {
     return { posting: saved, uploadFile: `/workspace/${turn.threadId}/${upload}` };
   }
 
-  async function trackedSites(client: Query, key: string) {
-    const tracked = (await options.portals(client)).tracked_companies;
-    return (Array.isArray(tracked) ? tracked : []).flatMap((entry: unknown) => {
-      const item = (entry ?? {}) as { name?: unknown; careers_url?: unknown };
-      if (typeof item.name !== 'string' || typeof item.careers_url !== 'string') return [];
-      if (companyKey(item.name) !== key) return [];
-      const site = applySite(item.careers_url);
-      return site ? [site] : [];
-    });
-  }
-
   async function siteStep(
     turn: TurnRef,
     request: SiteStep,
@@ -283,18 +300,19 @@ export function createJobApply(options: {
     const chat = await applyChatOf(pool, ownerId, turn);
     if (!chat) return undefined;
     const company = (
-      await pool.query<{ name: string; key: string; apply_origins: string[] }>(
-        'SELECT name,key,apply_origins FROM job_companies WHERE owner_id=$1 AND id=$2',
+      await pool.query<{ name: string; apply_origins: string[] }>(
+        'SELECT name,apply_origins FROM job_companies WHERE owner_id=$1 AND id=$2',
         [ownerId, chat.companyId],
       )
     ).rows[0];
     if (!company) return undefined;
-    const site = applySite(request.page.url) ?? request.page.origin;
-    if (
-      company.apply_origins.includes(site) ||
-      (await trackedSites(pool, company.key)).includes(site)
-    )
-      return undefined;
+    const site = applySite(request.page.url);
+    if (!site)
+      throw failure(
+        `Nod can't tell from ${request.page.origin}'s address which company this page belongs to, so it enters nothing there. Open the company's own job page, whose address names the company, and try again.`,
+        403,
+      );
+    if (company.apply_origins.includes(site)) return undefined;
     const declined = await pool.query(
       `SELECT 1 FROM approvals a JOIN turns u ON u.id=a.turn_id AND u.owner_id=a.owner_id
        WHERE a.owner_id=$1 AND u.session_id=$2 AND a.action=$3 AND a.status='declined'

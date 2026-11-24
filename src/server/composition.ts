@@ -2736,11 +2736,16 @@ async function initializeApplication(
               : { result: asked };
         };
         const step = request.step;
+        const entry = jobs.apply.entryStep(request);
+        if (entry) {
+          const asked = await site();
+          if (asked !== undefined) return asked;
+        }
         if (step.action === 'fill' || (step.action === 'type' && !/[\r\n]/.test(step.text ?? '')))
-          return (await site()) ?? 'run';
+          return 'run';
         const args = browserStepArgs(request);
         const verdict = await trust.check(turn, 'NOD_browser', args, signal);
-        if (verdict.confirm || verdict.basis.kind !== 'read' || step.action === 'upload') {
+        if (!entry && (verdict.confirm || verdict.basis.kind !== 'read')) {
           const asked = await site();
           if (asked !== undefined) return asked;
         }

@@ -15,7 +15,7 @@ With it, the form steps on the company's own site run and the final Submit asks 
 
 ## The careers site
 
-The first time you type into a site, upload to it, or select anything there that the trust check doesn't count as reading, Nod asks the owner "Apply at this company on this site?", with the exact site. This comes on top of the trust check, in every apply chat. Their yes lets you use that site for this company from then on: do the step again, and the trust check still decides it. After a no, enter nothing on that site for this company. Sites the owner follows for this company in their scan settings count as approved.
+Before your first entry on a site, Nod asks the owner "Apply at this company on this site?", with the exact site. Entry is typing, a key other than Enter, choosing an option, ticking a box, dragging, uploading, a script that changes the page, or a click on anything other than a plain button or link; a button or link click the trust check doesn't count as reading asks too. This comes on top of the trust check, in every apply chat. Their yes lets you use that site for this company from then on: do the step again, and the trust check still decides it. After a no, enter nothing on that site for this company. On a shared job site the site is the part of the address that names the company; when the address names none, such as a short link, open the company's own job page instead.
 
 ## Steps
 

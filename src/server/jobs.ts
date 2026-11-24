@@ -31,7 +31,7 @@ import {
 } from '../shared/jobs.ts';
 import type { ArtifactService } from './artifacts.ts';
 import { logFailure } from './failure-log.ts';
-import { createJobApply, jobApplyTables, type Automatic } from './job-apply.ts';
+import { createJobApply, entryStep, jobApplyTables, type Automatic } from './job-apply.ts';
 import { createJobCompanies, jobCompanyTables, linkPostings } from './job-companies.ts';
 import { createJobDrafts, jobDraftTables, validZone, type DraftNotice } from './job-drafts.ts';
 import { createJobHelper, jobHelperTables } from './job-helper.ts';
@@ -425,7 +425,6 @@ export function createJobs(options: {
     startAutomatic: companies.startAutomatic,
     posting: postings.one,
     profileName: async (client) => (await profileState(client)).profile.name,
-    portals: async (client) => (await profileState(client)).portals,
     artifacts: options.artifacts,
     ...(options.workspace ? { workspace: options.workspace } : {}),
     turnWrite,
@@ -1313,6 +1312,7 @@ export function createJobs(options: {
     apply: {
       detect: apply.detect,
       isApplyChat: apply.isApplyChat,
+      entryStep,
       siteStep: apply.siteStep,
       siteQuestion: apply.siteQuestion,
       approveSite: apply.approveSite,

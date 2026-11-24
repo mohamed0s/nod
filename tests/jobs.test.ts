@@ -390,6 +390,56 @@ test('waves pace the invites at a company and decide no luck', async () => {
   );
 });
 
+test('a careers site is its tenant on shared hosts, and typing or choosing there is entry', async () => {
+  const { applySite, entryStep } = await import('../src/server/job-apply.ts');
+  for (const [url, site] of [
+    ['https://jobs.lever.co/Acme/123/apply', 'https://jobs.lever.co/acme'],
+    [
+      'https://boards.greenhouse.io/embed/job_app?for=acme&token=7',
+      'https://boards.greenhouse.io/acme',
+    ],
+    ['https://boards.greenhouse.io/embed/job_app?token=7', null],
+    ['https://apply.workable.com/j/ABC123', null],
+    ['https://apply.workable.com/acme/j/ABC123/apply', 'https://apply.workable.com/acme'],
+    ['https://ats.rippling.com/acme/jobs/1', 'https://ats.rippling.com/acme'],
+    ['https://jobs.gem.com/acme/1', 'https://jobs.gem.com/acme'],
+    [
+      'https://acme.wd5.myworkdayjobs.com/en-US/External/job/1',
+      'https://acme.wd5.myworkdayjobs.com',
+    ],
+    ['https://careers.example.test/', 'https://careers.example.test'],
+    ['ftp://careers.example.test/', null],
+  ] as const)
+    assert.equal(applySite(url), site, url);
+  const page = (role?: string) => ({
+    origin: 'https://careers.example.test',
+    url: 'https://careers.example.test/apply',
+    ...(role ? { controls: [{ role }] } : {}),
+  });
+  for (const [action, role, key, entry] of [
+    ['fill', undefined, undefined, true],
+    ['press', 'combobox', 'ArrowDown', true],
+    ['press', 'textbox', 'Enter', false],
+    ['select', 'combobox', undefined, true],
+    ['check', 'checkbox', undefined, true],
+    ['uncheck', 'checkbox', undefined, true],
+    ['drag', 'slider', undefined, true],
+    ['upload', 'button', undefined, true],
+    ['click', 'option', undefined, true],
+    ['click', 'combobox', undefined, true],
+    ['click', 'textbox', undefined, true],
+    ['click', undefined, undefined, true],
+    ['click', 'button', undefined, false],
+    ['click', 'link', undefined, false],
+    ['accept_dialog', undefined, undefined, false],
+  ] as const)
+    assert.equal(
+      entryStep({ step: { action, ...(key ? { key } : {}) }, page: page(role) }),
+      entry,
+      `${action} ${role ?? ''}`,
+    );
+});
+
 test('a company name reaches chat titles and site questions as short plain text', async () => {
   const { companyLabel } = await import('../src/server/jobs-shared.ts');
   const label = companyLabel(
@@ -3388,7 +3438,7 @@ test(
           return question;
         };
         const step = (url: string, action: string, subagent = false) => ({
-          step: { action },
+          step: { action, ...(action === 'press' ? { key: 'a' } : {}) },
           page: { origin: new URL(url).origin, url },
           subagent,
         });
@@ -3455,25 +3505,18 @@ test(
            VALUES($1,$2,$3,$4,'NOD_job_apply_site',$5,'declined')`,
           [randomUUID(), a.ownerId, chat.threadId, chat.turnId, asked.at(-1)],
         );
-        await assert.rejects(site('https://jobs.lever.co/kappa-copy/2', 'type'), /said no/);
-        assert.equal(await site('https://careers.kappa.example.test/jobs/9'), question);
-        const page = (await request(first, 'GET', '/api/jobs/profile')).json();
-        assert.equal(
-          (
-            await request(first, 'PUT', '/api/jobs/profile', {
-              revision: page.revision,
-              profile: page.profile,
-              portals: {
-                ...page.portals,
-                tracked_companies: [
-                  { name: 'Kappa Example', careers_url: 'https://careers.kappa.example.test/' },
-                ],
-              },
-            })
-          ).statusCode,
-          200,
+        for (const action of ['type', 'press', 'select', 'check', 'uncheck', 'click', 'upload'])
+          await assert.rejects(site('https://jobs.lever.co/kappa-copy/2', action), /said no/);
+        await assert.rejects(site('https://apply.workable.com/j/ABC123'), /can't tell/);
+        await assert.rejects(
+          site('https://boards.greenhouse.io/embed/job_app?token=1'),
+          /can't tell/,
         );
-        assert.equal(await site('https://careers.kappa.example.test/jobs/9'), undefined);
+        assert.equal(
+          await site('https://boards.greenhouse.io/embed/job_app?for=Kappa-Hiring&token=1'),
+          question,
+        );
+        assert.equal(asked.at(-1)!.site, 'https://boards.greenhouse.io/kappa-hiring');
       });
 
       await t.test('Nod opens no apply chat while preparation is paused', async () => {

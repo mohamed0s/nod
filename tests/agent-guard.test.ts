@@ -2491,8 +2491,14 @@ test('links navigate without a check unless they send a known form', async () =>
   assert.deepEqual(seen, ['@form-link', '@button']);
 });
 
-test('typing reaches the step check only in work that asks for it', async () => {
+test('typing, keys and field clicks reach the step check only in work that asks for it', async () => {
   const url = 'https://careers.example.test/apply';
+  const controls: Record<string, Array<{ role: string; name: string }>> = {
+    '@option': [{ role: 'option', name: 'Synthetic country' }],
+    '@field': [{ role: 'combobox', name: 'Synthetic sponsorship' }],
+    '@more': [{ role: 'link', name: 'More jobs' }],
+    focused: [{ role: 'combobox', name: 'Synthetic country' }],
+  };
   for (const checkTyping of [false, true]) {
     const seen: string[] = [];
     const acted: string[] = [];
@@ -2505,29 +2511,51 @@ test('typing reaches the step check only in work that asks for it', async () => 
           selector: '@email',
           text: 'sam@example.test',
         });
+        await call(tools, 'browser', { action: 'press', key: 'a' });
+        await call(tools, 'browser', { action: 'click', selector: '@field' });
+        await call(tools, 'browser', { action: 'click', selector: '@option' });
+        await call(tools, 'browser', { action: 'click', selector: '@more' });
       },
       {
         ...(checkTyping ? { checkTyping } : {}),
         browserStep: async ({ step }) => {
-          seen.push(`${step.action} ${step.selector}`);
+          seen.push(`${step.action} ${step.selector ?? ('key' in step ? step.key : '')}`);
           return step.selector === '@email' ? { result: 'Synthetic site question' } : 'run';
         },
       },
       {
         computer: fakeComputer({
-          currentPage: async () => ({ origin: new URL(url).origin, url }),
+          currentPage: async (_id, step) => ({
+            origin: new URL(url).origin,
+            url,
+            controls: controls[step?.selector ?? 'focused'],
+          }),
           act: async (_id, step) => {
-            if (step.action !== 'open') {
-              acted.push(`${step.action} ${step.selector}`);
-              assert.equal(step.expectUrl, checkTyping ? url : undefined);
-            }
+            if (step.action !== 'open')
+              acted.push(
+                `${step.action} ${step.selector ?? step.key}${step.expectUrl ? ' bound' : ''}`,
+              );
             return { url, text: 'Synthetic form' };
           },
         }),
       },
     );
-    assert.deepEqual(seen, checkTyping ? ['fill @name', 'type @email'] : []);
-    assert.deepEqual(acted, checkTyping ? ['fill @name'] : ['fill @name', 'type @email']);
+    assert.deepEqual(
+      seen,
+      checkTyping ? ['fill @name', 'type @email', 'press a', 'click @field', 'click @option'] : [],
+    );
+    assert.deepEqual(
+      acted,
+      checkTyping
+        ? [
+            'fill @name bound',
+            'press a bound',
+            'click @field bound',
+            'click @option bound',
+            'click @more',
+          ]
+        : ['fill @name', 'type @email', 'press a', 'click @field', 'click @option', 'click @more'],
+    );
   }
 });
 

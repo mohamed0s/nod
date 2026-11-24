@@ -1013,7 +1013,8 @@ export function nodTools(
       (!page.submits || (control.role === 'link' && page.submits === 'unknown')) &&
       !page.dialog &&
       ['click', 'press'].includes(step.action) &&
-      !(step.action === 'press' && isEnterKey(step.key))
+      !(step.action === 'press' && isEnterKey(step.key)) &&
+      !(context.checkTyping && (step.action === 'press' || !['link', 'tab'].includes(control.role)))
     )
       return { binding: {} };
     const verdict = await context.browserStep({

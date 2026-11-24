@@ -177,7 +177,7 @@ For each posting, at most 2 at a company (**Applications a company, at most**):
 
 1. **Chooses** the open postings that match your target roles best, and scores a posting fully first when it has no full score.
 2. **Checks for an earlier application** at that employer for that role, in the posting's status and, when Gmail is connected, in your job email, read-only.
-3. **Finds the job on the company's own careers site** with Nod's own browser. A LinkedIn or job-board link only tells Nod which job to look for there. Before it types anything on a site, uploads to it or selects anything there that isn't just reading, Nod asks you **Apply at** _company_ **on** _site_**?**, with the exact address. Nod can't tell a company's real careers site from a look-alike, so only your yes lets it use that site for that company. It asks once per site and company, in every apply chat, on top of the trust check. After a no, Nod enters nothing on that site for that company. Sites you follow for that company in your scan settings count as yes.
+3. **Finds the job on the company's own careers site** with Nod's own browser. A LinkedIn or job-board link only tells Nod which job to look for there. Nod can't tell a company's real careers site from a look-alike, so it asks you **Apply at** _company_ **on** _site_**?**, with the exact address, before it first enters anything there: typing, pressing a key other than Enter, choosing an option, ticking a box, dragging, uploading, running a script that changes the page, or clicking anything other than a plain button or link. It also asks before a button or link click there that the trust check doesn't count as reading. Only your yes lets Nod use that site for that company. It asks once per site and company, in every apply chat, on top of the trust check. After a no, Nod enters nothing on that site for that company. On a shared job site, such as Lever or Greenhouse, the site is the part of the address that names the company, and when the address doesn't name one, Nod enters nothing there and opens the company's own job page instead.
 4. **Makes a tailored CV** from your main CV, which must pass career-ops' fact and ATS checks. Your main CV doesn't change.
 5. **Prepares an answer sheet** from your CV and profile. An answer your files don't give stays blank, and Nod lists it for you.
 6. **Signs in or creates an account** only through [Vault](/trust/vault/) and the trust check. A CAPTCHA is handed to you in Nod's browser.
@@ -187,7 +187,7 @@ For each posting, at most 2 at a company (**Applications a company, at most**):
 ### What Nod asks you first
 
 - Every final Submit.
-- The first time it uses a site for a company: typing, uploading or anything else that isn't just reading.
+- The first time it enters anything on a site for a company, as [What Nod does](#what-nod-does) lists.
 - Creating an account on a careers site, unless your rule or your words say Nod may.
 - A required answer your CV and profile don't give.
 - Anything else your rules ask Nod to check with you first.
@@ -254,7 +254,7 @@ Each paired helper can start at most 5 apply chats and add at most 30 new compan
 | No luck, apply here                                 | You, on the Jobs page or through a browser helper you paired                                          |
 | Opening an apply chat by itself                     | Nod's server, never a chat or a tool, within the apply limits                                         |
 
-These records are your own private data, so most changes skip the [trust check](/trust/). Invite limits, no-luck days, waves and apply limits go through it like Nod's other settings, because they decide how much Nod does on its own later. On a careers site, signing in, uploading, selecting and submitting go through the trust check. Typing into a field doesn't, as anywhere in Nod, but in an apply chat Nod asks you about each new site first: see [What Nod does](#what-nod-does).
+These records are your own private data, so most changes skip the [trust check](/trust/). Invite limits, no-luck days, waves and apply limits go through it like Nod's other settings, because they decide how much Nod does on its own later. On a careers site, signing in, uploading, selecting and submitting go through the trust check. Typing into a field doesn't, as anywhere in Nod, but in an apply chat Nod asks you about each new site before it enters anything there: see [What Nod does](#what-nod-does).
 
 ## What stays private
 
