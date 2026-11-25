@@ -1,4 +1,4 @@
-import { createContext, useContext, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import * as Popover from '@radix-ui/react-popover';
 import {
   agentColors,
@@ -62,15 +62,26 @@ export function BotPicture({
   );
 }
 
-const Pictures = createContext<Agent[]>([]);
+let shownBots: Agent[] = [];
+const botListeners = new Set<() => void>();
+const watchBots = (listener: () => void) => {
+  botListeners.add(listener);
+  return () => void botListeners.delete(listener);
+};
+const currentBots = () => shownBots;
 
-export function BotPictures({ agents, children }: { agents: Agent[]; children: ReactNode }) {
-  return <Pictures.Provider value={agents}>{children}</Pictures.Provider>;
+export function useShownBots(agents: Agent[]) {
+  useEffect(() => {
+    shownBots = agents;
+    for (const listener of botListeners) listener();
+  }, [agents]);
 }
 
 export function BotName({ name }: { name: string }) {
   const key = name.toLocaleLowerCase();
-  const bot = useContext(Pictures).find((agent) => agent.name.toLocaleLowerCase() === key);
+  const bot = useSyncExternalStore(watchBots, currentBots, currentBots).find(
+    (agent) => agent.name.toLocaleLowerCase() === key,
+  );
   return (
     <span className="message-agent">
       {bot && <BotPicture bot={bot} size="xs" />}

@@ -7,7 +7,7 @@ import { taskLabels } from '../../shared/task-status';
 import { api, errorMessage } from '../lib/api';
 import { captureAnalytics } from '../lib/analytics';
 import { ActionMenu, ActionMenuItem } from './action-menu';
-import { BotPicture } from './bot-picture';
+import { BotPicture, useShownBots } from './bot-picture';
 import { Ellipsis, MessageCircle, Plus } from './icons';
 import { Button, Dialog, Input, Notice } from './ui';
 import { NewChatMenu } from './new-chat-menu';
@@ -54,6 +54,7 @@ export function ChatList({
   const renamed = useRef<string | undefined>(undefined);
   const [creatingRoom, setCreatingRoom] = useState(false);
   const [creatingBot, setCreatingBot] = useState(false);
+  useShownBots(agents);
   const agentChats = new Set([
     ...agents.map((agent) => agent.chatId),
     ...rooms.map(({ id }) => id),
