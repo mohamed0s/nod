@@ -129,7 +129,8 @@ export function trustBasis(answer: unknown, words: BasisWords): TrustBasis | und
     source?: unknown;
     terms?: unknown;
   };
-  if (Array.isArray(terms) && terms.some((term) => term?.same === false)) return undefined;
+  if ([terms].flat().some((term) => (term as { same?: unknown } | null)?.same === false))
+    return undefined;
   const cited =
     typeof source === 'string'
       ? source
