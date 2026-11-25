@@ -146,7 +146,7 @@ export function createChiefOfStaff(options: {
     if (request.brief)
       await client.query(
         `INSERT INTO agent_briefs(owner_id,chat_id,message_id,text) VALUES($1,$2,$3,$4)
-         ON CONFLICT (owner_id,chat_id,message_id) DO NOTHING`,
+         ON CONFLICT (owner_id,chat_id,message_id) DO UPDATE SET text=EXCLUDED.text,created_at=now()`,
         [ownerId, chat, request.messageId, request.brief],
       );
   };
