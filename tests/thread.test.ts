@@ -51,7 +51,9 @@ import type {
 } from '../src/shared/contracts.ts';
 import { fakeComputer, fakeWorkspace } from './runtime-fixtures.ts';
 import { createMemoryLearning } from '../src/server/memory-learning.ts';
-import { createMemoryService } from '../src/server/memory.ts';
+import { createMemoryService, type MemoryService } from '../src/server/memory.ts';
+import { createAgentMemory, sharedReflection } from '../src/server/agent-memory.ts';
+import { createAgents, type AgentScope } from '../src/server/agents.ts';
 import { memoryObjectStore } from './fixtures/object-store.ts';
 import type { ProductAnalytics } from '../src/ports/analytics.ts';
 import { createAnalytics, snapshotAnalytics } from '../src/server/analytics.ts';
@@ -13373,6 +13375,237 @@ const scriptedCurator = (configured = true) => {
   };
   return { calls, state, curator };
 };
+
+test(
+  "an agent's own memory reflects only its chats, keeps them out of shared memory and reads per its mode",
+  { skip: !process.env.TEST_DATABASE_URL, timeout: 30_000 },
+  async () => {
+    const { pool, ownerId, store, memory, close } = await memoryFixture([
+      approvalsTable,
+      'ALTER TABLE turns ADD COLUMN thread_id uuid, ADD COLUMN session_id uuid, ADD COLUMN task_id uuid',
+      'CREATE TABLE tasks (id uuid PRIMARY KEY, owner_id text NOT NULL, session_id uuid)',
+    ]);
+    try {
+      const agents = createAgents({ pool, ownerId });
+      await agents.initialize();
+      const thread = randomUUID();
+      const chats = { own: randomUUID(), both: randomUUID(), foreign: randomUUID() };
+      const ids = { own: randomUUID(), both: randomUUID(), foreign: randomUUID() };
+      for (const kind of ['own', 'both', 'foreign'] as const) {
+        const owner = kind === 'foreign' ? 'other-memory-owner' : ownerId;
+        await pool.query('INSERT INTO tasks(id,owner_id,session_id) VALUES($1,$2,$1)', [
+          chats[kind],
+          owner,
+        ]);
+        await pool.query(
+          'INSERT INTO agents(id,owner_id,name,memory_mode,chat_id) VALUES($1,$2,$3,$4,$5)',
+          [
+            ids[kind],
+            owner,
+            `Synthetic ${kind} agent`,
+            kind === 'both' ? 'own_and_shared' : 'own',
+            chats[kind],
+          ],
+        );
+      }
+      await agents.initialize();
+      await agents.initialize();
+      assert.equal((await pool.query('SELECT count(*)::int AS n FROM agent_chats')).rows[0].n, 3);
+      const say = async (text: string, chat: string | null, owner = ownerId) => {
+        const turnId = randomUUID();
+        const id = randomUUID();
+        await pool.query(
+          'INSERT INTO turns(id,owner_id,thread_id,session_id,task_id) VALUES($1,$2,$3,$4,$5)',
+          [turnId, owner, thread, chat ?? thread, chat],
+        );
+        await pool.query(
+          "INSERT INTO messages(id,owner_id,role,text,turn_id,thread_id,created_at) VALUES($1,$2,'user',$3,$4,$5,'2026-01-01T10:00:00Z')",
+          [id, owner, text, turnId, thread],
+        );
+        return { id, turnId };
+      };
+      const main = await say('I collect synthetic stamps.', null);
+      const own = await say(
+        'I moved to Synthetic City. The Delta lead replied on Monday.',
+        chats.own,
+      );
+      const both = await say('The Gamma report is due Friday.', chats.both);
+      await say(
+        'A foreign owner wrote about Synthetic Harbor.',
+        chats.foreign,
+        'other-memory-owner',
+      );
+      const scope = (id: string, memoryMode: AgentScope['memoryMode']): AgentScope => ({
+        id,
+        name: id === ids.own ? 'Synthetic own agent' : 'Synthetic both agent',
+        description: '',
+        instructions: '',
+        memoryMode,
+        apps: [],
+        skills: [],
+        scheduled: false,
+      });
+      const scopes = new Map<string, AgentScope>([
+        [own.turnId, scope(ids.own, 'own')],
+        [both.turnId, scope(ids.both, 'own_and_shared')],
+      ]);
+      const agentMemory = createAgentMemory({
+        pool,
+        ownerId,
+        store,
+        shared: memory,
+        scope: async (turnId) => scopes.get(turnId),
+      });
+      const { calls, state, curator } = scriptedCurator();
+      const learning = createMemoryLearning({
+        pool,
+        ownerId,
+        memory,
+        curator,
+        documents: { shared: sharedReflection, list: () => agentMemory.reflected() },
+      });
+      for (const document of [memory, agentMemory.service(ids.own), agentMemory.service(ids.both)])
+        await document.edit((tree) => {
+          tree.reflected = nilMark;
+        });
+      const add = (about: string | undefined, area: string, slug: string, text: string) => ({
+        op: 'add',
+        ...(about ? { about } : {}),
+        sensitive: false,
+        area,
+        slug,
+        text: `${text}.`,
+        m: [1],
+        quote: text,
+      });
+      state.answer = (input) => {
+        const said = JSON.stringify((input as { messages: unknown }).messages);
+        if (said.includes('Synthetic City'))
+          return {
+            ops: [
+              add(undefined, 'about', 'city', 'I moved to Synthetic City'),
+              add('agent', 'routines', 'delta', 'The Delta lead replied on Monday'),
+            ],
+          };
+        if (said.includes('Gamma'))
+          return { ops: [add('agent', 'routines', 'gamma', 'The Gamma report is due Friday')] };
+        return { ops: [add('agent', 'about', 'stamps', 'I collect synthetic stamps')] };
+      };
+      await learning.run();
+      const call = (word: string) => {
+        const found = calls.filter(({ input }) => JSON.stringify(input.messages).includes(word));
+        assert.equal(found.length, 1, word);
+        return found[0]!.input as Record<string, unknown>;
+      };
+      assert.equal(calls.length, 3);
+      assert.ok(calls.every(({ input }) => !JSON.stringify(input).includes('Synthetic Harbor')));
+      assert.doesNotMatch(JSON.stringify(call('synthetic stamps').messages), /City|Gamma/);
+      assert.doesNotMatch(JSON.stringify(call('Synthetic City').messages), /stamps|Gamma/);
+      assert.ok(!('agentMemory' in call('synthetic stamps')));
+      assert.ok('agentMemory' in call('Synthetic City') && !('memory' in call('Synthetic City')));
+      assert.ok('agentMemory' in call('Gamma') && 'memory' in call('Gamma'));
+      const texts = async (document: MemoryService) =>
+        (await document.load()).entries.map(({ text }) => text).toSorted();
+      assert.deepEqual(await texts(memory), [
+        'I collect synthetic stamps.',
+        'I moved to Synthetic City.',
+      ]);
+      assert.deepEqual(await texts(agentMemory.service(ids.own)), [
+        'The Delta lead replied on Monday.',
+      ]);
+      assert.deepEqual(await texts(agentMemory.service(ids.both)), [
+        'The Gamma report is due Friday.',
+      ]);
+      assert.deepEqual(await texts(agentMemory.service(ids.foreign)), []);
+      assert.equal(await learning.reflect(), 0);
+
+      assert.deepEqual(await agentMemory.context(main.turnId), { memory: await memory.context() });
+      const ownContext = await agentMemory.context(own.turnId);
+      assert.equal(ownContext.memory, '');
+      assert.match(ownContext.agentMemory!.index, /Delta lead/);
+      assert.doesNotMatch(ownContext.agentMemory!.index, /Synthetic City/);
+      const bothContext = await agentMemory.context(both.turnId);
+      assert.match(bothContext.memory!, /Synthetic City/);
+      assert.match(bothContext.agentMemory!.index, /Gamma/);
+      assert.deepEqual(
+        await agentMemory.read(own.turnId, 'memory_find', { query: 'Synthetic City' }),
+        [],
+      );
+      await assert.rejects(
+        agentMemory.read(own.turnId, 'memory_read', { path: 'about', scope: 'shared' }),
+        /reads only its own memory/,
+      );
+      await assert.rejects(
+        agentMemory.read(main.turnId, 'memory_read', { path: 'about', scope: 'agent' }),
+        /no memory of its own/,
+      );
+      const found = (await agentMemory.read(both.turnId, 'memory_find', {
+        query: 'city gamma',
+      })) as Array<{ scope: string }>;
+      assert.deepEqual(found.map(({ scope }) => scope).toSorted(), ['agent', 'shared']);
+      assert.equal(
+        (
+          (await agentMemory.read(both.turnId, 'memory_read', { path: 'about/city' })) as {
+            scope: string;
+          }
+        ).scope,
+        'shared',
+      );
+
+      assert.deepEqual(
+        await agentMemory.target(own.turnId, 'memory_forget', {
+          path: 'routines/delta',
+          agent: ids.foreign,
+        }),
+        { path: 'routines/delta', agent: ids.own },
+      );
+      await assert.rejects(
+        agentMemory.target(own.turnId, 'memory_forget', { path: 'about/city', scope: 'shared' }),
+        /reads only its own memory/,
+      );
+      assert.deepEqual(
+        await agentMemory.target(both.turnId, 'memory_forget', {
+          path: 'about/city',
+          scope: 'shared',
+        }),
+        { path: 'about/city' },
+      );
+      await assert.rejects(
+        agentMemory.target(both.turnId, 'memory_control', { clear: true, scope: 'shared' }),
+        /changes only this agent's memory/,
+      );
+      assert.deepEqual(
+        await agentMemory.target(main.turnId, 'memory_control', { clear: true, agent: ids.own }),
+        { clear: true },
+      );
+      const base = async (proposal: { args: Record<string, unknown> }) => ({
+        question: `Synthetic question about ${Object.keys(proposal.args).join(' and ')}?`,
+        action: 'Forget note',
+      });
+      const describe = (turnId: string, args: Record<string, unknown>) =>
+        agentMemory.describe(
+          { turn: { threadId: thread, turnId }, action: 'NOD_memory_forget', args },
+          undefined,
+          base,
+        );
+      assert.equal(
+        (await describe(own.turnId, { path: 'routines/delta', note: 'x', agent: ids.own }))
+          .question,
+        'Synthetic question about path and note?\n\nThis changes the own memory of the agent "Synthetic own agent".',
+      );
+      assert.match(
+        (await describe(both.turnId, { path: 'about/city', note: 'x' })).question,
+        /This changes the shared memory\.$/,
+      );
+      await assert.rejects(
+        describe(own.turnId, { path: 'routines/delta', note: 'x', agent: ids.foreign }),
+        /Agent not found/,
+      );
+    } finally {
+      await close();
+    }
+  },
+);
 
 test(
   'memory opt-out stops background work and rejects reflection started before disable and re-enable',

@@ -701,6 +701,191 @@ test(
         restoredResponse.json<MemoryView>().notes.some((note) => note.path === archivedNote.path),
       );
 
+      await t.test(
+        'an agent with its own memory saves owner facts to shared memory and acts only on what its mode allows',
+        async () => {
+          const request = (
+            method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+            url: string,
+            payload?: object,
+          ) => application.app.inject({ method, url, headers, ...(payload ? { payload } : {}) });
+          const opened = await send({ text: 'Synthetic ledger chat.', newChat: true });
+          await settle(opened, 'succeeded');
+          const chat = (await pool.query('SELECT task_id FROM turns WHERE id=$1', [opened])).rows[0]
+            .task_id as string;
+          const inChat = async (text: string, steps: Step[]) => {
+            plans.set(text, { steps });
+            const reply = (
+              await pool.query(
+                `SELECT m.id FROM messages m JOIN turns u ON u.id=m.turn_id
+                 WHERE u.session_id=$1 AND m.role='assistant' ORDER BY m.created_at DESC,m.id DESC LIMIT 1`,
+                [chat],
+              )
+            ).rows[0].id as string;
+            const id = await send({ text, replyToMessageId: reply });
+            await settle(id, 'succeeded');
+            return contexts.at(-1)!;
+          };
+          const made = await request('POST', '/api/agents', {
+            chatId: chat,
+            name: 'Synthetic ledger agent',
+            memoryMode: 'own',
+          });
+          assert.equal(made.statusCode, 200, made.body);
+          const agentId = made.json().id as string;
+          const base = `/api/memory/agents/${agentId}`;
+          const agentNotes = async () =>
+            (await request('GET', base)).json<MemoryView>().notes.map((note) => note.text);
+          const sharedNotes = async () => (await view()).notes.map((note) => note.text);
+          const op = (
+            input: Remembered,
+            about: string,
+            area: string,
+            text: string,
+            quote: string,
+          ) => ({
+            op: 'add',
+            about,
+            area,
+            slug: `agent-note-${++notes}`,
+            text,
+            m: [input.current.m],
+            quote,
+            sensitive: false,
+          });
+
+          const told =
+            'Remember that I live in Synthetic Town, that I prefer synthetic tea and that this ledger closes on the 5th.';
+          rememberAnswer = (input) => ({
+            ops: [
+              op(input, 'owner', 'about', 'Lives in Synthetic Town.', 'I live in Synthetic Town'),
+              op(
+                input,
+                'unsure',
+                'preferences',
+                'Prefers synthetic tea.',
+                'I prefer synthetic tea',
+              ),
+              op(
+                input,
+                'agent',
+                'routines',
+                'The ledger closes on the 5th.',
+                'this ledger closes on the 5th',
+              ),
+            ],
+          });
+          const ownContext = await inChat(told, [learn()]);
+          assert.match(ownContext, /This agent keeps its own memory index/);
+          assert.doesNotMatch(ownContext, /Synthetic manager is Robin Example/);
+          const asked = JSON.parse(rememberInputs.at(-1)!);
+          assert.ok('agentMemory' in asked && !('memory' in asked));
+          assert.ok((await sharedNotes()).includes('Lives in Synthetic Town.'));
+          assert.ok((await sharedNotes()).includes('Prefers synthetic tea.'));
+          assert.ok(!(await sharedNotes()).includes('The ledger closes on the 5th.'));
+          assert.deepEqual(await agentNotes(), ['The ledger closes on the 5th.']);
+
+          rememberAnswer = (input) => ({
+            ops: [
+              op(input, 'agent', 'routines', 'The ledger owner is Robin Example.', 'Robin Example'),
+              op(input, 'owner', 'about', 'Lives in Synthetic Village.', 'Synthetic Village'),
+            ],
+          });
+          await inChat('Remember the synthetic ledger owner.', [
+            learn(undefined, true),
+            personal('memory_read', { path: 'about', scope: 'shared' }, true),
+          ]);
+          assert.deepEqual(await agentNotes(), ['The ledger closes on the 5th.']);
+          assert.ok(!(await sharedNotes()).includes('Lives in Synthetic Village.'));
+
+          const ledgerPath = (await request('GET', base))
+            .json<MemoryView>()
+            .notes.find((note) => note.text === 'The ledger closes on the 5th.')!.path;
+          await inChat('Forget the synthetic ledger closing day.', [
+            personal('memory_forget', { path: ledgerPath, agent: randomUUID() }),
+          ]);
+          assert.deepEqual(await agentNotes(), []);
+          assert.ok((await sharedNotes()).includes('Lives in Synthetic Town.'));
+
+          const revision = (await request('GET', '/api/state'))
+            .json<{ agents: Array<{ id: string; revision: number }> }>()
+            .agents.find((agent) => agent.id === agentId)!.revision;
+          assert.equal(
+            (
+              await request('PATCH', `/api/agents/${agentId}`, {
+                revision,
+                memoryMode: 'own_and_shared',
+              })
+            ).statusCode,
+            200,
+          );
+          rememberAnswer = (input) => ({
+            ops: [
+              op(
+                input,
+                'agent',
+                'routines',
+                'The ledger export is a CSV.',
+                'the ledger export is a CSV',
+              ),
+            ],
+          });
+          const bothContext = await inChat('Remember that the ledger export is a CSV.', [
+            learn(),
+            personal('memory_read', { path: 'about', scope: 'shared' }),
+          ]);
+          assert.match(bothContext, /Lives in Synthetic Town/);
+          assert.match(bothContext, /This agent keeps its own memory index/);
+          assert.ok('memory' in JSON.parse(rememberInputs.at(-1)!));
+          assert.deepEqual(await agentNotes(), ['The ledger export is a CSV.']);
+
+          const added = await request('POST', `${base}/notes`, {
+            area: 'people',
+            text: 'Synthetic auditor is Sam Example.',
+          });
+          assert.equal(added.statusCode, 200, added.body);
+          const moved = await request('POST', `${base}/notes/${added.json().path}/share`);
+          assert.equal(moved.statusCode, 200, moved.body);
+          assert.ok(!(await agentNotes()).includes('Synthetic auditor is Sam Example.'));
+          assert.ok((await sharedNotes()).includes('Synthetic auditor is Sam Example.'));
+
+          const clearAgent = "Clear this agent's memory.";
+          await inChat(clearAgent, [
+            personal('memory_control', { clear: true, quote: clearAgent, scope: 'shared' }, true),
+            personal('memory_control', { clear: true, quote: clearAgent }),
+          ]);
+          assert.deepEqual(await agentNotes(), []);
+          assert.ok((await sharedNotes()).includes('Lives in Synthetic Town.'));
+
+          const foreign = randomUUID();
+          await pool.query(
+            "INSERT INTO agents(id,owner_id,name,memory_mode) VALUES($1,'other-memory-owner','Synthetic foreign agent','own')",
+            [foreign],
+          );
+          assert.equal((await request('GET', `/api/memory/agents/${foreign}`)).statusCode, 404);
+          assert.equal(
+            (
+              await request('POST', `/api/memory/agents/${foreign}/notes`, {
+                area: 'about',
+                text: 'x',
+              })
+            ).statusCode,
+            404,
+          );
+          assert.deepEqual((await request('GET', '/api/memory/agents')).json(), [
+            { id: agentId, name: 'Synthetic ledger agent' },
+          ]);
+          await pool.query('DELETE FROM agents WHERE id=$1', [foreign]);
+          await request('POST', `${base}/notes`, {
+            area: 'about',
+            text: 'Synthetic leftover note.',
+          });
+          assert.equal((await request('DELETE', `/api/agents/${agentId}`)).statusCode, 200);
+          assert.equal(await memoryStore.read(`memory/agents/${agentId}.md`, 1_000_000), undefined);
+          await pool.query('UPDATE tasks SET source_message_id=NULL WHERE id=$1', [chat]);
+        },
+      );
+
       const clear = 'Clear everything you saved about me.';
       await ask(clear, [personal('memory_control', { clear: true, quote: clear })]);
       assert.deepEqual((await view()).notes, []);

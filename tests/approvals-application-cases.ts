@@ -146,8 +146,9 @@ export const approvalCases = inParts(
     const results = new Map<string, AgentToolResult>();
     const plans = new Map<
       string,
-      { tool?: string; action: string; args: Record<string, unknown> }
+      { tool?: string; action: string; args: Record<string, unknown>; nested?: boolean }
     >();
+    const systemPrompts = new Map<string, string>();
     type FixtureCall = { tool?: string; action: string; args: Record<string, unknown> };
     const activePlan = new AsyncLocalStorage<string>();
     const batches = new Map<
@@ -445,6 +446,7 @@ export const approvalCases = inParts(
               helper: options.ephemeral === true,
             });
             ownerContexts.set(options.turnId, options.ownerContext ?? '');
+            systemPrompts.set(options.turnId, options.systemPrompt);
             reportClosingUsage = () =>
               options.onEvent({
                 type: 'provider_usage',
@@ -612,9 +614,11 @@ export const approvalCases = inParts(
                               : plan.tool === 'browser' ||
                                   plan.tool === 'sign_in' ||
                                   plan.tool === 'files' ||
-                                  plan.tool === 'task'
+                                  plan.tool === 'task' ||
+                                  plan.tool === 'skills'
                                 ? { action: plan.action, ...plan.args }
                                 : { action: plan.action, args: plan.args },
+                        plan.nested ? { nested: true } : undefined,
                       ),
                   );
                   await parallelRepeatWork?.(options);
@@ -4144,6 +4148,209 @@ export const approvalCases = inParts(
           assert.doesNotMatch(ownerContexts.get(await run()) ?? '', new RegExp(marker));
           await request('DELETE', `/api/schedules/${schedule.id}`);
           await request('DELETE', `/api/schedules/${adopted.id}`);
+        },
+      );
+
+      await inPart(
+        'an agent limited to some apps and skills is refused the others in its chat, through codemode and in a run as the agent',
+        async () => {
+          const send = async (body: Record<string, unknown>) => {
+            const sent = await request('POST', '/api/messages', {
+              clientMessageId: randomUUID(),
+              ...body,
+            });
+            assert.equal(sent.statusCode, 200, sent.body);
+            return sent.json().turnId as string;
+          };
+          const first = await send({ text: 'Synthetic limited chat', newChat: true });
+          await waitFor(first, 'succeeded');
+          const chat = (await pool.query('SELECT task_id FROM turns WHERE id=$1', [first])).rows[0]
+            .task_id as string;
+          const inChat = async (text: string, status: string) => {
+            const reply = (
+              await pool.query<{ id: string }>(
+                `SELECT m.id FROM messages m JOIN turns u ON u.id=m.turn_id
+                 WHERE u.session_id=$1 AND m.role='assistant' ORDER BY m.created_at DESC,m.id DESC LIMIT 1`,
+                [chat],
+              )
+            ).rows[0]!.id;
+            const turnId = await send({ text, replyToMessageId: reply });
+            await waitFor(turnId, status);
+            return turnId;
+          };
+          const outcome = async (turnId: string) =>
+            JSON.stringify(results.get(turnId)) ??
+            (await pool.query('SELECT error FROM turns WHERE id=$1', [turnId])).rows[0].error;
+          const made = await request('POST', '/api/agents', {
+            chatId: chat,
+            name: 'Synthetic limited agent',
+          });
+          assert.equal(made.statusCode, 200, made.body);
+          const agentId = made.json().id as string;
+          const agentRow = async () =>
+            (
+              await pool.query<{ apps: string[]; skills: string[]; revision: number }>(
+                'SELECT apps,skills,revision FROM agents WHERE id=$1',
+                [agentId],
+              )
+            ).rows[0]!;
+          const unknown = await request('PATCH', `/api/agents/${agentId}`, {
+            revision: (await agentRow()).revision,
+            apps: ['synthetic-unconnected'],
+          });
+          assert.equal(unknown.statusCode, 400);
+          assert.match(unknown.body, /Not a connected app or account: synthetic-unconnected/);
+
+          const limits = { apps: ['gmail'], skills: ['research'] };
+          const unasked = `Synthetic agent limits ${randomUUID()}`;
+          plans.set(unasked, {
+            action: 'agent_update',
+            args: { apps: ['gmail'], skills: ['research', 'travel'] },
+          });
+          const [card] = await approvalsFor(await inChat(unasked, 'waiting'));
+          assert.equal(card?.action, 'NOD_agent_update');
+          assert.deepEqual([card.args.apps, card.args.skills], [['gmail'], ['research', 'travel']]);
+          assert.deepEqual((await agentRow()).apps, []);
+          const shown = (await request('GET', `/api/messages?task=${chat}`))
+            .json<{ messages: Message[] }>()
+            .messages.find((message) => message.approval?.id === card.id)?.approval;
+          assert.deepEqual(shown?.fields, [
+            { label: 'Apps', value: 'gmail' },
+            { label: 'Skills', value: 'research, travel' },
+          ]);
+          const literal = await createAgents({
+            pool,
+            ownerId,
+            choices: async () => ({ apps: [], skills: [] }),
+          }).describe(
+            {
+              turn: { threadId: '', turnId: card.turn_id },
+              channel: 'telegram',
+              action: 'NOD_agent_update',
+              args: card.args,
+            },
+            undefined,
+            async () => ({ question: 'Synthetic question?', action: 'Change' }),
+            () => true,
+          );
+          assert.match(
+            literal.question,
+            /The exact new text:\n\n```\nApps: gmail\nSkills: research, travel\n```$/,
+          );
+          await waitFor(
+            await send({
+              text: 'Cancel',
+              replyToMessageId: card.confirmation_message_id,
+              approvalAnswer: { approvalId: card.id, approved: false },
+            }),
+            'succeeded',
+          );
+          assert.equal(
+            (await pool.query('SELECT status FROM approvals WHERE id=$1', [card.id])).rows[0]
+              .status,
+            'declined',
+          );
+          const ownWords = `Limit yourself to Gmail and the research guide ${randomUUID()}`;
+          asked.add(ownWords);
+          plans.set(ownWords, { action: 'agent_update', args: limits });
+          assert.equal((await approvalsFor(await inChat(ownWords, 'succeeded'))).length, 0);
+          assert.deepEqual(
+            [(await agentRow()).apps, (await agentRow()).skills],
+            [['gmail'], ['research']],
+          );
+
+          const travel = `Synthetic travel guide ${randomUUID()}`;
+          plans.set(travel, { tool: 'skills', action: 'read', args: { name: 'travel' } });
+          assert.match(
+            await outcome(await inChat(travel, 'succeeded|failed')),
+            /limited the agent \\?"Synthetic limited agent\\?" to these skills: research\. travel is not one of them/,
+          );
+          const research = `Synthetic research guide ${randomUUID()}`;
+          plans.set(research, { tool: 'skills', action: 'read', args: { name: 'research' } });
+          const guided = await inChat(research, 'succeeded');
+          const guides = systemPrompts
+            .get(guided)!
+            .split('\n')
+            .find((line) => line.startsWith('Guides: '))!;
+          assert.match(
+            guides,
+            /^Guides: connected-apps, schedules-and-watches, artifacts, video-links, research\b/,
+          );
+          assert.doesNotMatch(guides, /\btravel\b/);
+
+          await pool.query("UPDATE agents SET apps='{googlecalendar}' WHERE id=$1", [agentId]);
+          const sends = () =>
+            integrationFixture.writes.filter((write) => write.action === 'GMAIL_SEND_EMAIL').length;
+          const before = sends();
+          const email = {
+            recipient_email: 'collector@example.test',
+            subject: 'Synthetic lead',
+            body: 'Synthetic lead body.',
+          };
+          const refusal =
+            /limited the agent \\?"Synthetic limited agent\\?" to these apps: googlecalendar\. gmail is not one of them, so nothing was sent/;
+          for (const nested of [false, true]) {
+            const text = `Send the synthetic lead ${randomUUID()}`;
+            asked.add(text);
+            plans.set(text, { tool: 'apps', action: 'GMAIL_SEND_EMAIL', args: email, nested });
+            const turnId = await inChat(text, 'succeeded|failed');
+            assert.match(await outcome(turnId), refusal);
+            assert.deepEqual(await approvalsFor(turnId), []);
+          }
+          const search = `Synthetic gmail search ${randomUUID()}`;
+          plans.set(search, { tool: 'apps', action: 'SEARCH_TOOLS', args: { query: 'gmail' } });
+          const searched = await inChat(search, 'succeeded');
+          assert.doesNotMatch(JSON.stringify(results.get(searched)), /GMAIL_/);
+          assert.match(ownerContexts.get(first) ?? '', /"slug":"gmail"/);
+          assert.doesNotMatch(ownerContexts.get(searched) ?? '', /"slug":"gmail"/);
+
+          const prompt = `Synthetic limited schedule ${randomUUID()}`;
+          const created = await request('POST', '/api/schedules', {
+            title: 'Synthetic limited report',
+            prompt,
+            kind: 'once',
+            runAt: '2099-01-01T09:00:00Z',
+            timeZone: 'UTC',
+          });
+          assert.equal(created.statusCode, 200, created.body);
+          const schedule = created.json() as { id: string };
+          assert.equal(
+            (
+              await application.app.inject({
+                method: 'PUT',
+                url: `/api/agents/schedules/${schedule.id}`,
+                headers,
+                payload: { agentId },
+              })
+            ).statusCode,
+            200,
+          );
+          const revision = (await request('GET', '/api/schedules'))
+            .json()
+            .find((item: { id: string }) => item.id === schedule.id).revision;
+          const ran = await request('POST', `/api/schedules/${schedule.id}/run`, {
+            requestId: randomUUID(),
+            expectedRevision: revision,
+          });
+          assert.equal(ran.statusCode, 200, ran.body);
+          await waitFor(ran.json().turnId, 'succeeded');
+          const lead = `Synthetic limited schedule finding ${randomUUID()}`;
+          plans.set(lead, { tool: 'apps', action: 'GMAIL_SEND_EMAIL', args: email });
+          const scheduled = await enqueueTurn(lead, {
+            source: 'task',
+            parentTurnId: ran.json().turnId,
+            sessionId: randomUUID(),
+            background: true,
+          });
+          await waitFor(scheduled, 'succeeded|failed|waiting');
+          assert.match(
+            ownerContexts.get(scheduled) ?? '',
+            /This scheduled run belongs to the owner's agent "Synthetic limited agent"/,
+          );
+          assert.match(await outcome(scheduled), refusal);
+          assert.equal(sends(), before);
+          await request('DELETE', `/api/schedules/${schedule.id}`);
+          assert.equal((await request('DELETE', `/api/agents/${agentId}`)).statusCode, 200);
         },
       );
 
