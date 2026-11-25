@@ -2727,6 +2727,41 @@ test(
         assert.ok((await tasks.read()).some(({ id }) => id === kept));
       });
 
+      await t.test('a task chat is marked read only for its own owner', async (t) => {
+        const current = (await thread.activeThread(db.pool)).id;
+        const [turn, own, foreign] = [randomUUID(), randomUUID(), randomUUID()];
+        t.after(async () => {
+          await db.pool.query('DELETE FROM messages WHERE turn_id=$1', [turn]);
+          await db.pool.query('DELETE FROM tasks WHERE id=ANY($1::uuid[])', [[own, foreign]]);
+          await db.pool.query('DELETE FROM turns WHERE id=$1', [turn]);
+        });
+        await db.pool.query(
+          "INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,background) VALUES($1,$2,$3,$4,'user','Synthetic read','succeeded',true)",
+          [turn, ownerId, current, own],
+        );
+        await db.pool.query(
+          `INSERT INTO tasks(id,owner_id,turn_id,session_id,title,done_when,now_text,read_at)
+           VALUES($1,$2,$3,$1,'Synthetic read chat','Checked','Checking',now()-interval '1 day'),
+             ($4,'foreign-owner',NULL,$4,'Foreign read chat','Checked','Checking',now()-interval '1 day')`,
+          [own, ownerId, turn, foreign],
+        );
+        await db.pool.query(
+          "INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id) VALUES($1,$2,'assistant','Synthetic unread reply',$3,$4)",
+          [randomUUID(), ownerId, current, turn],
+        );
+        const readAt = async (id: string) =>
+          (
+            await db.pool.query('SELECT read_at FROM tasks WHERE id=$1', [id])
+          ).rows[0].read_at.getTime();
+        const unread = async () => (await tasks.read()).find(({ id }) => id === own)?.unread;
+        const foreignRead = await readAt(foreign);
+        assert.equal((await request('POST', `/api/tasks/${foreign}/read`)).statusCode, 404);
+        assert.equal(await readAt(foreign), foreignRead);
+        assert.equal(await unread(), 1);
+        assert.equal((await request('POST', `/api/tasks/${own}/read`)).statusCode, 200);
+        assert.equal(await unread(), undefined);
+      });
+
       await t.test(
         'a task started inside another session takes only its own turns from the main chat',
         async (t) => {
