@@ -143,6 +143,7 @@ function CompanyCard({ company, onOpen }: { company: JobCompany; onOpen(id: stri
         {postingsText(company)} · {peopleText(company.counts)}
       </p>
       {!company.noLuck.value && <p className="jobs-meta">{waveText(company.waves, format)}</p>}
+      {company.applyChat && <p className="jobs-meta">{applyChatText(company.applyChat)}</p>}
     </article>
   );
 }
@@ -455,18 +456,24 @@ function PersonCard({
 function noLuckText(company: JobCompany, limits: Limits, format: ReturnType<typeof useDateFormat>) {
   const since = company.noLuck.since ? formatDateTime(company.noLuck.since, format) : '';
   const rule = `you invited ${plural(limits.waves.max, 'person', 'people')} there and none of them helped: nobody accepted within ${plural(limits.noAcceptDays, 'day')}, or replied within ${plural(limits.noReplyDays, 'day')} of being asked`;
-  const marked = `You marked it no luck${since ? ` on ${since}` : ''}`;
+  const applies = `opens one chat to apply on the company's own careers site, for at most ${plural(limits.apply.daily, 'company', 'companies')} a day, and asks you before each final Submit while your rule says so`;
   if (company.noLuck.choice === 'no_luck')
-    return company.applyChat?.state === 'open'
-      ? `${marked}. Nod opened one chat to apply on the company's own site, and asks you before anything is submitted.`
-      : company.applyChat?.state === 'starting'
-        ? `${marked}. Nod is opening its apply chat.`
-        : `${marked}, but its apply chat isn't open.`;
+    return `You marked it no luck${since ? ` on ${since}` : ''}. Nod opens one chat to apply on the company's own careers site.`;
   if (company.noLuck.choice === 'keep_trying')
-    return "You're keeping this company open, so Nod doesn't count it as no luck.";
+    return "You're keeping this company open, so Nod doesn't count it as no luck or apply there.";
   if (company.noLuck.value)
-    return `Nod counts it as no luck${since ? ` since ${since}` : ''}: ${rule}. Nod doesn't apply until you tick the box.`;
-  return `Nod counts a company as no luck when ${rule}, unless someone referred you.`;
+    return `Nod counts it as no luck${since ? ` since ${since}` : ''}: ${rule}. Nod ${applies}.`;
+  return `Nod counts a company as no luck when ${rule}, unless someone referred you. Then Nod ${applies}.`;
+}
+
+const progressLabels = { working: 'working', needs_you: 'needs you', done: 'done' } as const;
+
+function applyChatText(chat: JobCompany['applyChat']) {
+  if (!chat) return '';
+  const who = chat.by === 'rule' ? 'started automatically' : 'ticked';
+  if (chat.state === 'starting') return `Apply chat: ${who} · opening`;
+  if (chat.state === 'lost') return `Apply chat: ${who} · no longer there`;
+  return `Apply chat: ${who} · ${progressLabels[chat.progress ?? 'working']}`;
 }
 
 function CompanyDetail({ id, onBack }: { id: string; onBack(): void }) {
@@ -502,6 +509,16 @@ function CompanyDetail({ id, onBack }: { id: string; onBack(): void }) {
       data.update(() => result.company);
       if (result.apply?.state === 'started')
         setMessage({ kind: 'info', text: 'Nod opened a chat to apply to this company.' });
+      else if (result.apply?.state === 'needs_you')
+        setMessage({
+          kind: 'info',
+          text: 'The apply chat for this company is waiting for your answer, so your tick wasn’t sent there. Answer the question in that chat first.',
+        });
+      else if (result.apply?.state === 'resumed')
+        setMessage({
+          kind: 'info',
+          text: 'Nod passed your tick to the apply chat it had for this company, and goes on there.',
+        });
       else if (result.apply?.state === 'failed')
         setMessage({
           kind: 'error',
@@ -579,6 +596,7 @@ function CompanyDetail({ id, onBack }: { id: string; onBack(): void }) {
           <span>No luck, apply here</span>
         </label>
         <p className="jobs-meta">{noLuckText(company, company.limits, format)}</p>
+        {chat && <p className="jobs-meta">{applyChatText(chat)}</p>}
         <div className="jobs-actions">
           {chat?.state === 'open' && (
             <Button

@@ -12,6 +12,7 @@ import { untrustedBlock } from '../shared/untrusted.ts';
 import {
   cvMimeTypes,
   defaultJobProfile,
+  jobApplyLimits,
   jobLimitFields,
   jobPlaceholders,
   jobPortalsSchema,
@@ -30,6 +31,7 @@ import {
 } from '../shared/jobs.ts';
 import type { ArtifactService } from './artifacts.ts';
 import { logFailure } from './failure-log.ts';
+import { createJobApply, entryStep, jobApplyTables, type Automatic } from './job-apply.ts';
 import { createJobCompanies, jobCompanyTables, linkPostings } from './job-companies.ts';
 import { createJobDrafts, jobDraftTables, validZone, type DraftNotice } from './job-drafts.ts';
 import { createJobHelper, jobHelperTables } from './job-helper.ts';
@@ -73,6 +75,7 @@ export const jobTables = `
   ${jobCompanyTables}
   ${jobDraftTables}
   ${jobHelperTables}
+  ${jobApplyTables}
 `;
 
 export const exampleTemplates: JobTemplate[] = [
@@ -112,20 +115,28 @@ export const jobLimitsInput = z
     inviteLimits: jobProfileFields.inviteLimits.partial().optional(),
     noLuck: jobProfileFields.noLuck.partial().optional(),
     waves: jobProfileFields.waves.partial().optional(),
+    applyLimits: jobApplyLimits.partial().optional(),
   })
   .strict()
   .refine(
     (value) =>
-      value.inviteLimits !== undefined || value.noLuck !== undefined || value.waves !== undefined,
-    { message: 'A limits change needs inviteLimits, noLuck, waves or more than one of them.' },
+      value.inviteLimits !== undefined ||
+      value.noLuck !== undefined ||
+      value.waves !== undefined ||
+      value.applyLimits !== undefined,
+    {
+      message:
+        'A limits change needs inviteLimits, noLuck, waves, applyLimits or more than one of them.',
+    },
   );
 type JobLimits = z.infer<typeof jobLimitsInput>;
-type JobLimitValues = Pick<JobProfile, 'inviteLimits' | 'noLuck' | 'waves'>;
+type JobLimitValues = Pick<JobProfile, 'inviteLimits' | 'noLuck' | 'waves' | 'applyLimits'>;
 
 const liveLimits = (profile: JobProfile): JobLimitValues => ({
   inviteLimits: profile.inviteLimits,
   noLuck: profile.noLuck,
   waves: profile.waves,
+  applyLimits: profile.applyLimits,
 });
 
 function limitsKey(value: unknown) {
@@ -133,6 +144,7 @@ function limitsKey(value: unknown) {
     inviteLimits: Partial<JobLimitValues['inviteLimits']>;
     noLuck: Partial<JobLimitValues['noLuck']>;
     waves: Partial<JobLimitValues['waves']>;
+    applyLimits: Partial<JobLimitValues['applyLimits']>;
   }>;
   return JSON.stringify([
     limits.inviteLimits?.daily,
@@ -141,6 +153,8 @@ function limitsKey(value: unknown) {
     limits.noLuck?.noReplyDays,
     limits.waves?.size,
     limits.waves?.max,
+    limits.applyLimits?.daily,
+    limits.applyLimits?.perCompany,
   ]);
 }
 
@@ -315,6 +329,7 @@ export function createJobs(options: {
     remove?(threadId: string, path: string, signal?: AbortSignal): Promise<void>;
   };
   startChat?: (text: string, attachments: Artifact[], sessionId: string) => Promise<unknown>;
+  continueChat?: (text: string, sessionId: string) => Promise<'sent' | 'waiting' | 'empty'>;
   withTurnLock?: <T>(
     turnId: string,
     operation: (client: PoolClient) => Promise<T>,
@@ -324,11 +339,16 @@ export function createJobs(options: {
   curator?: MemoryCurator;
   notify?: (client: Query, notice: DraftNotice) => Promise<boolean>;
   timeZone?: () => Promise<string | null | undefined>;
+  automatic?: Automatic;
   signal?: AbortSignal;
   changed?: () => void;
 }) {
   const { pool, ownerId } = options;
-  const changed = options.changed ?? (() => {});
+  const notify = options.changed ?? (() => {});
+  const changed = () => {
+    notify();
+    apply.soon();
+  };
   const timeZone = async () =>
     validZone(await (options.timeZone?.() ?? Promise.resolve(null)).catch(() => null));
   const lock = (client: Query) => lockKey(client, `jobs:${ownerId}`);
@@ -392,9 +412,24 @@ export function createJobs(options: {
     drafts,
     postings: postings.ofCompany,
     ...(options.startChat ? { startChat: options.startChat } : {}),
+    ...(options.continueChat ? { continueChat: options.continueChat } : {}),
     turnWrite,
     owned,
     changed,
+  });
+  const apply = createJobApply({
+    pool,
+    ownerId,
+    ...(options.automatic ? { automatic: options.automatic } : {}),
+    lock,
+    startAutomatic: companies.startAutomatic,
+    posting: postings.one,
+    profileName: async (client) => (await profileState(client)).profile.name,
+    artifacts: options.artifacts,
+    ...(options.workspace ? { workspace: options.workspace } : {}),
+    turnWrite,
+    changed,
+    ...(options.signal ? { signal: options.signal } : {}),
   });
   const helper = createJobHelper({
     pool,
@@ -991,6 +1026,7 @@ export function createJobs(options: {
   ) {
     if (postings.handles(raw)) return postings.execute(turn, raw, context.signal);
     if (companies.handles(raw)) return companies.execute(turn, raw, context.signal);
+    if (apply.handles(raw)) return apply.execute(turn, raw, context.signal);
     const request = parse(toolInput, raw, 'The jobs request');
     const result = async (): Promise<unknown> => {
       switch (request.action) {
@@ -1273,16 +1309,26 @@ export function createJobs(options: {
     helperAccess: helper.exempt,
     setup: () => setup(pool),
     drafts: { idle: drafts.idle },
+    apply: {
+      detect: apply.detect,
+      isApplyChat: apply.isApplyChat,
+      entryStep,
+      siteStep: apply.siteStep,
+      siteQuestion: apply.siteQuestion,
+      approveSite: apply.approveSite,
+    },
     initialize: async () => {
       await drafts
         .initialize()
         .catch((error: unknown) => logFailure('job_drafts_resume_failed', error));
+      let linked = 0;
       try {
-        return await owned((client) => linkPostings(client, ownerId));
+        linked = await owned((client) => linkPostings(client, ownerId));
       } catch (error) {
         logFailure('job_postings_link_failed', error);
-        return 0;
       }
+      apply.watch();
+      return linked;
     },
   };
 }

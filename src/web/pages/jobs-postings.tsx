@@ -28,6 +28,7 @@ const statusLabels: Record<StatusFilter, string> = {
   new: 'New',
   shortlisted: 'Shortlisted',
   skipped: 'Skipped',
+  applied: 'Applied',
   all: 'All',
 };
 const sourceLabels: Record<JobSourceKind, string> = {
@@ -86,6 +87,8 @@ export function PostingCard({ posting, onChanged }: { posting: JobPosting; onCha
   const place = [posting.company, posting.location].filter(Boolean).join(' · ');
   const programme = [posting.programme, posting.track].filter(Boolean).join(' · ');
   const note = posting.summary || posting.excerpt;
+  const applied = posting.status === 'applied';
+  const chat = posting.applyChatId;
   return (
     <article className="saved-plan jobs-posting">
       <div className="saved-plan-title">
@@ -137,8 +140,48 @@ export function PostingCard({ posting, onChanged }: { posting: JobPosting; onCha
           </>
         )}
       </p>
+      {(applied || posting.tailoredCv) && (
+        <p className="jobs-meta">
+          {applied &&
+            (posting.appliedAt ? (
+              <>
+                {'Applied on '}
+                <time dateTime={posting.appliedAt}>
+                  {formatDateTime(posting.appliedAt, format)}
+                </time>
+              </>
+            ) : (
+              'Applied'
+            ))}
+          {applied && posting.applicationRef && (
+            <>
+              {' · Reference '}
+              <span dir="auto">{posting.applicationRef}</span>
+            </>
+          )}
+          {posting.tailoredCv && (
+            <>
+              {applied ? ' · ' : ''}
+              <a href={posting.tailoredCv.url} target="_blank" rel="noreferrer">
+                {applied ? 'Tailored CV' : 'Tailored CV, not sent yet'}
+              </a>
+            </>
+          )}
+        </p>
+      )}
       <div className="jobs-actions">
-        {posting.status !== 'shortlisted' && (
+        {chat && (
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() =>
+              window.dispatchEvent(new CustomEvent('nod:open-chat', { detail: { taskId: chat } }))
+            }
+          >
+            Apply chat
+          </Button>
+        )}
+        {posting.status !== 'shortlisted' && !applied && (
           <Button
             size="sm"
             variant="secondary"
@@ -148,9 +191,14 @@ export function PostingCard({ posting, onChanged }: { posting: JobPosting; onCha
             Shortlist
           </Button>
         )}
-        {posting.status !== 'skipped' && (
+        {posting.status !== 'skipped' && !applied && (
           <Button size="sm" variant="ghost" disabled={busy} onClick={() => void move('skipped')}>
             Skip
+          </Button>
+        )}
+        {!applied && (
+          <Button size="sm" variant="ghost" disabled={busy} onClick={() => void move('applied')}>
+            I applied
           </Button>
         )}
         {posting.status !== 'new' && (
@@ -193,7 +241,7 @@ export function Postings() {
           size="compact"
           variant="underline"
           value={status}
-          items={(['new', 'shortlisted', 'skipped', 'all'] as const).map((value) => ({
+          items={(['new', 'shortlisted', 'applied', 'skipped', 'all'] as const).map((value) => ({
             value,
             label: statusLabels[value],
             count: value === 'all' ? total : counts?.[value],

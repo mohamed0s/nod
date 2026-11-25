@@ -229,6 +229,8 @@ import type { VaultActivityReason } from '../shared/contracts.ts';
 import { createTriage, getPreferences } from './triage.ts';
 import { createTasks } from './tasks.ts';
 import { createJobs, jobLimitsInput } from './jobs.ts';
+import { applySiteAction } from './job-apply.ts';
+import { chatWaiting } from './jobs-shared.ts';
 import { createPages } from './pages.ts';
 import { createActivity, createActivityLine } from './activity.ts';
 import {
@@ -1251,6 +1253,29 @@ async function initializeApplication(
     curator,
     notify: async (client, notice) => (channels ? channels.notice(client, notice) : false),
     timeZone: async () => (await getPreferences()).timeZone,
+    continueChat: async (text, sessionId) => {
+      if (await chatWaiting(pool, ownerId, sessionId)) return 'waiting';
+      const latest = (
+        await pool.query<{ id: string; open: boolean }>(
+          `SELECT m.id,(u.status='waiting' OR EXISTS (SELECT 1 FROM approvals a
+             WHERE a.owner_id=m.owner_id AND a.confirmation_message_id=m.id AND a.status='pending')) AS open
+           FROM messages m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
+           WHERE m.owner_id=$1 AND u.session_id=$2 AND m.role='assistant' AND m.hidden_at IS NULL
+           ORDER BY m.created_at DESC,m.id DESC LIMIT 1`,
+          [ownerId, sessionId],
+        )
+      ).rows[0];
+      if (!latest) return 'empty';
+      if (latest.open) return 'waiting';
+      await userMessages.submit(text, [], { channel: 'web', replyToMessageId: latest.id });
+      return 'sent';
+    },
+    automatic: {
+      start: tasks.startWork,
+      lock: (client) => lockThread(client),
+      ready: () => adapters.model.configured,
+      paused: async () => (await getPreferences()).proactivePaused,
+    },
     signal: closing.signal,
     changed: () => jobsChanged(ownerId),
   });
@@ -1673,9 +1698,12 @@ async function initializeApplication(
         action === 'NOD_model_select' ||
         action.startsWith('NOD_memory_') ||
         action === 'NOD_notification_preferences_update';
-      if (action === 'NOD_jobs_limits_update') {
-        const result = await withTurnLock(turnLock, (client) =>
-          jobs.applyLimits(args, client, provenance.details?.current),
+      if (action === 'NOD_jobs_limits_update' || action === applySiteAction) {
+        const turn = { threadId: provenance.threadId, turnId: provenance.turnId };
+        const result = await withTurnLock<unknown>(turnLock, (client) =>
+          action === applySiteAction
+            ? jobs.apply.approveSite(args, turn, client)
+            : jobs.applyLimits(args, client, provenance.details?.current),
         );
         await ledger.action(
           provenance.turnId,
@@ -2037,6 +2065,7 @@ async function initializeApplication(
         return;
       if (action === 'NOD_limits_update') limitsInput.parse(args);
       else if (action === 'NOD_jobs_limits_update') jobLimitsInput.parse(args);
+      else if (action === applySiteAction) await jobs.apply.siteQuestion(args);
       else if (action.startsWith('NOD_')) {
         if (
           ['NOD_schedule_update', 'NOD_schedule_pause', 'NOD_schedule_cancel'].includes(action) &&
@@ -2049,7 +2078,10 @@ async function initializeApplication(
       } else await integrations.prepare(ownerId, action, args, undefined, undefined, false, client);
     },
     (reply) => ledger.forOwner(() => trust.answer(reply)),
-    communication.describe,
+    (proposal, signal) =>
+      proposal.action === applySiteAction
+        ? jobs.apply.siteQuestion(proposal.args)
+        : communication.describe(proposal, signal),
     captureAnalytics,
     createErrorRedactor(secrets),
     (input, signal) => ledger.forOwner(() => trust.classifyRepeatedAction(input, signal)),
@@ -2628,6 +2660,7 @@ async function initializeApplication(
       recall: personal.recall,
       learnedSkills: learnedSkills.index,
       taskContext: tasks.context,
+      checkTyping: jobs.apply.isApplyChat,
       settleTask: tasks.settle,
       taskLedger: tasks.read,
       task: async (turn, raw, sourceMessageId, priorMessageId, priorHandoff) => {
@@ -2697,8 +2730,30 @@ async function initializeApplication(
         }
       },
       browserStep: async (turn, request, signal) => {
+        const site = async () => {
+          const asked = await jobs.apply.siteStep(turn, request, (target) =>
+            approvals.request(turn, applySiteAction, target, { signal }),
+          );
+          return asked === undefined || asked === 'refused'
+            ? asked
+            : asked && typeof asked === 'object' && appConfirmation in asked
+              ? (asked as { [appConfirmation]: string })
+              : { result: asked };
+        };
+        const step = request.step;
+        const entry = jobs.apply.entryStep(request);
+        if (entry) {
+          const asked = await site();
+          if (asked !== undefined) return asked;
+        }
+        if (step.action === 'fill' || (step.action === 'type' && !/[\r\n]/.test(step.text ?? '')))
+          return 'run';
         const args = browserStepArgs(request);
         const verdict = await trust.check(turn, 'NOD_browser', args, signal);
+        if (!entry && (verdict.confirm || verdict.basis.kind !== 'read')) {
+          const asked = await site();
+          if (asked !== undefined) return asked;
+        }
         const prepareConfirmation = async () => {
           const control = request.page.controls?.[0];
           const namedControl =

@@ -7253,6 +7253,18 @@ test(
     await service.drain();
     assert.equal(delivery('Approve the synthetic web refund?').message_thread_id, 701);
     assert.equal(created.length, 3);
+    const applying = await chat('Synthetic apply chat', 'succeeded', 'event');
+    await pool.query('UPDATE turns SET source_id=$2 WHERE id=$1', [
+      applying.turn,
+      `job-apply:${applying.id}`,
+    ]);
+    await say(applying.turn, 'Synthetic form summary before the final Submit');
+    await service.drain();
+    assert.deepEqual(created.at(-1), { chat_id: '123456', name: 'Synthetic apply chat' });
+    assert.equal(
+      delivery('Synthetic form summary before the final Submit').message_thread_id,
+      newest(),
+    );
 
     creating = 'refused';
     const refused = await chat('Synthetic refused chat', 'waiting');

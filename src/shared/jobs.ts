@@ -18,6 +18,10 @@ export const cvMimeTypes = {
 
 const text = (max: number) => z.string().trim().max(max);
 const item = (max: number) => z.string().trim().min(1).max(max);
+const applyLimits = z
+  .object({ daily: z.int().min(0).max(20), perCompany: z.int().min(1).max(10) })
+  .strict();
+export const defaultApplyLimits = { daily: 3, perCompany: 2 };
 export const languageTag = z
   .string()
   .trim()
@@ -51,6 +55,7 @@ export const jobProfileFields = {
     .object({ noAcceptDays: z.int().min(1).max(90), noReplyDays: z.int().min(1).max(90) })
     .strict(),
   waves: z.object({ size: z.int().min(1).max(50), max: z.int().min(1).max(200) }).strict(),
+  applyLimits: applyLimits.default(defaultApplyLimits),
 };
 
 export const defaultJobProfile: JobProfile = {
@@ -67,6 +72,7 @@ export const defaultJobProfile: JobProfile = {
   inviteLimits: { daily: 15, weekly: 80 },
   noLuck: { noAcceptDays: 7, noReplyDays: 5 },
   waves: { size: 5, max: 10 },
+  applyLimits: defaultApplyLimits,
 };
 
 export const jobProfileSchema = z.object(jobProfileFields).strict();
@@ -78,6 +84,7 @@ export const jobProfilePatch = z
     inviteLimits: jobProfileFields.inviteLimits.partial(),
     noLuck: jobProfileFields.noLuck.partial(),
     waves: jobProfileFields.waves.partial(),
+    applyLimits: applyLimits.partial(),
   })
   .partial()
   .strict();
@@ -104,7 +111,8 @@ export function unknownPlaceholders(body: string) {
   ];
 }
 
-export const jobLimitFields = ['inviteLimits', 'noLuck', 'waves'] as const;
+export const jobLimitFields = ['inviteLimits', 'noLuck', 'waves', 'applyLimits'] as const;
+export const jobApplyLimits = applyLimits;
 
 export type JobCv = {
   id: string;

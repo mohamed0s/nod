@@ -130,6 +130,8 @@ function describe(row: Record<string, any>): Pick<TrustEntry, 'title' | 'source'
     return { source: 'check', title: 'Checked a connected app' };
   if (id.startsWith('reaction:')) return { source: 'chat', title: 'Your reaction' };
   if (task?.started) return { source: 'started', title: task.title };
+  if (id.startsWith('job-apply:'))
+    return { source: 'started', title: task?.title || 'Job application' };
   return { source: 'event', title: 'Woke for an email or app event' };
 }
 

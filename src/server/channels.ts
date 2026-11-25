@@ -1477,8 +1477,8 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     const mirrored = `FROM messages m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
       WHERE m.owner_id=$1 AND m.created_at>now()-interval '10 minutes' AND m.role='assistant'
         AND m.hidden_at IS NULL AND u.channel='web' AND u.session_id::text=to_jsonb(u)->>'task_id'
-        AND EXISTS (SELECT 1 FROM (SELECT f.source FROM turns f WHERE f.owner_id=u.owner_id AND f.session_id=u.session_id
-          ORDER BY f.created_at,f.id LIMIT 1) f WHERE ${ownerStarted('f')})
+        AND EXISTS (SELECT 1 FROM (SELECT f.source,f.source_id FROM turns f WHERE f.owner_id=u.owner_id AND f.session_id=u.session_id
+          ORDER BY f.created_at,f.id LIMIT 1) f WHERE ${ownerStarted('f')} OR starts_with(f.source_id,'job-apply:'))
         AND NOT EXISTS (SELECT 1 FROM channel_outbox q WHERE q.message_id=m.id)`;
     if (!(await pool.query(`SELECT 1 ${mirrored} LIMIT 1`, [ownerId])).rowCount) return;
     const [route] = await topicRoutes((mode) => mode.enabled);

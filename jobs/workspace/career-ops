@@ -3,7 +3,8 @@ set -eu
 
 usage() {
   printf '%s\n' 'Usage: career-ops <command> [arguments]' \
-    'Commands: doctor, pdf, cv:html, cv:templates, cv:verify-facts, cv:verify-ats, sync-check, scan, scan:full.' \
+    'Commands: doctor, pdf, cv:html, cv:templates, cv:verify-facts, cv:verify-ats, sync-check, application, scan, scan:full.' \
+    'application takes --url <application page> --pdf output/<file>.pdf and prints the fields career-ops fills from config/profile.yml for a Greenhouse, Ashby or Lever form. It opens nothing and sends nothing.' \
     'scan takes --dry-run, --json, --quiet, --company <name>, --since <days>, --posted-after <date>, --posted-before <date>.' \
     'scan:full takes --dry-run, --json, --verbose, --since <days>, --limit <n>, --ats <greenhouse,lever,ashby>, --include-undated, --shuffle, --resume.' \
     'scan and scan:full also write data/scan-new.tsv: the postings they added in the last 30 days.' \
@@ -97,6 +98,10 @@ case "$name" in
   cv:verify-facts) script=verify-cv-facts ;;
   cv:verify-ats) script=verify-ats ;;
   sync-check) script=cv-sync-check ;;
+  application)
+    script=prepare-application
+    flags '' '--url --pdf' "$@"
+    ;;
   scan)
     script=scan
     flags '--dry-run --json --quiet' '--company --since --posted-after --posted-before' "$@"

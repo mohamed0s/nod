@@ -2541,6 +2541,74 @@ test('links navigate without a check unless they send a known form', async () =>
   assert.deepEqual(seen, ['@form-link', '@button']);
 });
 
+test('typing, keys and field clicks reach the step check only in work that asks for it', async () => {
+  const url = 'https://careers.example.test/apply';
+  const controls: Record<string, Array<{ role: string; name: string }>> = {
+    '@option': [{ role: 'option', name: 'Synthetic country' }],
+    '@field': [{ role: 'combobox', name: 'Synthetic sponsorship' }],
+    '@more': [{ role: 'link', name: 'More jobs' }],
+    focused: [{ role: 'combobox', name: 'Synthetic country' }],
+  };
+  for (const checkTyping of [false, true]) {
+    const seen: string[] = [];
+    const acted: string[] = [];
+    await taskFixture(
+      async (tools) => {
+        await call(tools, 'browser', { action: 'open', url });
+        await call(tools, 'browser', { action: 'fill', selector: '@name', text: 'Sam Example' });
+        await call(tools, 'browser', {
+          action: 'type',
+          selector: '@email',
+          text: 'sam@example.test',
+        });
+        await call(tools, 'browser', { action: 'press', key: 'a' });
+        await call(tools, 'browser', { action: 'click', selector: '@field' });
+        await call(tools, 'browser', { action: 'click', selector: '@option' });
+        await call(tools, 'browser', { action: 'click', selector: '@more' });
+      },
+      {
+        ...(checkTyping ? { checkTyping } : {}),
+        browserStep: async ({ step }) => {
+          seen.push(`${step.action} ${step.selector ?? ('key' in step ? step.key : '')}`);
+          return step.selector === '@email' ? { result: 'Synthetic site question' } : 'run';
+        },
+      },
+      {
+        computer: fakeComputer({
+          currentPage: async (_id, step) => ({
+            origin: new URL(url).origin,
+            url,
+            controls: controls[step?.selector ?? 'focused'],
+          }),
+          act: async (_id, step) => {
+            if (step.action !== 'open')
+              acted.push(
+                `${step.action} ${step.selector ?? step.key}${step.expectUrl ? ' bound' : ''}`,
+              );
+            return { url, text: 'Synthetic form' };
+          },
+        }),
+      },
+    );
+    assert.deepEqual(
+      seen,
+      checkTyping ? ['fill @name', 'type @email', 'press a', 'click @field', 'click @option'] : [],
+    );
+    assert.deepEqual(
+      acted,
+      checkTyping
+        ? [
+            'fill @name bound',
+            'press a bound',
+            'click @field bound',
+            'click @option bound',
+            'click @more',
+          ]
+        : ['fill @name', 'type @email', 'press a', 'click @field', 'click @option', 'click @more'],
+    );
+  }
+});
+
 test('browser handoff requires a live page, binds its session and stops further work without a link', async () => {
   const sessionId = randomUUID();
   let opened = false;

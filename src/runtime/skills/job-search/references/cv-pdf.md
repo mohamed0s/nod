@@ -19,4 +19,10 @@ To send it, call `jobs cv_file` (or `jobs cv_file {id}` for another CV), then `s
 
 ## Tailored CVs
 
-A tailored CV is made only when Nod applies through a company's own application form, never while scoring or asking for a referral. It always starts from the main CV's `cv.md`, follows `/opt/career-ops/modes/pdf.md` for that one posting, and must pass `career-ops cv:verify-facts` and `career-ops cv:verify-ats` before it is used. It is used for that application only and never replaces the main CV.
+A tailored CV is made only when Nod applies through a company's own application form, as [apply.md](apply.md) describes, never while scoring or asking for a referral. It is for that one posting and never replaces the main CV. Below, `<dir>` is `shared/career-ops/output` and `<id>` the posting's id.
+
+1. Run `jobs sync`, so `shared/career-ops/cv.md` holds the main CV's text.
+2. Read the posting on the company's own page, and in `/opt/career-ops/modes/pdf.md` the keyword strategy and steps 3 and 10 to 15 of the full pipeline. Take 15 to 20 keywords from the posting. Lead with what `cv.md` already shows, reorder bullets and projects by relevance, and work a keyword into an existing achievement only where `cv.md` supports it. Never add a skill, figure, date, link or result that `cv.md` doesn't have, and keep each job title as `cv.md` writes it.
+3. Write the payload in pdf.md's JSON format to `<dir>/tailored-<id>.json`, and pass absolute paths to every command.
+4. Run `career-ops cv:html <dir>/tailored-<id>.json <dir>/tailored-<id>.html`, then `career-ops cv:verify-facts <dir>/tailored-<id>.html` and `career-ops cv:verify-ats <dir>/tailored-<id>.html`. Both must pass: fix the payload when one reports a problem, never the check. Then run `career-ops pdf <dir>/tailored-<id>.html <dir>/tailored-<id>.pdf`.
+5. Save it with `jobs cv_tailored {postingId}`. Nod keeps it with that posting, shows it on the Jobs page, and returns `uploadFile`, a copy named for the owner, to upload on the form.

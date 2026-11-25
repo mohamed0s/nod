@@ -63,6 +63,7 @@ export type JobLimits = {
   noAcceptDays: number;
   noReplyDays: number;
   waves: { size: number; max: number };
+  apply: { daily: number; perCompany: number };
 };
 
 export const jobDraftStates = [
@@ -99,7 +100,12 @@ export type JobCompany = {
   bestScore: number | null;
   counts: JobCompanyCounts;
   noLuck: JobNoLuck;
-  applyChat: { id: string; state: 'open' | 'starting' | 'lost' } | null;
+  applyChat: {
+    id: string;
+    state: 'open' | 'starting' | 'lost';
+    progress: 'working' | 'needs_you' | 'done' | null;
+    by: 'owner' | 'rule' | null;
+  } | null;
   waves: JobWaves;
   revision: number;
   lastActivityAt: string | null;
@@ -140,5 +146,8 @@ export type JobCompanyView = JobCompany & {
 
 export type JobNoLuckResult = {
   company: JobCompanyView;
-  apply: null | { state: 'started' | 'reused' } | { state: 'failed'; error: string };
+  apply:
+    | null
+    | { state: 'started' | 'reused' | 'resumed' | 'needs_you' }
+    | { state: 'failed'; error: string };
 };

@@ -36,6 +36,7 @@ const nodActions: Array<[string, string]> = [
   ['NOD_vault_allow', 'Use a saved sign-in'],
   ['NOD_limits_update', 'Change spending limits'],
   ['NOD_jobs_limits_update', 'Change job search limits'],
+  ['NOD_job_apply_site', 'Apply on this site'],
   ['NOD_bug_report_send', 'Send a bug report to the Nod team'],
   ['NOD_model_select', 'Change the model'],
   ['NOD_notification_preferences_update', 'Change Nod settings'],
@@ -533,6 +534,7 @@ export function actionTarget(
       const site = host(args.website);
       return [browserVerbs[step] ?? step, what, site && `on ${site}`].filter(Boolean).join(' ');
     }
+    if (action === 'NOD_job_apply_site') return String(args.site ?? '').replace(/^https?:\/\//, '');
     if (action.startsWith('NOD_schedule_'))
       return words(args.title ?? (details?.schedule as { title?: unknown } | undefined)?.title)[0];
     if (action === 'NOD_model_select') {
@@ -554,6 +556,7 @@ export function actionTarget(
       const invites = (args.inviteLimits ?? {}) as { daily?: unknown; weekly?: unknown };
       const luck = (args.noLuck ?? {}) as { noAcceptDays?: unknown; noReplyDays?: unknown };
       const waves = (args.waves ?? {}) as { size?: unknown; max?: unknown };
+      const apply = (args.applyLimits ?? {}) as { daily?: unknown; perCompany?: unknown };
       return [
         invites.daily !== undefined && `daily invites ${String(invites.daily)}`,
         invites.weekly !== undefined && `weekly invites ${String(invites.weekly)}`,
@@ -563,6 +566,10 @@ export function actionTarget(
           `no luck after ${String(luck.noReplyDays)} days without a reply`,
         waves.size !== undefined && `waves of ${String(waves.size)} people`,
         waves.max !== undefined && `up to ${String(waves.max)} people a company`,
+        apply.daily !== undefined &&
+          `up to ${String(apply.daily)} apply chats Nod starts by itself a day`,
+        apply.perCompany !== undefined &&
+          `up to ${String(apply.perCompany)} applications a company`,
       ]
         .filter(Boolean)
         .join(', ');
