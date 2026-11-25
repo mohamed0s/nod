@@ -40,7 +40,7 @@ import { withoutSchemaPatterns } from '../shared/json-schema.ts';
 import type { Turn } from './turn.ts';
 import { jobsToolHelp, jobsToolParameters, runJobsTool } from './jobs-tool.ts';
 import { pagesToolDescription, pagesToolParameters, runPagesTool } from './pages-tool.ts';
-import { nodDescriptionAdditions } from './agent-context.ts';
+import { nodDescriptionAdditions, taskDescriptionAdditions } from './agent-context.ts';
 import type { FlightOption, FlightSearch } from '../ports/flights.ts';
 
 export const memoryActions = [
@@ -650,12 +650,15 @@ export const toolDefinitions = {
       Type.Object(
         {
           action: Type.Literal('reply'),
-          ids: Type.Array(uuid, { minItems: 1 }),
+          ids: Type.Optional(Type.Array(uuid, { minItems: 1 })),
+          agent: Type.Optional(Type.String({ minLength: 1, maxLength: 60 })),
+          brief: Type.Optional(Type.String({ minLength: 1, maxLength: 2000 })),
           request: Type.Optional(uuid),
           retry: Type.Optional(Type.Boolean()),
         },
         { additionalProperties: false },
       ),
+      Type.Object({ action: Type.Literal('read'), id: uuid }, { additionalProperties: false }),
       Type.Object(
         { action: Type.Literal('stop'), id: Type.Optional(uuid) },
         { additionalProperties: false },
@@ -727,6 +730,7 @@ export const toolDefinitions = {
   ),
 };
 toolDefinitions.nod.description += nodDescriptionAdditions;
+toolDefinitions.task.description += taskDescriptionAdditions;
 
 interface NodTool<P extends TSchema = TSchema> {
   name: string;

@@ -162,6 +162,7 @@ import { createChannels } from './channels.ts';
 import { createChatTitles } from './chat-titles.ts';
 import { chatModelArgs } from './chat-model.ts';
 import { createAgents } from './agents.ts';
+import { createChiefOfStaff } from './chief-of-staff.ts';
 import { createAgentMemory, sharedReflection } from './agent-memory.ts';
 import { createAgentTools } from './agent-tools.ts';
 import { createAgentSchedules } from './agent-schedules.ts';
@@ -1231,6 +1232,10 @@ async function initializeApplication(
       ? { validateModel: (choice: ModelSelection) => adapters.models!.validateChoice(choice) }
       : {}),
     renamed: renameTopic,
+    agents: {
+      send: (...args) => chiefOfStaff.send(...args),
+      read: (...args) => chiefOfStaff.read(...args),
+    },
   });
   await tasks.initialize();
   const agents = createAgents({
@@ -1242,6 +1247,12 @@ async function initializeApplication(
     removed: (id) => agentMemory.remove(id),
   });
   await agents.initialize();
+  const chiefOfStaff = createChiefOfStaff({
+    pool,
+    ownerId,
+    agents,
+  });
+  await chiefOfStaff.initialize();
   const agentMemory = createAgentMemory({
     pool,
     ownerId,
@@ -2776,7 +2787,8 @@ async function initializeApplication(
       checkTyping: jobs.apply.isApplyChat,
       settleTask: tasks.settle,
       taskLedger: tasks.read,
-      agentContext: agents.context,
+      agentContext: chiefOfStaff.context,
+      fromMain: chiefOfStaff.fromMain,
       task: async (turn, raw, sourceMessageId, priorMessageId, priorHandoff) => {
         const request = raw as { action?: unknown; model?: unknown } | undefined;
         if (request?.action === 'start' && request.model) {

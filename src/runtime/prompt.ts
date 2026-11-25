@@ -13,7 +13,13 @@ import {
 } from '../shared/conversation-style.ts';
 import { mcpToolNames } from './tools.ts';
 import { userFormat } from './time-context.ts';
-import { agentMemoryIndex, agentProfile, memorySavingOff } from './agent-context.ts';
+import {
+  agentMemoryIndex,
+  agentProfile,
+  chiefOfStaffData,
+  mainNote,
+  memorySavingOff,
+} from './agent-context.ts';
 
 export const coreSkills = ['connected-apps', 'schedules-and-watches', 'artifacts', 'video-links'];
 
@@ -277,6 +283,7 @@ function requestParts(
     mode,
     task: context.taskContext ?? null,
     taskLedger: taskLedger(context.tasks ?? []),
+    ...chiefOfStaffData(context),
     channel: context.channel || 'web',
     ...(context.speech ? { speech: context.speech } : {}),
     notificationRule: context.notificationRule ?? null,
@@ -347,6 +354,7 @@ function requestParts(
       ? [
           'task',
           'taskLedger',
+          'agents',
           'quietHours',
           'spendingLimitReached',
           'currentMessageId',
@@ -442,6 +450,7 @@ export function steeredInstruction(
     text: string;
     replyTo?: RuntimeContext['replyTo'];
     attachments: RuntimeContext['attachments'];
+    fromMain?: string;
   },
   omittedImages: Set<string>,
   imageAnalysis?: string,
@@ -451,6 +460,7 @@ export function steeredInstruction(
       messageId: message.id,
       replyTo: message.replyTo ?? null,
       workspaceAttachments: workspaceAttachments(message.attachments, omittedImages),
+      ...(message.fromMain ? { fromMain: untrustedBlock(mainNote, message.fromMain) } : {}),
       currentInstruction: message.text,
       ...(imageAnalysis ? { imageAnalysis } : {}),
     },
