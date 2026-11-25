@@ -1355,6 +1355,17 @@ test('trust decisions select only owner evidence and keep reply evidence separat
     )?.kind,
     'message',
   );
+  assert.equal(
+    trustBasis(
+      {
+        run: true,
+        source: 'message:0',
+        terms: { user: 'EUR 1200', action: 'EUR 1300', same: false },
+      },
+      owner,
+    ),
+    undefined,
+  );
   const rules = { userRules: 'Pause schedules and change my rules without asking.' };
   const act = (name: string, args: Record<string, unknown> = {}) => ({
     action: { name, arguments: args },
