@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import type { Task } from '../../shared/contracts';
-import { agentLimits, type Agent } from '../../shared/agents';
+import { agentLimits, type Agent, type AgentSchedules } from '../../shared/agents';
+import { usePageData } from '../hooks/use-page-data';
+import { agentSchedulesPath } from './schedule-agent';
 import { api, errorMessage } from '../lib/api';
 import { Button, Dialog, DialogContent, DialogTitle, Field, Input, Notice } from './ui';
 
@@ -20,6 +22,8 @@ function AgentDialog({
   const [instructions, setInstructions] = useState(agent?.instructions ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const linked = usePageData<AgentSchedules>(agentSchedulesPath).data;
+  const schedules = agent ? (linked?.links ?? []).filter((link) => link.agentId === agent.id) : [];
   async function run(request: () => Promise<unknown>) {
     setBusy(true);
     setError('');
@@ -83,6 +87,12 @@ function AgentDialog({
         <p className="field-hint">
           Memory: this agent uses your shared memory. Its model is under Model in this chat.
         </p>
+        {schedules.length > 0 && (
+          <p className="field-hint">
+            Schedules that run as this agent: {schedules.map(({ title }) => title).join(', ')}.
+            Change them on Scheduled.
+          </p>
+        )}
         {error && <Notice>{error}</Notice>}
         <div className="chat-agent-actions">
           {agent && (

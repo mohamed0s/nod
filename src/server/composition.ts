@@ -162,6 +162,7 @@ import { createChannels } from './channels.ts';
 import { createChatTitles } from './chat-titles.ts';
 import { chatModelArgs } from './chat-model.ts';
 import { createAgents } from './agents.ts';
+import { createAgentSchedules } from './agent-schedules.ts';
 import { createChannelSettings, managedChannelEnvironment } from './channel-settings.ts';
 import { createChannelMedia } from './channel-media.ts';
 import { createChannelSessionStore } from './channel-session.ts';
@@ -1131,6 +1132,7 @@ async function initializeApplication(
   let retireScheduleConfirmations:
     | ((client: import('pg').PoolClient, id: string, waitForSend: boolean) => Promise<void>)
     | undefined;
+  const agentSchedules = createAgentSchedules({ pool, ownerId, refresh });
   const personal = createPersonalService({
     analytics: captureAnalytics,
     pool,
@@ -1193,9 +1195,16 @@ async function initializeApplication(
     ...(adapters.models
       ? {
           validateModel: (choice: ModelSelection) => adapters.models!.validateChoice(choice),
-          workPricing: (own: ModelSelection | null) => adapters.models!.pricing('schedule', own),
-          modelPaused: (model: ModelSelection | null) =>
-            adapters.models!.paused({ kind: 'schedule', schedule: model }),
+          workPricing: async (own: ModelSelection | null, id?: string) =>
+            adapters.models!.pricing(
+              'schedule',
+              own ?? (id ? await agentSchedules.agentModel(id) : null),
+            ),
+          modelPaused: async (model: ModelSelection | null, id?: string) =>
+            adapters.models!.paused({
+              kind: 'schedule',
+              schedule: model ?? (id ? await agentSchedules.agentModel(id) : null),
+            }),
         }
       : {}),
     watchable: (connectionIds, client) => integrations.watchable(connectionIds, client),
@@ -1220,6 +1229,7 @@ async function initializeApplication(
   await tasks.initialize();
   const agents = createAgents({ pool, ownerId, refresh, renamed: renameTopic });
   await agents.initialize();
+  await agentSchedules.initialize();
   const chatTitles = createChatTitles({
     pool,
     ownerId,
@@ -1723,6 +1733,16 @@ async function initializeApplication(
         );
         return result;
       }
+      if (action === 'NOD_agent_schedule') {
+        const result = await withTurnLock(turnLock, (client) => agentSchedules.apply(args, client));
+        await ledger.action(
+          provenance.turnId,
+          action,
+          provenance.basis ?? { kind: 'approved' },
+          actionTarget(action, args, provenance.details),
+        );
+        return result;
+      }
       const lockedWrite =
         action === 'NOD_limits_update' ||
         action === 'NOD_model_select' ||
@@ -1765,10 +1785,15 @@ async function initializeApplication(
                         );
                       return withTurnLock(
                         turnLock,
-                        (locked) =>
-                          personal.manage(action.slice('NOD_'.length), args, provenance, {
-                            client: locked,
-                          }),
+                        async (locked) =>
+                          agentSchedules.adopted(
+                            provenance.turnId,
+                            action,
+                            locked,
+                            await personal.manage(action.slice('NOD_'.length), args, provenance, {
+                              client: locked,
+                            }),
+                          ),
                         client,
                       );
                     },
@@ -2087,6 +2112,8 @@ async function initializeApplication(
     },
     async (action, args, expectedRevision, client) => {
       if (action === 'NOD_agent_update') return agents.validate(args, client);
+      if (action === 'NOD_agent_schedule')
+        return void (await agentSchedules.validate(args, client));
       if (
         ['NOD_browser', 'NOD_vault_allow', 'NOD_bug_report_send', 'NOD_workspace_command'].includes(
           action,
@@ -2116,7 +2143,13 @@ async function initializeApplication(
           ? agents.describe(proposal, signal, communication.describe, (channel, text, literal) =>
               Boolean(channels?.canDeliverLiteral(channel, text, literal)),
             )
-          : communication.describe(proposal, signal),
+          : agentSchedules.describe(
+              proposal,
+              signal,
+              communication.describe,
+              (channel, text, literal) =>
+                Boolean(channels?.canDeliverLiteral(channel, text, literal)),
+            ),
     captureAnalytics,
     createErrorRedactor(secrets),
     (input, signal) => ledger.forOwner(() => trust.classifyRepeatedAction(input, signal)),
@@ -2591,7 +2624,18 @@ async function initializeApplication(
       ...(adapters.models
         ? {
             workModel: async (turnId: string) => {
-              const origin = await workOrigin(turnId);
+              const origin = await agentSchedules.modelOrigin(
+                turnId,
+                await workOrigin(turnId),
+                (choice) => {
+                  try {
+                    adapters.models!.validateChoice(choice);
+                    return true;
+                  } catch {
+                    return false;
+                  }
+                },
+              );
               if (!origin) return undefined;
               const { selection } = adapters.models!.workModel(origin);
               const { provider, name } = adapters.models!.describe(selection);
@@ -2918,6 +2962,17 @@ async function initializeApplication(
             check: (input) => trust.check(turn, 'NOD_agent_update', input, signal),
             ask: (input, decision) =>
               approvals.request(turn, 'NOD_agent_update', input, {
+                ...provenance,
+                signal,
+                admit,
+                ...decision,
+              }),
+          });
+        if (action === 'agent_schedule')
+          return agentSchedules.request(turn.turnId, args, {
+            check: (input) => trust.check(turn, 'NOD_agent_schedule', input, signal),
+            ask: (input, decision) =>
+              approvals.request(turn, 'NOD_agent_schedule', input, {
                 ...provenance,
                 signal,
                 admit,
@@ -3640,6 +3695,7 @@ async function initializeApplication(
   onboardingProfile.registerRoutes(app);
   tasks.registerRoutes(app);
   agents.registerRoutes(app);
+  agentSchedules.registerRoutes(app);
   jobs.registerRoutes(app);
   pages.registerRoutes(app);
   triage.registerRoutes(app);

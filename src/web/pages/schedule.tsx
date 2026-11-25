@@ -22,6 +22,7 @@ import { PauseSwitch, ScheduleEditor, useDirectChange } from '../components/plan
 import { Button, Loading, Notice } from '../components/ui';
 import { money } from '../lib/money';
 import { ScheduleCost, ScheduleModel } from '../components/model-choices';
+import { ScheduleAgent } from '../components/schedule-agent';
 
 export function ScheduleRow({
   schedule,
@@ -295,6 +296,7 @@ export function ScheduleRow({
           <div className="schedule-row-more">
             <p className="saved-plan-description">{schedule.prompt}</p>
             <ScheduleCost schedule={schedule} />
+            <ScheduleAgent schedule={schedule} />
             {schedule.baselineObservation?.status === 'verified' && (
               <p className="saved-plan-note">
                 Baseline: {schedule.baselineObservation.value} ·{' '}

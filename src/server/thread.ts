@@ -258,7 +258,7 @@ export interface ThreadDependencies {
   checkTyping?: (turn: TurnRef) => Promise<boolean>;
   settleTask?: (turn: TurnRef, result: string) => Promise<void>;
   taskLedger?: (threadId: string) => Promise<NonNullable<RuntimeContext['tasks']>>;
-  agentContext?: (sessionId: string) => Promise<RuntimeContext['agent']>;
+  agentContext?: (turnId: string) => Promise<RuntimeContext['agent']>;
   startTurn?: (turn: TurnRef) => Promise<void>;
   runTurn: (context: RuntimeContext) => Promise<RuntimeResult>;
   speech: Pick<SpeechService, 'synthesize'> & Partial<Pick<SpeechService, 'configured'>>;
@@ -2353,7 +2353,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     const checkTyping = Boolean(taskContext && (await dependencies.checkTyping?.(ref)));
     const tasks = await dependencies.taskLedger?.(threadId);
     const workspacePath = join(dataRoot, 'workspaces', threadId);
-    const agent = await dependencies.agentContext?.(turn.session_id);
+    const agent = await dependencies.agentContext?.(turn.id);
     await mkdir(workspacePath, { recursive: true });
     const workspaceReference = (path: string) =>
       taskContext ? `/workspace/${threadId}/${path}` : path;

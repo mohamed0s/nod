@@ -100,6 +100,7 @@ const ownSettings = new Set([
   'NOD_memory_control',
   'NOD_model_select',
   'NOD_agent_update',
+  'NOD_agent_schedule',
 ]);
 
 type BasisWords = TrustWords & {

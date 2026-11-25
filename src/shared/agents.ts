@@ -15,9 +15,22 @@ export interface Agent {
   model: ModelSelection | null;
 }
 
-export function agentApprovalContent(args: unknown) {
+export interface AgentSchedules {
+  agents: Array<{ id: string; name: string }>;
+  links: Array<{ scheduleId: string; agentId: string; useAgentModel: boolean; title: string }>;
+}
+
+export function agentApprovalContent(action: string, args: unknown) {
   const input = args && typeof args === 'object' ? (args as Record<string, unknown>) : {};
   const value = (key: string) => (typeof input[key] === 'string' ? input[key] : undefined);
+  if (action === 'NOD_agent_schedule')
+    return {
+      fields: [
+        { label: 'Schedule', value: value('schedule') ?? '' },
+        { label: 'Runs as', value: value('agent') ?? 'No agent' },
+        { label: "Uses the agent's model", value: input.useAgentModel === true ? 'Yes' : 'No' },
+      ],
+    };
   const fields = (
     [
       ['Name', value('name')],
