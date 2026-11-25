@@ -5738,6 +5738,36 @@ test(
           }
         },
       );
+      await t.test('a bare yes in Main never answers a confirmation in a task chat', async (t) => {
+        const turn = await begin('Synthetic chat confirmation');
+        const chat = randomUUID();
+        t.after(async () => {
+          await finish(turn.turnId, 'cancelled');
+          await db.pool.query('DELETE FROM tasks WHERE id=$1', [chat]);
+        });
+        await approvals.request(turn, 'NOD_notification_preferences_update', {
+          notificationRule: 'Synthetic chat rule',
+        });
+        const saved = await proposal(turn.turnId);
+        await finish(turn.turnId);
+        await db.pool.query(
+          "INSERT INTO tasks(id,owner_id,turn_id,session_id,title,done_when,now_text) VALUES($1,$2,$3,$1,'Synthetic chat','Checked','Checking')",
+          [chat, ownerId, turn.turnId],
+        );
+        await db.pool.query('UPDATE turns SET session_id=$1,background=true WHERE id=$2', [
+          chat,
+          turn.turnId,
+        ]);
+        const answer = (replyToMessageId?: string) =>
+          approvals.chat.answer({
+            threadId: turn.threadId,
+            channel: 'web',
+            text: 'Yes',
+            ...(replyToMessageId ? { replyToMessageId } : {}),
+          });
+        assert.notEqual((await answer())?.approvalId, saved.id);
+        assert.equal((await answer(saved.confirmation_message_id))?.approvalId, saved.id);
+      });
       await t.test(
         'a repeated action keeps task evidence separate from later main chat',
         async () => {
