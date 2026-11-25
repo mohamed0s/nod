@@ -24,7 +24,6 @@ import { usePageData } from '../hooks/use-page-data';
 import { api, errorMessage } from '../lib/api';
 import { formatDateTime, useDateFormat } from '../lib/date-format';
 import { navigate } from '../lib/navigation';
-import './bots.css';
 
 const memoryBadges: Record<AgentMemoryMode, string> = {
   shared: 'Shared memory',

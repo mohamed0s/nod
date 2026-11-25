@@ -13,7 +13,6 @@ import { api, errorMessage } from '../lib/api';
 import { cn } from '../lib/utils';
 import { FileImage, Pencil } from './icons';
 import { Button, Input, Notice } from './ui';
-import './bots.css';
 
 export type BotLook = Pick<Agent, 'emoji' | 'color' | 'imageId'>;
 
