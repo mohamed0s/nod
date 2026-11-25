@@ -3142,6 +3142,8 @@ test(
           labels?: string[];
           to?: string;
           cc?: string;
+          also?: string;
+          signed?: string;
         } = {},
       ) => ({
         id,
@@ -3154,8 +3156,13 @@ test(
               name: 'Authentication-Results',
               value,
             })),
+            {
+              name: 'DKIM-Signature',
+              value: `v=1; a=rsa-sha256; d=${from.replace(/^.*@|>$/g, '')}; s=synthetic;\r\n h=${values.signed ?? 'from:to:subject:date'}; bh=synthetic; b=synthetic\r\n signature`,
+            },
             { name: 'From', value: from },
             { name: 'To', value: values.to ?? 'Sam Example <sam.jobs@example.test>' },
+            ...(values.also ? [{ name: 'To', value: values.also }] : []),
             ...(values.cc ? [{ name: 'Cc', value: values.cc }] : []),
             { name: 'Subject', value: subject },
           ],
@@ -3217,15 +3224,27 @@ test(
 
       await t.test('the Gmail reader keeps only what Gmail itself checked', async () => {
         const { jobMailMessage } = await import('../src/providers/composio/job-mail.ts');
-        const parsed = (from: string | string[], auth: string[], labels?: string[]) =>
+        const signature = (signed = 'from:to:subject', selector = 'synthetic') =>
+          `v=1; a=rsa-sha256; d=linkedin.com; s=${selector}; h=${signed}; bh=x; b=syntheticsignature`;
+        const parsed = (
+          from: string | string[],
+          auth: string[],
+          extra: { labels?: string[]; dkim?: string[]; to?: string[]; cc?: string[] } = {},
+        ) =>
           jobMailMessage({
             id: 'synthetic',
             internalDate: '1700000000000',
-            ...(labels ? { labelIds: labels } : {}),
+            ...(extra.labels ? { labelIds: extra.labels } : {}),
             payload: {
               headers: [
                 ...auth.map((value) => ({ name: 'Authentication-Results', value })),
+                ...(extra.dkim ?? [signature()]).map((value) => ({
+                  name: 'DKIM-Signature',
+                  value,
+                })),
                 ...[from].flat().map((value) => ({ name: 'From', value })),
+                ...(extra.to ?? ['sam.jobs@example.test']).map((value) => ({ name: 'To', value })),
+                ...(extra.cc ?? []).map((value) => ({ name: 'Cc', value })),
               ],
             },
           });
@@ -3261,7 +3280,23 @@ test(
         );
         assert.equal(parsed('Eve <x@evil.test> <invitations@linkedin.com>', [])!.sender, null);
         assert.equal(parsed([invitations, 'Eve <x@evil.test>'], [])!.sender, null);
-        assert.equal(parsed(invitations, [], ['SPAM']), null);
+        assert.equal(parsed(invitations, [], { labels: ['SPAM'] }), null);
+        const signedBy = (dkim: string[]) =>
+          parsed(invitations, [gmailCheck()], { dkim })!.signedDomains;
+        assert.deepEqual(signedBy([signature('from:subject')]), []);
+        assert.deepEqual(signedBy([signature('From : TO : Subject')]), ['linkedin.com']);
+        assert.deepEqual(signedBy([signature('from:to', 'other'), signature('from:subject')]), []);
+        assert.deepEqual(signedBy([]), []);
+        const recipients = (to: string[], cc: string[] = []) =>
+          parsed(invitations, [], { to, cc })!.recipients;
+        assert.deepEqual(recipients(['Sam <Sam.Jobs@Example.test>, x@example.test']), [
+          'sam.jobs@example.test',
+          'x@example.test',
+        ]);
+        assert.deepEqual(recipients(['x@example.test', 'sam.jobs@example.test']), []);
+        assert.deepEqual(recipients(['x@example.test'], ['sam.jobs@example.test']), [
+          'x@example.test',
+        ]);
         inboxes.set(
           'account-paging',
           Array.from({ length: 250 }, (_, index) => ({ id: `page-${index}` })),
@@ -3428,6 +3463,17 @@ test(
             html,
             to: 'Someone Else <someone.else@example.test>',
           }),
+          message('spoof-cc', invitations, subject, {
+            html,
+            to: 'Someone Else <someone.else@example.test>',
+            cc: 'Sam <sam.jobs@example.test>',
+          }),
+          message('spoof-to2', invitations, subject, {
+            html,
+            to: 'Someone Else <someone.else@example.test>',
+            also: 'sam.jobs@example.test',
+          }),
+          message('spoof-unsigned-to', invitations, subject, { html, signed: 'from:subject:date' }),
         );
         const result = await match(m);
         assert.equal(await statusOf(m, fay.id), 'invited');
@@ -3439,34 +3485,43 @@ test(
             result.counts.unreadable,
             result.accepted.length,
           ],
-          [3, 2, 1, 1, 0],
+          [4, 2, 3, 1, 0],
         );
         assert.match(result.reasons.join(' '), /couldn't read/);
         assert.match(result.reasons.join(' '), /sent to the job mail account itself/);
         assert.deepEqual(
-          await claimed(m, [
-            'spoof-name',
-            'spoof-check',
-            'spoof-relay',
-            'spoof-dkim',
-            'spoof-two',
-            'spoof-replay',
-          ]),
-          [
-            { source_ref: 'spoof-check', kind: 'mail_unverified' },
-            { source_ref: 'spoof-dkim', kind: 'mail_unverified' },
-            { source_ref: 'spoof-name', kind: 'mail_ignored' },
-            { source_ref: 'spoof-relay', kind: 'mail_unverified' },
-            { source_ref: 'spoof-replay', kind: 'mail_ignored' },
-            { source_ref: 'spoof-two', kind: 'mail_ignored' },
-          ],
+          Object.fromEntries(
+            (
+              await claimed(m, [
+                'spoof-name',
+                'spoof-check',
+                'spoof-relay',
+                'spoof-dkim',
+                'spoof-two',
+                'spoof-replay',
+                'spoof-cc',
+                'spoof-to2',
+                'spoof-unsigned-to',
+              ])
+            ).map((row) => [row.source_ref, row.kind]),
+          ),
+          {
+            'spoof-check': 'mail_unverified',
+            'spoof-dkim': 'mail_unverified',
+            'spoof-name': 'mail_ignored',
+            'spoof-relay': 'mail_unverified',
+            'spoof-replay': 'mail_ignored',
+            'spoof-two': 'mail_ignored',
+            'spoof-cc': 'mail_ignored',
+            'spoof-to2': 'mail_ignored',
+            'spoof-unsigned-to': 'mail_unverified',
+          },
         );
         deliver(
           'gmail-connection-one',
           message('fay-real', invitations, subject, {
             html,
-            to: 'Someone Else <someone.else@example.test>',
-            cc: 'Sam <Sam.Jobs+linkedin@Example.test>',
+            to: 'Sam <Sam.Jobs+linkedin@Example.test>, Someone Else <someone.else@example.test>',
           }),
         );
         assert.deepEqual(
@@ -4125,7 +4180,7 @@ test(
           [0, 0, 1],
         );
         assert.deepEqual(await pings(n), []);
-        const backlog = Array.from({ length: 501 }, (_, index) =>
+        const backlog = Array.from({ length: 701 }, (_, index) =>
           message(
             `backlog-${index}`,
             'LinkedIn <messages-noreply@linkedin.com>',
@@ -4137,23 +4192,21 @@ test(
         const drained = await match(n);
         assert.deepEqual([drained.counts.emails, drained.counts.ignored], [200, 200]);
         assert.match(drained.reasons.join(' '), /next run reads the rest/);
-        await match(n);
-        assert.match(searches.at(-1)!, / before:\d+$/);
-        assert.deepEqual(await claimed(n, ['backlog-0']), [
-          { source_ref: 'backlog-0', kind: 'mail_ignored' },
-        ]);
-        await match(n);
-        const done = await match(n);
-        assert.equal(
+        const recorded = async () =>
           (
             await claimed(
               n,
               backlog.map((entry) => String(entry.id)),
             )
-          ).length,
-          501,
-        );
-        assert.equal(done.counts.emails, 0);
+          ).length;
+        await match(n);
+        assert.match(searches.at(-1)!, / before:\d+$/);
+        assert.equal(await recorded(), 400);
+        await match(n);
+        assert.equal(await recorded(), 600);
+        await match(n);
+        assert.equal(await recorded(), 701);
+        assert.equal((await match(n)).counts.emails, 0);
         assert.equal(
           (
             await request(m, 'PUT', '/api/jobs/mail', {
