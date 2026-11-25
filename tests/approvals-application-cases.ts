@@ -615,7 +615,8 @@ export const approvalCases = inParts(
                                   plan.tool === 'sign_in' ||
                                   plan.tool === 'files' ||
                                   plan.tool === 'task' ||
-                                  plan.tool === 'skills'
+                                  plan.tool === 'skills' ||
+                                  plan.tool === 'jobs'
                                 ? { action: plan.action, ...plan.args }
                                 : { action: plan.action, args: plan.args },
                         plan.nested ? { nested: true } : undefined,
@@ -4278,7 +4279,6 @@ export const approvalCases = inParts(
           );
           assert.doesNotMatch(guides, /\btravel\b/);
 
-          await pool.query("UPDATE agents SET apps='{googlecalendar}' WHERE id=$1", [agentId]);
           const sends = () =>
             integrationFixture.writes.filter((write) => write.action === 'GMAIL_SEND_EMAIL').length;
           const before = sends();
@@ -4289,6 +4289,43 @@ export const approvalCases = inParts(
           };
           const refusal =
             /limited the agent \\?"Synthetic limited agent\\?" to these apps: googlecalendar\. gmail is not one of them, so nothing was sent/;
+          const held = `Synthetic unasked lead ${randomUUID()}`;
+          plans.set(held, { tool: 'apps', action: 'GMAIL_SEND_EMAIL', args: email });
+          const [heldSend] = await approvalsFor(await inChat(held, 'waiting'));
+          assert.equal(heldSend?.status, 'pending');
+          await pool.query("UPDATE agents SET apps='{googlecalendar}' WHERE id=$1", [agentId]);
+          await waitFor(
+            await send({ text: 'Yes', replyToMessageId: heldSend.confirmation_message_id }),
+            'succeeded|failed',
+          );
+          const settled = (
+            await pool.query('SELECT status,result FROM approvals WHERE id=$1', [heldSend.id])
+          ).rows[0];
+          assert.equal(settled.status, 'expired');
+          assert.match(JSON.stringify(settled.result), refusal);
+          assert.equal(sends(), before);
+          const gmail = (
+            await pool.query(
+              "SELECT id FROM app_connections WHERE owner_id=$1 AND slug='gmail' AND NOT revoked ORDER BY created_at LIMIT 1",
+              [ownerId],
+            )
+          ).rows[0].id as string;
+          const account = (
+            await pool.query('SELECT mail_account FROM job_profile WHERE owner_id=$1', [ownerId])
+          ).rows[0]?.mail_account as string | null | undefined;
+          await pool.query(
+            `INSERT INTO job_profile(owner_id,mail_account) VALUES($1,$2)
+             ON CONFLICT(owner_id) DO UPDATE SET mail_account=EXCLUDED.mail_account`,
+            [ownerId, gmail],
+          );
+          const jobMail = `Check my synthetic job mail ${randomUUID()}`;
+          asked.add(jobMail);
+          plans.set(jobMail, { tool: 'jobs', action: 'match_mail', args: {} });
+          assert.match(await outcome(await inChat(jobMail, 'succeeded|failed')), refusal);
+          await pool.query('UPDATE job_profile SET mail_account=$2 WHERE owner_id=$1', [
+            ownerId,
+            account ?? null,
+          ]);
           for (const nested of [false, true]) {
             const text = `Send the synthetic lead ${randomUUID()}`;
             asked.add(text);

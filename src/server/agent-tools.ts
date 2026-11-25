@@ -1,6 +1,7 @@
 import type { ConnectedApp } from '../ports/integrations.ts';
 import type { AgentChoices } from '../shared/agents.ts';
 import type { AgentScope } from './agents.ts';
+import { isComputerAction } from './computer-use.ts';
 import { isLocalFilesAction } from './local-files.ts';
 
 type App = Pick<ConnectedApp, 'slug' | 'name' | 'connectionId' | 'accountName' | 'accountEmail'>;
@@ -60,7 +61,7 @@ export function createAgentTools(options: {
   }
 
   async function assertApp(turnId: string, action: string, args: Record<string, unknown>) {
-    if (isLocalFilesAction(action)) return;
+    if (isLocalFilesAction(action) || isComputerAction(action)) return;
     const agent = await limited(turnId, 'apps');
     if (!agent) return;
     const connected = await options.apps();
@@ -80,7 +81,7 @@ export function createAgentTools(options: {
           ? `The owner limited the agent ${JSON.stringify(agent.name)} to some ${service} accounts. Call this action with connectionId ${accounts.map((app) => app.connectionId).join(' or ')}. Nothing was sent.`
           : `The owner limited the agent ${JSON.stringify(agent.name)} to these apps: ${agent.apps.join(', ')}. ${service ?? action} is not one of them, so nothing was sent. The owner can change the agent's apps.`,
       ),
-      { statusCode: 403 },
+      { statusCode: 403, notRun: true },
     );
   }
 

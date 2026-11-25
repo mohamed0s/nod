@@ -1306,6 +1306,8 @@ async function initializeApplication(
     mail: {
       list: (...args) => integrations.jobMail.list(...args),
       read: (...args) => integrations.jobMail.read(...args),
+      allowed: (turn, connectionId) =>
+        agentTools.assertApp(turn.turnId, 'GMAIL_FETCH_EMAILS', { connectionId }),
     },
     mailCheck,
     notify: async (client, notice) => (channels ? channels.notice(client, notice) : false),
@@ -1846,6 +1848,7 @@ async function initializeApplication(
                   : action.startsWith('NOD_')
                     ? personal.manage(action.slice('NOD_'.length), args, provenance)
                     : (async () => {
+                        await agentTools.assertApp(provenance.turnId, action, args);
                         integrations.serviceWait('action', action);
                         const savedBinding = provenance.details?.verifiedBinding;
                         const verifiedBinding =
