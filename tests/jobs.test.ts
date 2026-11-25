@@ -1457,9 +1457,59 @@ test(
         records(
           await a.jobs.execute(owner, {
             action: 'source_update',
-            switches: { scan: true, email: true },
+            switches: { scan: true, email: true, 'scan:full': true },
           }),
         );
+        const sweep = async () => {
+          const view = (await request(a, 'GET', '/api/jobs/sources')).json();
+          return [
+            view.sweepDue,
+            view.switches.some(
+              (entry: { key: string; lastRunAt: string | null }) =>
+                entry.key === 'scan:full' && entry.lastRunAt !== null,
+            ),
+          ];
+        };
+        assert.deepEqual(await sweep(), [true, false]);
+        await assert.rejects(
+          a.jobs.execute(owner, {
+            action: 'import',
+            workspaceFile: historyFile,
+            source: 'web',
+            sweep: true,
+          }),
+          /sweep goes only with source career-ops/,
+        );
+        records(
+          await a.jobs.execute(schedule, {
+            action: 'import',
+            workspaceFile: historyFile,
+            source: 'career-ops',
+          }),
+        );
+        assert.deepEqual(await sweep(), [true, false]);
+        records(
+          await a.jobs.execute(schedule, {
+            action: 'import',
+            workspaceFile: historyFile,
+            source: 'career-ops',
+            sweep: true,
+          }),
+        );
+        assert.deepEqual(await sweep(), [false, true]);
+        await db.pool.query(
+          `UPDATE job_sources SET last_read_at=now()-interval '7 days'
+           WHERE owner_id=$1 AND kind='switch' AND name='scan:full'`,
+          [a.ownerId],
+        );
+        assert.deepEqual(await sweep(), [true, true]);
+        records(
+          await a.jobs.execute(owner, {
+            action: 'source_update',
+            switches: { 'scan:full': false },
+          }),
+        );
+        assert.deepEqual(await sweep(), [false, true]);
       });
 
       await t.test('a public channel is read once per post', async () => {
@@ -3784,6 +3834,26 @@ test(
             m.jobs.execute(yes.at, { action: 'mail_setup', scheduleId: summary }),
             /wasn't set up from the owner's message in this chat/,
           );
+          const offers = async (at: { threadId: string; turnId: string }, offer?: string) => {
+            const value = records(
+              await m.jobs.execute(
+                at,
+                offer ? { action: 'offer_made', offer } : { action: 'mail_status' },
+              ),
+            );
+            return [value.offer, value.reportOffer];
+          };
+          assert.deepEqual(await offers(await mailOwner(m)), [true, true]);
+          await assert.rejects(
+            m.jobs.execute(await turn(m, 'event'), { action: 'offer_made', offer: 'job_mail' }),
+            /owner message, or a schedule, can record an offer/,
+          );
+          assert.deepEqual(await offers(await run(summary, other.authority), 'job_mail'), [
+            false,
+            true,
+          ]);
+          assert.deepEqual(await offers(await mailOwner(m), 'weekly_report'), [false, false]);
+          assert.deepEqual(await offers(await mailOwner(m), 'job_mail'), [false, false]);
           const status = records(
             await m.jobs.execute(yes.at, { action: 'mail_setup', scheduleId: jobMail }),
           );
@@ -4116,7 +4186,8 @@ test(
           await old.query(`
             DROP INDEX job_events_company;
             ALTER TABLE job_profile DROP COLUMN mail_account, DROP COLUMN mail_schedule_id,
-              DROP COLUMN mail_revision, DROP COLUMN mail_offered_at, DROP COLUMN mail_run;
+              DROP COLUMN mail_revision, DROP COLUMN mail_offered_at, DROP COLUMN mail_run,
+              DROP COLUMN report_offered_at;
             ALTER TABLE job_people DROP COLUMN follow_up, DROP COLUMN follow_up_at;
             ALTER TABLE job_companies DROP COLUMN outcome, DROP COLUMN outcome_at;
             ALTER TABLE job_postings DROP COLUMN applied_at, DROP COLUMN outcome, DROP COLUMN outcome_at;
