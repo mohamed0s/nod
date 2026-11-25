@@ -60,6 +60,7 @@ import { BugReportCard } from './bug-report-card';
 import { ScheduleRunTrack } from './schedule-run';
 import { formatFullDateTime, formatTime, useDateFormat } from '../lib/date-format';
 import { copyContent, selectedText } from '../lib/clipboard';
+import { BotName } from './bot-picture';
 
 function CopyBlock({ children, table = false }: { children: React.ReactNode; table?: boolean }) {
   const content = useRef<HTMLDivElement>(null);
@@ -784,7 +785,7 @@ export function MessageBubble({
                 );
               }}
             >
-              {message.agent && <span className="message-agent">{message.agent}</span>}
+              {message.agent && <BotName name={message.agent} />}
               {visibleReply && <MessageQuote message={visibleReply} />}
               {cardText?.lead && (
                 <MessageText text={cardText.lead} connectedAppIds={connectedAppIds} />

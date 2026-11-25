@@ -115,7 +115,7 @@ A schedule uses the model for schedules from **Settings > Models**. To give one 
 
 ### Run a schedule as an agent
 
-A schedule can run as one of your [agents](/use/agents/): open its details on **Scheduled** and choose the agent beside **Runs as**. Its runs then follow that agent's instructions as guidance, and can use the agent's model when the schedule has none of its own. See [Schedules that run as an agent](/use/agents/#schedules-that-run-as-an-agent).
+A schedule can run as one of your [agents](/use/agents/): open its details on **Scheduled** and choose the bot beside **Runs as**. Its runs then follow that agent's instructions as guidance, and can use the agent's model when the schedule has none of its own. See [Schedules that run as an agent](/use/agents/#schedules-that-run-as-an-agent).
 
 ## Quiet hours
 

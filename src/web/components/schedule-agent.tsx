@@ -42,16 +42,16 @@ export function ScheduleAgent({ schedule }: { schedule: Schedule }) {
         disabled={busy}
         labelledBy={`${id}-agent`}
         options={[
-          { value: '', label: 'No agent' },
+          { value: '', label: 'No bot' },
           ...data.agents.map((agent) => ({ value: agent.id, label: agent.name })),
         ]}
         labels={{
-          choose: 'Choose the agent this schedule runs as',
-          search: 'Search agents',
-          placeholder: 'Search agents',
-          clear: 'Clear agent search',
-          list: 'Agents',
-          empty: 'No matching agents',
+          choose: 'Choose the bot this schedule runs as',
+          search: 'Search bots',
+          placeholder: 'Search bots',
+          clear: 'Clear bot search',
+          list: 'Bots',
+          empty: 'No matching bots',
         }}
       />
       {link && !schedule.model && (
@@ -61,7 +61,7 @@ export function ScheduleAgent({ schedule }: { schedule: Schedule }) {
             disabled={busy}
             onChange={(event) => void save(link.agentId, event.target.checked)}
           />
-          Use the agent's model
+          Use the bot's model
         </label>
       )}
       {error && <Notice>{error}</Notice>}

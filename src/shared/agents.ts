@@ -6,7 +6,55 @@ export const agentLimits = {
   instructions: 4000,
   apps: 50,
   skills: 50,
+  pictureBytes: 2 * 1024 * 1024,
 } as const;
+
+export const agentColors = [
+  'blush',
+  'rose',
+  'pink',
+  'berry',
+  'mist',
+  'stone',
+  'slate',
+  'ink',
+] as const;
+
+export type AgentColor = (typeof agentColors)[number];
+
+export const agentDefaultEmoji = ['🤖', '✨', '💡', '🧭', '🦉', '🌱', '⭐', '🪐'];
+
+export const agentEmoji = [
+  ...agentDefaultEmoji,
+  '🔎',
+  '✍️',
+  '🗓️',
+  '🎓',
+  '📚',
+  '🧪',
+  '🎨',
+  '🛠️',
+  '📈',
+  '💬',
+  '🎧',
+  '🍳',
+  '🧘',
+  '🧳',
+  '🏃',
+  '💼',
+];
+
+export const agentPictureTypes = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+
+const graphemes = new Intl.Segmenter('en', { granularity: 'grapheme' });
+
+export function isAgentEmoji(value: string) {
+  return (
+    value.length <= 16 &&
+    [...graphemes.segment(value)].length === 1 &&
+    /^(?:\p{Extended_Pictographic}|\p{Regional_Indicator}{2}|[#*0-9]️?⃣)/u.test(value)
+  );
+}
 
 export type AgentMemoryMode = 'shared' | 'own' | 'own_and_shared';
 
@@ -35,6 +83,10 @@ export interface Agent {
   revision: number;
   chatId: string | null;
   model: ModelSelection | null;
+  emoji: string;
+  color: AgentColor;
+  imageId: string | null;
+  lastActiveAt: string | null;
 }
 
 export interface AgentChoices {

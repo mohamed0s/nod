@@ -10,6 +10,8 @@ import { Credentials, Payment } from './pages/credentials';
 import { Scheduled } from './pages/tasks';
 import { Jobs } from './pages/jobs';
 import { Pages } from './pages/pages';
+import { Bots } from './pages/bots';
+import type { ModelSelection } from '../shared/models';
 import { PreparedWork } from './pages/prepared';
 import { useAppState } from './hooks/use-app-state';
 import { useChatUnread } from './hooks/use-chat-unread';
@@ -128,11 +130,17 @@ function Workspace({
     media?.addEventListener('change', update);
     return () => media?.removeEventListener('change', update);
   }, []);
-  const [chat, setChat] = useState<{ id?: string; fresh?: true; focus?: string; agent?: string }>(
-    () => ({
-      focus: initialFocusMessageId,
-    }),
-  );
+  const [chat, setChat] = useState<{
+    id?: string;
+    fresh?: true;
+    focus?: string;
+    agent?: string;
+    model?: ModelSelection;
+  }>(() => ({
+    focus: initialFocusMessageId,
+  }));
+  const startChat = (agent?: string, model?: ModelSelection | null) =>
+    setChat({ fresh: true, ...(agent ? { agent } : {}), ...(model ? { model } : {}) });
   const mainChat = !chat.id && !chat.fresh;
   const { markTaskRead } = unread;
   const readTask = useMemo(
@@ -262,7 +270,7 @@ function Workspace({
                     freshAgent={chat.fresh ? chat.agent : undefined}
                     unread={unread.taskCounts}
                     onChat={(id) => setChat({ id })}
-                    onNewChat={(agent) => setChat({ fresh: true, ...(agent ? { agent } : {}) })}
+                    onNewChat={startChat}
                     refresh={refresh}
                   />
                   <div className="chat-main">
@@ -295,6 +303,7 @@ function Workspace({
                       chatId={chat.id}
                       startsChat={Boolean(chat.fresh)}
                       chatAgent={chat.fresh ? chat.agent : undefined}
+                      chatModel={chat.fresh ? chat.model : undefined}
                       browserLink={session.capabilities.developer}
                       onOpenChat={(id, focus) => setChat({ id, focus })}
                     />
@@ -326,6 +335,21 @@ function Workspace({
             )}
             {path === '/jobs' && <Jobs />}
             {path === '/pages' && <Pages />}
+            {path === '/bots' && (
+              <Bots
+                agents={state?.agents}
+                rooms={state?.rooms}
+                refresh={refresh}
+                onOpen={(id) => {
+                  setChat({ id });
+                  navigate('/');
+                }}
+                onStart={(agent, model) => {
+                  startChat(agent, model);
+                  navigate('/');
+                }}
+              />
+            )}
             {preparedWorkId(path) && <PreparedWork key={path} id={preparedWorkId(path)!} />}
             {settings}
             {!settingsPage(path) &&

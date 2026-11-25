@@ -1,6 +1,6 @@
 ---
 title: Agents
-description: Turn a chat into a named agent with its own instructions and model, kept when you reset the conversation, let Main hand it work, and put several agents in a room. This page describes a fork of Nod.
+description: Make bots, also called agents, with their own name, picture, instructions and model, start a chat with one from New chat, manage them on the Bots page, let Main hand them work, and put several in a room. This page describes a fork of Nod.
 sidebar:
   order: 3
 ---
@@ -9,26 +9,68 @@ sidebar:
 Agents are part of [mohamed0s/nod](https://github.com/mohamed0s/nod), a fork of Nod. Nod from n8n doesn't have them.
 :::
 
-An agent is a [chat](/use/tasks/#the-chat-list) with a profile: a name, a line about what it's for, instructions, a memory setting, the apps and skills it may use, and a model. Use one for work you come back to, such as a job search agent that writes in your tone and runs on a cheaper model.
+An agent is a [chat](/use/tasks/#the-chat-list) with a profile: a name, a picture, a line about what it's for, instructions, a memory setting, the apps and skills it may use, and a model. Use one for work you come back to, such as a job search agent that writes in your tone and runs on a cheaper model.
 
-## Make a chat an agent
+In the app, agents are called **bots**: the **Bots** page, the **Bots** group in the chat list and **New bot** all mean agents. Bots and agents are the same thing.
 
-Open a chat. Under its card, select **Make this an agent** beside **Agent**, then fill in:
+## Start a chat
 
-| Field             | What it does                                                                                               |
-| ----------------- | ---------------------------------------------------------------------------------------------------------- |
-| **Name**          | Up to 60 characters. The chat takes this name, and so does its Telegram topic. No two agents share a name. |
-| **What it's for** | One line, up to 200 characters.                                                                            |
-| **Instructions**  | Up to 4,000 characters. Nod follows them for focus, tone and method in this chat.                          |
-| **Memory**        | **Shared**, **Own** or **Own + read shared**. See [Memory](#memory).                                       |
-| **Apps**          | The connected apps or accounts it may use. None chosen means all.                                          |
-| **Skills**        | The skills it may use. None chosen means all.                                                              |
+Select **New chat**. A short menu opens:
 
-The agent's model is the chat's [model](/use/tasks/#choose-the-model-for-a-chat): select **Change** beside **Model**.
+- **Just a chat** is selected, so Enter or one click starts an ordinary chat, as before.
+- Your bots follow. Select one to open its chat, or to start one when it has none in this conversation yet. The chat runs on the bot's model, memory and app and skill limits.
+- **New bot…** opens the form below.
+- **All bots and rooms** opens the [Bots page](#the-bots-page).
 
-Agents sit in their own **Agents** group in the chat list, under **Main**. Select one to open its chat.
+## Make a bot
 
-To change a profile, select **Edit** beside **Agent**. **Remove agent, keep the chat** removes the profile and deletes the agent's own memory; the chat stays as an ordinary chat, and its action check keeps the [one-day window](#send-work-to-an-agent) of an agent's chat.
+Select **New bot** in the **New chat** menu, at the end of the **Bots** group in the chat list, or on the **Bots** page. Every field is optional:
+
+| Field             | Default                                    | What it does                                                                                             |
+| ----------------- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| **Name**          | **New bot**, or **New bot 2** if it's used | Up to 60 characters. Its chat takes this name, and so does its Telegram topic. No two bots share a name. |
+| **Picture**       | An emoji on a color, picked for you        | See [Pictures](#pictures).                                                                               |
+| **What it's for** | Empty                                      | One line, up to 200 characters.                                                                          |
+| **Instructions**  | None                                       | Up to 4,000 characters. Nod follows them for focus, tone and method in its chat.                         |
+| **Model**         | Your model                                 | The model its chat runs on.                                                                              |
+| **Memory**        | **Shared**                                 | **Shared**, **Own** or **Own + read shared**. See [Memory](#memory).                                     |
+| **Apps**          | All                                        | Under **More**. The connected apps or accounts it may use.                                               |
+| **Skills**        | All                                        | Under **More**. The skills it may use.                                                                   |
+
+**Start from** at the top fills the form from a template: **Research**, **Writer**, **Planner** or **Tutor**. Each has a name, a picture, a purpose and short generic instructions you can change.
+
+**Create and chat** saves the bot and opens its chat. Your first message there starts it. Making a bot in the app is your own act, so Nod doesn't ask you first. A bot that Nod makes when you ask in chat still goes through the [action check](#create-an-agent-from-chat).
+
+## Make a chat a bot
+
+Open a chat. Under its card, select **Make this a bot** beside **Bot**, then fill in the same form. The bot's model is the chat's [model](/use/tasks/#choose-the-model-for-a-chat): select **Change** beside **Model**.
+
+Bots sit in the **Bots** group in the chat list, under **Main**, with their pictures. Select one to open its chat. The group shows even before you have a bot, with **New bot** at its end.
+
+A bot's chat shows its picture, name and purpose under the chat's card. To change a profile, select **Edit** there. **Remove bot, keep the chat** removes the profile and deletes the bot's own memory; the chat stays as an ordinary chat, and its action check keeps the [one-day window](#send-work-to-an-agent) of an agent's chat.
+
+## Pictures
+
+Each bot has a picture: an emoji on a color, picked for you when you make it. Select the picture in the bot's form to choose another emoji, type any emoji, pick one of 8 pink and gray backgrounds, or upload an image.
+
+An image can be a PNG, JPEG, WebP or GIF. Nod crops it to a square of at most 256 pixels before it uploads it. The server keeps it as one of your private files and refuses another type, a file over 2 MB, or content that doesn't match its type, so an SVG image is never used. **Use the emoji** goes back to the emoji.
+
+The picture shows in the chat list, the bot's chat, beside its name in a room and on the **Bots** page. With [Telegram topics](/use/channels/#telegram-topics) on, the bot's topic name starts with its emoji, such as "🔎 Research".
+
+## The Bots page
+
+Select **Bots** in the sidebar. It shows **Start from** with the templates, a card for each bot and your rooms.
+
+A bot's card shows its picture, name and what it's for; its model, memory and app limit; the schedules that run as it and the rooms it's in; and when it was last active.
+
+| Action            | What it does                                                                            |
+| ----------------- | --------------------------------------------------------------------------------------- |
+| **Chat**          | Opens the bot's chat, or starts one                                                     |
+| **Edit**          | Opens the same form as **Edit** in its chat                                             |
+| **Add to a room** | Under **⋯**. Adds it to one of your rooms, or makes a new room with it                  |
+| **Remove**        | Under **⋯**. Asks first. Its chats stay as ordinary chats and its own memory is deleted |
+
+**Rooms** lists your [rooms](#rooms) with their members' pictures. Select one to open it, or select **New room**.
 
 ## Memory
 
@@ -70,11 +112,11 @@ In the agent's chat, you can also tell Nod, for example "make your replies more 
 
 ## Schedules that run as an agent
 
-A recurring or one-time [schedule](/use/schedules/) can run as one of your agents. Each run, and any work a run starts, then follows that agent's instructions, such as a "Weekly report" schedule that runs as your research agent. On **Scheduled**, open the schedule's details and choose the agent beside **Runs as**, or **No agent**. The agent's settings list the schedules that run as it.
+A recurring or one-time [schedule](/use/schedules/) can run as one of your agents. Each run, and any work a run starts, then follows that agent's instructions, such as a "Weekly report" schedule that runs as your research agent. On **Scheduled**, open the schedule's details and choose the bot beside **Runs as**, or **No bot**. The agent's settings list the schedules that run as it.
 
 The schedule's own instruction stays what it is allowed to do. The agent's instructions only guide focus, tone and method; they never count as your words, and the schedule's instruction and your messages win when they differ. The [action check](/trust/approvals/) never sees them as permission.
 
-A schedule keeps its own model. If it has none, it uses the model for schedules, unless you tick **Use the agent's model**; then it runs on the model of the agent's chat. That choice starts off for every schedule.
+A schedule keeps its own model. If it has none, it uses the model for schedules, unless you tick **Use the bot's model**; then it runs on the model of the agent's chat. That choice starts off for every schedule.
 
 You can also tell Nod, for example "run the weekly report as my research agent". Like a change to an agent, it runs only when your own message covers it, and otherwise Nod asks first; the question's card shows the schedule, the agent and the model choice. A schedule Nod creates in an agent's chat runs as that agent from the start, and Nod says so; change it on **Scheduled** any time. Removing an agent leaves its schedules running without an agent.
 
@@ -130,15 +172,15 @@ To get a summary of your agents each day, make a [schedule](/use/schedules/) in 
 
 ## Rooms
 
-A room is a chat where several of your agents work with you, for example a "Hiring" room with your job agent and your writing agent. Select **New room** in the **Rooms** group of the chat list, give it a name and tick its agents. With [Telegram topics](/use/channels/#telegram-topics) on, a room gets its own topic too.
+A room is a chat where several of your agents work with you, for example a "Hiring" room with your job agent and your writing agent. Select **New room** in the **Rooms** group of the chat list or on the **Bots** page, give it a name and tick its bots. A room needs at least one bot: with none yet, **New room** says so and offers **New bot**. With [Telegram topics](/use/channels/#telegram-topics) on, a room gets its own topic too.
 
-At the top of the room, beside **Room**, you can rename it, remove an agent with the cross beside its name, add one with **Add an agent…**, and see what the room has cost so far. A room holds up to 8 agents. Each change adds a line to the room saying who added or removed whom.
+At the top of the room, beside **Room**, you can rename it, remove an agent with the cross beside its name, add one with **Add a bot…**, and see what the room has cost so far. A room holds up to 8 agents. Each change adds a line to the room saying who added or removed whom.
 
 ### Who answers
 
 - Name an agent with @ and its name, such as "@Job agent find three roles", or start your message with its name, such as "Job agent, find three roles". Only the agents you name answer.
 - A message that names nobody goes to every member, one after another in the room's order, so each sees what the ones before it wrote. A reply to an agent's open question goes only to that agent.
-- Each agent answers in its own session, with its own instructions, model, memory setting and app and skill limits. Its replies carry its name, in the app and in the Telegram topic.
+- Each agent answers in its own session, with its own instructions, model, memory setting and app and skill limits. Its replies carry its name, in the app with its picture, and in the Telegram topic.
 - Each turn, an agent reads what was said in the room since its last turn, at most the last 20 messages.
 
 ### When agents address each other
@@ -182,6 +224,6 @@ A room belongs to the conversation it was made in. After a reset, make a new roo
 
 ## After a reset
 
-Agents belong to you, not to one conversation. When you reset the conversation, the chat list empties but **Agents** keeps every agent with its profile and model. Select an agent and write to it: your first message starts a new chat for it, with the same name, instructions and model. The old chat stays with the old conversation.
+Agents belong to you, not to one conversation. When you reset the conversation, the chat list empties but **Bots** keeps every bot with its profile, picture and model. Select an agent and write to it: your first message starts a new chat for it, with the same name, instructions and model. The old chat stays with the old conversation.
 
 With [Telegram topics](/use/channels/#telegram-topics) on, you can also write in the agent's topic. Your message starts the agent's new chat there, in the same topic. If you started the agent's new chat in the web or desktop app first, that chat gets a topic of its own, and a message in the old topic starts an ordinary chat.
