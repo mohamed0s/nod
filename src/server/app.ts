@@ -696,6 +696,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
                   text: event.text,
                   streamId: event.streamId,
                   done: event.done,
+                  taskId: event.taskId,
                 }
               : undefined;
       if (payload && !reply.raw.destroyed) reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);

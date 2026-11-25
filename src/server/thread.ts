@@ -2544,8 +2544,17 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
         shared.splice(0, pending.length);
       },
       delta: (text, streamId, done) => {
-        if (!signal.aborted && !turn.background && turn.channel === 'web')
-          delta({ ownerId, channel: turn.channel, threadId, turnId, text, streamId, done });
+        if (!signal.aborted && (!turn.background || taskContext) && turn.channel === 'web')
+          delta({
+            ownerId,
+            channel: turn.channel,
+            threadId,
+            turnId,
+            text,
+            streamId,
+            done,
+            ...(taskContext ? { taskId: taskContext.id } : {}),
+          });
       },
       reactToMessage:
         reactToMessage &&
