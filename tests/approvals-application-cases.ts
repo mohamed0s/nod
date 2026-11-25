@@ -3895,14 +3895,14 @@ export const approvalCases = inParts(
             await waitFor(turnId, status);
             return turnId;
           };
-          const first = await send({ text: 'Synthetic gig chat', newChat: true });
+          const first = await send({ text: 'Synthetic research chat', newChat: true });
           await waitFor(first, 'succeeded');
           const chat = (await pool.query('SELECT task_id FROM turns WHERE id=$1', [first])).rows[0]
             .task_id as string;
-          const marker = `Synthetic gig rule ${randomUUID()}`;
+          const marker = `Synthetic research rule ${randomUUID()}`;
           const made = await request('POST', '/api/agents', {
             chatId: chat,
-            name: 'Synthetic gig scout',
+            name: 'Synthetic research agent',
             instructions: `${marker}: send each lead to collector@example.test.`,
           });
           assert.equal(made.statusCode, 200, made.body);
@@ -3911,9 +3911,9 @@ export const approvalCases = inParts(
             application.app.inject({ method: 'PUT', url, headers, payload });
           const light = models.view().light!;
           assert.equal((await put(`/api/tasks/${chat}/model`, { model: light })).statusCode, 200);
-          const prompt = `Synthetic gig radar ${randomUUID()}`;
+          const prompt = `Synthetic weekly report ${randomUUID()}`;
           const created = await request('POST', '/api/schedules', {
-            title: 'Synthetic gig radar',
+            title: 'Synthetic weekly report',
             prompt,
             kind: 'once',
             runAt: '2099-01-01T09:00:00Z',
@@ -3939,7 +3939,7 @@ export const approvalCases = inParts(
             opened.filter((entry) => entry.turnId === turnId).map((entry) => entry.model);
 
           const guided = await run();
-          const lead = `Synthetic gig lead ${randomUUID()}`;
+          const lead = `Synthetic report finding ${randomUUID()}`;
           plans.set(lead, {
             tool: 'apps',
             action: 'GMAIL_SEND_EMAIL',
@@ -3963,7 +3963,7 @@ export const approvalCases = inParts(
           for (const turnId of [guided, followUp]) {
             assert.match(
               ownerContexts.get(turnId) ?? '',
-              /This scheduled run belongs to the owner's agent "Synthetic gig scout"/,
+              /This scheduled run belongs to the owner's agent "Synthetic research agent"/,
             );
             assert.match(ownerContexts.get(turnId) ?? '', new RegExp(marker));
           }
@@ -3979,10 +3979,41 @@ export const approvalCases = inParts(
           assert.deepEqual(modelsOf(await run()), ['gpt-6.1-sol']);
           assert.equal((await link({ agentId, useAgentModel: true })).statusCode, 200);
           assert.deepEqual(modelsOf(await run()), ['gpt-6-luna']);
+          await pool.query(
+            "UPDATE tasks SET model=jsonb_set(model,'{modelId}','\"gpt-retired\"') WHERE id=$1",
+            [chat],
+          );
+          const retired = await run();
+          assert.match(
+            (await pool.query('SELECT error FROM turns WHERE id=$1', [retired])).rows[0].error,
+            /model of the agent "Synthetic research agent", which this schedule uses, is unavailable/,
+          );
+          assert.equal((await put(`/api/tasks/${chat}/model`, { model: light })).statusCode, 200);
+          const cancel = async (card: { id: string; confirmation_message_id: string }) => {
+            await waitFor(
+              await send({
+                text: 'Cancel',
+                replyToMessageId: card.confirmation_message_id,
+                approvalAnswer: { approvalId: card.id, approved: false },
+              }),
+              'succeeded',
+            );
+          };
+          const strongerText = `Synthetic stronger model for this chat ${randomUUID()}`;
+          plans.set(strongerText, {
+            action: 'model_select',
+            args: { connectionId: light.connectionId, modelId: 'gpt-6.1-sol' },
+          });
+          const [modelCard] = await approvalsFor(await inChat(strongerText, 'waiting'));
+          assert.match(
+            await confirmationFor(modelCard),
+            /This also changes the model of the schedules that run as this agent and use its model: Synthetic weekly report\.$/,
+          );
+          await cancel(modelCard);
 
           const foreignAgent = randomUUID();
           await pool.query(
-            "INSERT INTO agents(id,owner_id,name) VALUES($1,$2,'Synthetic foreign gig agent')",
+            "INSERT INTO agents(id,owner_id,name) VALUES($1,$2,'Synthetic foreign research agent')",
             [foreignAgent, `${ownerId}-other`],
           );
           assert.equal((await link({ agentId: foreignAgent })).statusCode, 404);
@@ -3991,13 +4022,13 @@ export const approvalCases = inParts(
             404,
           );
           assert.deepEqual((await request('GET', '/api/agents/schedules')).json(), {
-            agents: [{ id: agentId, name: 'Synthetic gig scout' }],
+            agents: [{ id: agentId, name: 'Synthetic research agent' }],
             links: [
               {
                 scheduleId: schedule.id,
                 agentId,
                 useAgentModel: true,
-                title: 'Synthetic gig radar',
+                title: 'Synthetic weekly report',
               },
             ],
           });
@@ -4022,9 +4053,13 @@ export const approvalCases = inParts(
             .json<{ messages: Message[] }>()
             .messages.find((message) => message.approval?.id === card.id)?.approval;
           assert.deepEqual(shown?.fields?.slice(0, 2), [
-            { label: 'Schedule', value: 'Synthetic gig radar' },
+            { label: 'Schedule', value: 'Synthetic weekly report' },
             { label: 'Runs as', value: 'No agent' },
           ]);
+          assert.match(
+            await confirmationFor(card),
+            /Schedule: Synthetic weekly report\nRuns as: No agent\nUses the agent's model: No$/,
+          );
           const declined = await send({
             text: 'Cancel',
             replyToMessageId: card.confirmation_message_id,
@@ -4041,11 +4076,15 @@ export const approvalCases = inParts(
               .rowCount,
             1,
           );
-          const ownModel = `Run the gig radar on its usual model ${randomUUID()}`;
+          const ownModel = `Run the weekly report on its usual model ${randomUUID()}`;
           asked.add(ownModel);
           plans.set(ownModel, {
             action: 'agent_schedule',
-            args: { scheduleId: schedule.id, agent: 'synthetic gig scout', useAgentModel: false },
+            args: {
+              scheduleId: schedule.id,
+              agent: 'synthetic research agent',
+              useAgentModel: false,
+            },
           });
           const changed = await inChat(ownModel, 'succeeded');
           assert.equal((await approvalsFor(changed)).length, 0);
@@ -4059,23 +4098,37 @@ export const approvalCases = inParts(
             [{ agent_id: agentId, use_agent_model: false }],
           );
 
-          const createText = `Make a second synthetic gig radar ${randomUUID()}`;
+          const createText = `Make a second synthetic weekly report ${randomUUID()}`;
           asked.add(createText);
           plans.set(createText, {
             action: 'schedule_create',
             args: {
-              title: 'Synthetic second radar',
-              prompt: 'Return synthetic gigs.',
+              title: 'Synthetic second report',
+              prompt: 'Return synthetic findings.',
               kind: 'once',
               runAt: '2099-01-03T09:00:00Z',
               timeZone: 'UTC',
             },
           });
           await inChat(createText, 'succeeded');
+          const askedCreate = `Synthetic unasked report ${randomUUID()}`;
+          plans.set(askedCreate, {
+            action: 'schedule_create',
+            args: {
+              title: 'Synthetic unasked report',
+              prompt: 'Return synthetic notes.',
+              kind: 'once',
+              runAt: '2099-01-04T09:00:00Z',
+              timeZone: 'UTC',
+            },
+          });
+          const [createCard] = await approvalsFor(await inChat(askedCreate, 'waiting'));
+          assert.match(await confirmationFor(createCard), /\n\nRuns as: Synthetic research agent$/);
+          await cancel(createCard);
           const adopted = (
             await pool.query<{ id: string; agent_id: string | null }>(
               `SELECT x.id,s.agent_id FROM schedules x LEFT JOIN agent_schedules s ON s.schedule_id=x.id
-               WHERE x.owner_id=$1 AND x.title='Synthetic second radar'`,
+               WHERE x.owner_id=$1 AND x.title='Synthetic second report'`,
               [ownerId],
             )
           ).rows[0]!;
