@@ -258,7 +258,7 @@ export interface ThreadDependencies {
   checkTyping?: (turn: TurnRef) => Promise<boolean>;
   settleTask?: (turn: TurnRef, result: string) => Promise<void>;
   taskLedger?: (threadId: string) => Promise<NonNullable<RuntimeContext['tasks']>>;
-  agentContext?: (sessionId: string) => Promise<RuntimeContext['agent']>;
+  agentContext?: (turnId: string) => Promise<RuntimeContext['agent']>;
   startTurn?: (turn: TurnRef) => Promise<void>;
   runTurn: (context: RuntimeContext) => Promise<RuntimeResult>;
   speech: Pick<SpeechService, 'synthesize'> & Partial<Pick<SpeechService, 'configured'>>;
