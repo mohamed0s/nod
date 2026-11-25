@@ -1764,8 +1764,8 @@ async function initializeApplication(
         'NOD_schedule_create',
         'NOD_schedule_update',
       ].includes(action);
-      if (action === 'NOD_agent_update') {
-        const result = await withTurnLock(turnLock, (client) => agents.apply(args, client));
+      if (action === 'NOD_agent_update' || action === 'NOD_agent_create') {
+        const result = await withTurnLock(turnLock, (client) => agents.apply(args, client, action));
         await ledger.action(
           provenance.turnId,
           action,
@@ -2153,7 +2153,8 @@ async function initializeApplication(
       return result;
     },
     async (action, args, expectedRevision, client) => {
-      if (action === 'NOD_agent_update') return agents.validate(args, client);
+      if (action === 'NOD_agent_update' || action === 'NOD_agent_create')
+        return agents.validate(args, client, action);
       if (action === 'NOD_agent_schedule')
         return void (await agentSchedules.validate(args, client));
       if (
@@ -2181,7 +2182,7 @@ async function initializeApplication(
     (proposal, signal) =>
       proposal.action === applySiteAction
         ? jobs.apply.siteQuestion(proposal.args)
-        : proposal.action === 'NOD_agent_update'
+        : proposal.action === 'NOD_agent_update' || proposal.action === 'NOD_agent_create'
           ? agents.describe(proposal, signal, communication.describe, (channel, text, literal) =>
               Boolean(channels?.canDeliverLiteral(channel, text, literal)),
             )
@@ -3009,6 +3010,17 @@ async function initializeApplication(
             check: (input) => trust.check(turn, 'NOD_agent_update', input, signal),
             ask: (input, decision) =>
               approvals.request(turn, 'NOD_agent_update', input, {
+                ...provenance,
+                signal,
+                admit,
+                ...decision,
+              }),
+          });
+        if (action === 'agent_create')
+          return agents.requestCreate(args, {
+            check: (input) => trust.check(turn, 'NOD_agent_create', input, signal),
+            ask: (input, decision) =>
+              approvals.request(turn, 'NOD_agent_create', input, {
                 ...provenance,
                 signal,
                 admit,

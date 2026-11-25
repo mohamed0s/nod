@@ -68,11 +68,13 @@ export function agentApprovalContent(action: string, args: unknown) {
     };
   const apps = list('apps');
   const skills = list('skills');
+  const memory = value('memoryMode');
   const fields = [
     ...(
       [
         ['Name', value('name')],
         ["What it's for", value('description')],
+        ['Memory', memory && (agentMemoryModes.find(({ id }) => id === memory)?.label ?? memory)],
       ] as const
     ).flatMap(([label, text]) => (text === undefined ? [] : [{ label, value: text || '(empty)' }])),
     ...(apps ? [{ label: 'Apps', value: agentAllowlist(apps, 'All connected apps') }] : []),

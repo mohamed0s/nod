@@ -41,6 +41,7 @@ const nodActions: Array<[string, string]> = [
   ['NOD_bug_report_send', 'Send a bug report to the Nod team'],
   ['NOD_model_select', 'Change the model'],
   ['NOD_agent_update', 'Change this agent'],
+  ['NOD_agent_create', 'Create an agent'],
   ['NOD_agent_schedule', 'Change the agent a schedule runs as'],
   ['NOD_notification_preferences_update', 'Change Nod settings'],
   ['NOD_schedule_pause', 'Pause a schedule'],
@@ -362,8 +363,7 @@ export function approvalContent(
   action: string,
   args: unknown,
 ): { fields?: Array<{ label: string; value: string }>; body?: string; bodyCut?: true } {
-  if (action === 'NOD_agent_update' || action === 'NOD_agent_schedule')
-    return agentApprovalContent(action, args);
+  if (action.startsWith('NOD_agent_')) return agentApprovalContent(action, args);
   if (
     /^(NOD_|CONNECTED_|mcp__)/.test(action) ||
     !args ||
@@ -552,6 +552,7 @@ export function actionTarget(
     }
     if (action === 'NOD_agent_update')
       return ['name', 'description', 'instructions'].filter((key) => key in args).join(', ');
+    if (action === 'NOD_agent_create') return words(args.name)[0];
     if (action === 'NOD_agent_schedule')
       return `${words(args.schedule)[0] ?? 'schedule'} as ${words(args.agent)[0] ?? 'no agent'}`;
     if (action === 'NOD_limits_update')

@@ -47,6 +47,7 @@ const settings = new Set([
   'NOD_model_select',
   'NOD_agent_update',
   'NOD_agent_schedule',
+  'NOD_agent_create',
 ]);
 const signIns = new Set(['NOD_sign_in', 'NOD_browser_session', 'NOD_vault_allow']);
 const grants = {
