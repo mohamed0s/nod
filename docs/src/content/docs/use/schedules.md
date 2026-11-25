@@ -113,6 +113,10 @@ Select **Edit schedule** to review its name, instructions and timing together. T
 
 A schedule uses the model for schedules from **Settings > Models**. To give one schedule its own model, select the model on its row in **Scheduled**. When the schedule has priced usage in the last 30 days, the list shows what that work would have cost on each model; otherwise it shows each model's token prices. Choose **Same as schedules** to follow **Settings > Models** again. The schedule's details show its expected cost a month on its model and what it cost in the last 30 days. The change applies from the next turn, so a run that waits for your answer continues on the new model. When a recurring schedule shows a projected monthly cost, it prices the schedule's recent runs on that model. See [Models for each kind of work](/connect/models/#models-for-each-kind-of-work).
 
+### Run a schedule as an agent
+
+A schedule can run as one of your [agents](/use/agents/): open its details on **Scheduled** and choose the agent beside **Runs as**. Its runs then follow that agent's instructions as guidance, and can use the agent's model when the schedule has none of its own. See [Schedules that run as an agent](/use/agents/#schedules-that-run-as-an-agent).
+
 ## Quiet hours
 
 Quiet hours are on by default, from 22:00 to 08:00. Change them in **Settings → Notifications → Quiet hours**.

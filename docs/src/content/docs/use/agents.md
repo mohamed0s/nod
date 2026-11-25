@@ -37,6 +37,16 @@ When your message and the instructions differ, your message wins.
 
 In the agent's chat, you can also tell Nod, for example "make your replies more formal". Nod writes out the exact new text and changes the profile. This is a change to Nod's own settings, so it goes through the action check: Nod asks you first unless your own message in that chat covers the whole change. A rule or anything else never covers a change to an agent. In the Nod app, the question's card shows the exact new name, purpose and instructions. In Telegram or WhatsApp, the question ends with the exact new text only when the app can show it unchanged; otherwise it says to open the chat in the Nod app and read it there first. Such a question can only be answered in the app: its Telegram buttons are left off, and a yes or no typed in the chat app gets a reply to answer in the app instead. The question stays open until you answer it there. Nod changes instructions only this way, never on its own.
 
+## Schedules that run as an agent
+
+A recurring or one-time [schedule](/use/schedules/) can run as one of your agents. Each run, and any work a run starts, then follows that agent's instructions, such as a "Gig radar (Roblox)" schedule that runs as your Roblox agent. On **Scheduled**, open the schedule's details and choose the agent beside **Runs as**, or **No agent**. The agent's settings list the schedules that run as it.
+
+The schedule's own instruction stays what it is allowed to do. The agent's instructions only guide focus, tone and method; they never count as your words, and the schedule's instruction and your messages win when they differ. The [action check](/trust/approvals/) never sees them as permission.
+
+A schedule keeps its own model. If it has none, it uses the model for schedules, unless you tick **Use the agent's model**; then it runs on the model of the agent's chat. That choice starts off for every schedule.
+
+You can also tell Nod, for example "run the gig radar as my DevOps agent". Like a change to an agent, it runs only when your own message covers it, and otherwise Nod asks first; the question's card shows the schedule, the agent and the model choice. A schedule Nod creates in an agent's chat runs as that agent from the start, and Nod says so; change it on **Scheduled** any time. Removing an agent leaves its schedules running without an agent.
+
 ## After a reset
 
 Agents belong to you, not to one conversation. When you reset the conversation, the chat list empties but **Agents** keeps every agent with its profile and model. Select an agent and write to it: your first message starts a new chat for it, with the same name, instructions and model. The old chat stays with the old conversation.
