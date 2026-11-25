@@ -8347,6 +8347,90 @@ test(
       });
 
       await t.test(
+        'with Telegram topics on, a General message pairs only with what Nod sent in General',
+        async (t) => {
+          const { createChannels } = await import('../src/server/channels.ts');
+          const { recentOwnerWords } = await import('../src/server/owner-instructions.ts');
+          await (
+            await createChannels(db.pool, {
+              ownerId,
+              transport: {
+                channels: [],
+                poll: async () => {},
+                receive: async () => ({ status: 200, body: {} }),
+                post: async () => ({ id: 'synthetic-unused' }),
+                close: async () => {},
+              },
+              subscribe: () => () => {},
+              intervalMs: 600_000,
+              activeThread: (client) => thread.activeThread(client),
+              submit: async () => {
+                throw new Error('Pairing must not start a model turn.');
+              },
+            })
+          ).close();
+          const current = (await thread.activeThread(db.pool)).id;
+          const channel = 'telegram:synthetic-topics';
+          const source = `synthetic-topics-${randomUUID()}`;
+          const [mainTurn, topicTurn, yesTurn, yes] = [
+            randomUUID(),
+            randomUUID(),
+            randomUUID(),
+            randomUUID(),
+          ];
+          const turns = [mainTurn, topicTurn, yesTurn];
+          t.after(async () => {
+            await db.pool.query('DELETE FROM channel_outbox WHERE source_id=$1', [source]);
+            await db.pool.query('DELETE FROM channel_inbox WHERE source_id=$1', [source]);
+            await db.pool.query(
+              "DELETE FROM channel_topics WHERE owner_id=$1 AND account_id='synthetic-topics'",
+              [ownerId],
+            );
+            await db.pool.query('DELETE FROM messages WHERE turn_id=ANY($1::uuid[])', [turns]);
+            await db.pool.query('DELETE FROM turns WHERE id=ANY($1::uuid[])', [turns]);
+          });
+          for (const turn of turns)
+            await db.pool.query(
+              "INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,channel) VALUES($1,$2,$3,$3,'user','Synthetic topics','succeeded',$4)",
+              [turn, ownerId, current, channel],
+            );
+          const say = async (turnId: string, role: string, text: string, id = randomUUID()) => {
+            await db.pool.query(
+              'INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id) VALUES($1,$2,$3,$4,$5,$6)',
+              [id, ownerId, role, text, current, turnId],
+            );
+            return id;
+          };
+          const inGeneral = await say(
+            mainTurn,
+            'assistant',
+            'Shall I archive the synthetic receipts?',
+          );
+          const inTopic = await say(topicTurn, 'assistant', 'Shall I sell the synthetic bicycle?');
+          await say(yesTurn, 'user', 'yes', yes);
+          await db.pool.query(
+            `INSERT INTO channel_inbox(source_id,provider,account_id,sender_id,thread_id,text,received_at,owner_id,channel,turn_id,message_id,state)
+             VALUES($1,'telegram','synthetic-topics','synthetic-sender','synthetic-chat','yes',now(),$2,$3,$4,$5,'submitted')`,
+            [source, ownerId, channel, yesTurn, yes],
+          );
+          await db.pool.query(
+            "INSERT INTO channel_outbox(message_id,source_id,state,topic_id) VALUES($1,$3,'sent',NULL),($2,$3,'sent','801')",
+            [inGeneral, inTopic, source],
+          );
+          const paired = async () =>
+            (await recentOwnerWords(db.pool, ownerId, current, [yes])).words.userMessages?.find(
+              ({ text }) => text === 'yes',
+            )?.replyTo;
+          assert.equal(await paired(), 'Shall I sell the synthetic bicycle?');
+          await db.pool.query(
+            "INSERT INTO channel_topics(owner_id,provider,account_id,sender_id,topic_id,task_id) VALUES($1,'telegram','synthetic-topics','synthetic-sender','801',gen_random_uuid())",
+            [ownerId],
+          );
+          assert.equal(await paired(), 'Shall I archive the synthetic receipts?');
+        },
+      );
+
+      await t.test(
         'a context restart keeps chat, files and independent work and refuses stale requests',
         async () => {
           await waitFor(settledThread);

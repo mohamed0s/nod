@@ -190,6 +190,9 @@ export async function recentOwnerWords(
   requestIds: string[],
   taskId: string | null = null,
 ) {
+  const topics = Boolean(
+    (await pool.query("SELECT to_regclass('channel_main_topics') AS name")).rows[0]?.name,
+  );
   const { rows } = await pool.query<{
     id: string;
     text: string;
@@ -236,7 +239,18 @@ export async function recentOwnerWords(
          WHERE p.owner_id=$1 AND e.message_id=m.id) AS answer
      FROM (SELECT id FROM recent UNION SELECT unnest($3::uuid[])) ids
      JOIN messages m ON m.id=ids.id CROSS JOIN cleared
-     LEFT JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
+     LEFT JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id${
+       topics
+         ? `
+     LEFT JOIN LATERAL (SELECT true AS shown,i.topic_id FROM channel_inbox i
+         WHERE i.message_id=m.id AND i.owner_id=$1
+           AND (i.topic_id IS NOT NULL OR EXISTS (SELECT 1 FROM channel_topics c WHERE c.owner_id=i.owner_id
+             AND c.provider=i.provider AND c.account_id=i.account_id AND c.sender_id=i.sender_id)
+             OR EXISTS (SELECT 1 FROM channel_main_topics c WHERE c.owner_id=i.owner_id
+             AND c.provider=i.provider AND c.account_id=i.account_id AND c.sender_id=i.sender_id))
+         LIMIT 1) topic ON TRUE`
+         : ''
+     }
      LEFT JOIN LATERAL (SELECT a.id,a.text,a.presentation,${withdrawnSql('a')} AS withdrawn FROM messages a
          WHERE a.id=m.reply_to_message_id AND a.owner_id=$1 AND a.thread_id=$2 AND a.role='assistant'
            AND a.hidden_at IS NULL AND (a.text<>'' OR a.presentation IS NOT NULL)) explicit ON TRUE
@@ -248,7 +262,13 @@ export async function recentOwnerWords(
            AND a.created_at>=CASE WHEN m.created_at>=cleared.at THEN cleared.at ELSE '-infinity'::timestamptz END
            AND t.channel IS NOT DISTINCT FROM u.channel
            AND (${turnChatSql('t')} IS NOT DISTINCT FROM ${turnChatSql('u')}
-             OR (u.channel<>'web' AND ${turnChatSql('u')} IS NULL))
+             OR (u.channel<>'web' AND ${turnChatSql('u')} IS NULL))${
+               topics
+                 ? `
+           AND (topic.shown IS NULL OR EXISTS (SELECT 1 FROM channel_outbox o WHERE o.message_id=a.id AND o.state='sent'
+             AND o.topic_id IS NOT DISTINCT FROM topic.topic_id))`
+                 : ''
+             }
          ORDER BY a.created_at DESC,a.id DESC LIMIT 1) implicit ON TRUE
      CROSS JOIN LATERAL (SELECT COALESCE(explicit.id,implicit.id) AS id,COALESCE(explicit.text,implicit.text) AS text,
          CASE WHEN explicit.id IS NOT NULL THEN explicit.presentation ELSE implicit.presentation END AS presentation,

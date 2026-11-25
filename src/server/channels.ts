@@ -394,6 +394,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
   CREATE INDEX IF NOT EXISTS channel_inbox_pending ON channel_inbox(state,created_at);
   CREATE INDEX IF NOT EXISTS channel_outbox_pending ON channel_outbox(state,created_at);
   CREATE INDEX IF NOT EXISTS channel_inbox_turn ON channel_inbox(turn_id);
+  CREATE INDEX IF NOT EXISTS channel_inbox_message ON channel_inbox(message_id);
   CREATE INDEX IF NOT EXISTS channel_inbox_channel ON channel_inbox(owner_id,channel,state,received_at DESC);
   CREATE INDEX IF NOT EXISTS channel_outbox_sent_topic ON channel_outbox(topic_id,updated_at DESC) WHERE state='sent';
   CREATE INDEX IF NOT EXISTS channel_inbox_route ON channel_inbox(owner_id,provider,account_id,sender_id,received_at DESC)`);
