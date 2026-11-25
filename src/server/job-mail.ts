@@ -268,10 +268,13 @@ export function mailboxKey(value: string) {
   return `${canonical === 'gmail.com' ? name.replaceAll('.', '') : name}@${canonical}`;
 }
 
-export function linkedInChecked(mail: Pick<Mail, 'address' | 'authenticatedDomain'>) {
+export function linkedInChecked(
+  mail: Pick<Mail, 'address' | 'authenticatedDomain' | 'signedDomains'>,
+) {
   return (
     siteOf(mail.address.split('@')[1] ?? '') === 'linkedin.com' &&
-    siteOf(mail.authenticatedDomain ?? '') === 'linkedin.com'
+    siteOf(mail.authenticatedDomain ?? '') === 'linkedin.com' &&
+    mail.signedDomains.some((domain) => siteOf(domain) === 'linkedin.com')
   );
 }
 
@@ -279,11 +282,7 @@ export function senderChecked(
   mail: Pick<Mail, 'address' | 'authenticatedDomain' | 'signedDomains'>,
 ) {
   const own = siteOf(mail.address.split('@')[1] ?? '');
-  return Boolean(
-    own &&
-    (siteOf(mail.authenticatedDomain ?? '') === own ||
-      mail.signedDomains.some((domain) => siteOf(domain) === own)),
-  );
+  return Boolean(own && mail.signedDomains.some((domain) => siteOf(domain) === own));
 }
 
 function nameFrom(subject: string, patterns: RegExp[]) {
@@ -657,7 +656,13 @@ export function createJobMail(options: {
         mail_revision: number;
         mail_offered_at: Date | null;
         report_offered_at: Date | null;
-        mail_run: (JobMailRun & { retryFrom?: string | null; olderThan?: number | null }) | null;
+        mail_run:
+          | (JobMailRun & {
+              retryFrom?: string | null;
+              olderThan?: number | null;
+              pendingOlder?: number | null;
+            })
+          | null;
       }>(
         'SELECT mail_account,mail_schedule_id,mail_revision,mail_offered_at,report_offered_at,mail_run FROM job_profile WHERE owner_id=$1',
         [ownerId],
@@ -998,20 +1003,22 @@ export function createJobMail(options: {
     const addressed = (mail: Mail) =>
       mail.recipients.some((entry) => mailboxKey(entry) === accountKey);
     const olderThan = state.run?.olderThan ?? null;
-    const listed = { ids: [] as string[], more: false };
-    for (const query of [
-      window.query,
-      ...(olderThan ? [`${window.query} before:${olderThan}`] : []),
-    ]) {
+    const reader = options.mail;
+    const account = state.account;
+    const listIds = async (query: string) => {
       try {
-        const found = await options.mail.list(state.account, query, mostListed, stop);
-        for (const id of found.ids) if (!listed.ids.includes(id)) listed.ids.push(id);
-        listed.more ||= found.more;
+        return await reader.list(account, query, mostListed, stop);
       } catch (error) {
         if (signal?.aborted) throw error;
         throw failure(`Nod couldn't search the job mail account: ${message(error)}`, 502);
       }
-    }
+    };
+    const newest = await listIds(window.query);
+    const older = olderThan ? await listIds(`${window.query} before:${olderThan}`) : null;
+    const listed = {
+      ids: [...new Set([...newest.ids, ...(older?.ids ?? [])])],
+      more: newest.more || Boolean(older?.more),
+    };
     const known = new Set(
       (
         await pool.query<{ source_ref: string }>(
@@ -1020,7 +1027,11 @@ export function createJobMail(options: {
         )
       ).rows.map((row) => row.source_ref),
     );
-    const fresh = listed.ids.filter((id) => !known.has(id)).reverse();
+    const freshNewest = newest.ids.filter((id) => !known.has(id)).reverse();
+    const freshOlder = (older?.ids ?? [])
+      .filter((id) => !known.has(id) && !newest.ids.includes(id))
+      .reverse();
+    const fresh = [...freshNewest, ...freshOlder];
     const chosen = fresh.slice(0, mostEmails);
     let read: JobMailMessage[];
     try {
@@ -1348,16 +1359,39 @@ export function createJobMail(options: {
           reasons.push(
             `${toAsk.length} ${toAsk.length === 1 ? 'email matched' : 'emails matched'} nobody, or more than one person, in the job search.`,
           );
-        const earliest = Math.min(
-          olderThan ?? Number.POSITIVE_INFINITY,
-          ...mails.map((mail) => Math.floor(Date.parse(mail.date) / 1000)),
-        );
-        const run: JobMailRun & { retryFrom: string | null; olderThan: number | null } = {
+        const seconds = (ids: string[]) =>
+          mails
+            .filter((mail) => ids.includes(mail.id))
+            .map((mail) => Math.floor(Date.parse(mail.date) / 1000));
+        let cursor = olderThan;
+        let pending = state.run?.pendingOlder ?? null;
+        if (older) {
+          const lowest = Math.min(pending ?? Number.POSITIVE_INFINITY, ...seconds(freshOlder));
+          const recorded =
+            (
+              await client.query<{ count: number }>(
+                "SELECT count(*)::int AS count FROM job_events WHERE owner_id=$1 AND source='gmail' AND source_ref=ANY($2::text[])",
+                [ownerId, older.ids],
+              )
+            ).rows[0]!.count === older.ids.length;
+          if (recorded && !older.more) [cursor, pending] = [null, null];
+          else if (recorded && Number.isFinite(lowest)) [cursor, pending] = [lowest, null];
+          else pending = Number.isFinite(lowest) ? lowest : null;
+        } else if (newest.more) {
+          const lowest = Math.min(...seconds(freshNewest));
+          if (Number.isFinite(lowest)) [cursor, pending] = [lowest, null];
+        }
+        const run: JobMailRun & {
+          retryFrom: string | null;
+          olderThan: number | null;
+          pendingOlder: number | null;
+        } = {
           at: new Date().toISOString(),
           counts,
           reasons: reasons.slice(0, 10),
           retryFrom,
-          olderThan: listed.more && Number.isFinite(earliest) ? earliest : null,
+          olderThan: cursor,
+          pendingOlder: pending,
         };
         await client.query(
           `INSERT INTO job_profile(owner_id,mail_run) VALUES($1,$2)

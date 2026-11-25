@@ -63,20 +63,53 @@ export function jobMailMessage(message: Message): JobMailMessage | null {
       .map((entry) => /\bheader\.from=([a-z0-9.-]+)(?:\s|$)/i.exec(entry)?.[1])
       .find(Boolean)
       ?.toLowerCase() ?? null;
+  const signatures = headers('dkim-signature').map((value) => {
+    const tags = new Map(
+      value
+        .replace(/\s+/g, '')
+        .split(';')
+        .flatMap((part) => {
+          const at = part.indexOf('=');
+          return at > 0 ? [[part.slice(0, at).toLowerCase(), part.slice(at + 1)] as const] : [];
+        }),
+    );
+    return {
+      domain: (tags.get('d') ?? '').toLowerCase(),
+      selector: (tags.get('s') ?? '').toLowerCase(),
+      signature: tags.get('b') ?? '',
+      coversTo: (tags.get('h') ?? '').toLowerCase().split(':').includes('to'),
+    };
+  });
   const signedDomains = passing('dkim').flatMap((entry) => {
-    const domain =
+    const domain = (
       /\bheader\.d=([a-z0-9.-]+)(?:\s|$)/i.exec(entry)?.[1] ??
-      /\bheader\.i=[^\s@]*@([a-z0-9.-]+)(?:\s|$)/i.exec(entry)?.[1];
-    return domain ? [domain.toLowerCase()] : [];
+      /\bheader\.i=[^\s@]*@([a-z0-9.-]+)(?:\s|$)/i.exec(entry)?.[1] ??
+      ''
+    ).toLowerCase();
+    const selector = /\bheader\.s=(\S+)/i.exec(entry)?.[1]?.toLowerCase();
+    const prefix = /\bheader\.b=(\S+)/i.exec(entry)?.[1];
+    const matched = signatures.filter(
+      (signature) =>
+        signature.domain &&
+        (domain === signature.domain || domain.endsWith(`.${signature.domain}`)) &&
+        (!selector || signature.selector === selector) &&
+        (!prefix || signature.signature.startsWith(prefix)),
+    );
+    return matched.length && matched.every((signature) => signature.coversTo)
+      ? [matched[0]!.domain]
+      : [];
   });
   return {
     id: message.id,
     receivedAt: Number(message.internalDate),
     sender: single ? (mailbox(from[0]!) ?? null) : null,
-    recipients: [...headers('to'), ...headers('cc')]
-      .flatMap((value) => value.split(','))
-      .flatMap((value) => mailbox(value) ?? [])
-      .slice(0, 100),
+    recipients:
+      headers('to').length === 1
+        ? headers('to')[0]!
+            .split(',')
+            .flatMap((value) => mailbox(value) ?? [])
+            .slice(0, 100)
+        : [],
     senderName: single
       ? (/^\s*"?([^"<]*?)"?\s*<[^<>]+>\s*$/.exec(from[0]!)?.[1]?.trim() ?? '')
       : '',
