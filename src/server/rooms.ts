@@ -893,15 +893,15 @@ export function createRooms(options: {
   }
 
   async function speakers(turnIds: string[]) {
-    if (!turnIds.length) return new Map<string, string>();
-    const { rows } = await pool.query<{ id: string; name: string }>(
-      `SELECT u.id,COALESCE(a.name,r.name) AS name FROM turns u
+    if (!turnIds.length) return new Map<string, { name: string; agentId: string | null }>();
+    const { rows } = await pool.query<{ id: string; name: string; agent_id: string | null }>(
+      `SELECT u.id,COALESCE(a.name,r.name) AS name,a.id AS agent_id FROM turns u
        JOIN room_members r ON r.session_id=u.session_id AND r.owner_id=u.owner_id
        LEFT JOIN agents a ON a.id=r.agent_id AND a.owner_id=r.owner_id
        WHERE u.owner_id=$1 AND u.id=ANY($2::uuid[])`,
       [ownerId, [...new Set(turnIds)]],
     );
-    return new Map(rows.map(({ id, name }) => [id, name]));
+    return new Map(rows.map(({ id, name, agent_id }) => [id, { name, agentId: agent_id }]));
   }
 
   async function speaker(messageId: string) {
