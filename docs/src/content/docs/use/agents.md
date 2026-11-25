@@ -17,7 +17,7 @@ In the app, agents are called **bots**: the **Bots** page, the **Bots** group in
 
 Select **New chat**. A short menu opens:
 
-- **Just a chat** is selected, so Enter or one click starts an ordinary chat, as before.
+- **Just a chat** comes first and is focused, so **New chat** then Enter starts an ordinary chat on your model.
 - Your bots follow. Select one to open its chat, or to start one when it has none in this conversation yet. The chat runs on the bot's model, memory and app and skill limits.
 - **New bot…** opens the form below.
 - **All bots and rooms** opens the [Bots page](#the-bots-page).
