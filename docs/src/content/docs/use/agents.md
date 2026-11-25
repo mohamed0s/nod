@@ -42,13 +42,21 @@ To change a profile, select **Edit** beside **Agent**. **Remove agent, keep the 
 
 A fact about you, such as where you live or what you prefer, always goes to shared memory, even when you tell it to an agent with its own memory. A detail of the agent's work, such as a lead it follows or when a report is due, goes to the agent's own notes. The memory model labels each note; when it isn't sure, the note goes to shared memory. Nod still saves only what you wrote yourself, as in any chat.
 
-In an agent's chat, asking Nod to forget a note, turn memory off or clear it acts on the agent's own memory, and the question says which memory it changes. An agent that reads shared memory can also forget a shared note. A schedule that runs as the agent reads memory the same way as its chat. See and edit each agent's notes in **Settings → Memory**.
+In an agent's chat, asking Nod to forget a note, turn memory off or clear it acts on the agent's own memory, and the question says which memory it changes. An agent that reads shared memory can also forget a shared note. A schedule that runs as the agent reads memory the same way as its chat.
+
+With **Own**, the agent's context stays its own too: searching earlier messages across chats finds only its own chats, never Main's or another agent's. **Own + read shared** searches every chat, as Main does. **Include sensitive details** is one setting for shared and agent memory; change it in shared memory. See and edit each agent's notes in **Settings → Memory**.
 
 ## Apps and skills
 
 Choose the connected apps, or single accounts of an app, and the [skills](/how-it-works/skills/) an agent may use. The lists only narrow what it can use: they never give it an app you haven't connected, and every action still goes through the [action check](/trust/approvals/). With none chosen, it can use them all.
 
-In the agent's chat and in runs of schedules that run as it, Nod lists only the chosen apps and skills. A call to another app, from a tool or from code Nod runs, is refused with the reason, and so is reading, saving or fixing another skill.
+In the agent's chat and in runs of schedules that run as it, the limit covers:
+
+- connected apps and MCP servers: calls from a tool or from code Nod runs, app search and the list of connected apps;
+- [job mail](/use/job-search/#job-mail) reads from the Gmail account linked to your job search;
+- skills: the list of guides and learned skills, and reading, saving or fixing another one.
+
+Nod refuses anything else with the reason, before it sends anything. An app action that was waiting for your yes when you narrowed the list doesn't run either. The limit doesn't cover Nod's own browser and the sign-ins you saved for it, [computer use](/connect/computer-use/) or [local files](/connect/local-files/): they aren't connected apps, so they keep their own approvals and settings.
 
 ## What instructions can and can't do
 
