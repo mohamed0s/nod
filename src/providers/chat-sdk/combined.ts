@@ -15,6 +15,12 @@ export function combineMessagingTransports(
         ).values(),
       ];
     },
+    onInput(listener) {
+      for (const transport of transports) transport.onInput?.(listener);
+    },
+    link(request) {
+      forChannel(request.channelId)?.link?.(request);
+    },
     async poll(accept, pair, react, approve) {
       const results = await Promise.allSettled(
         transports.map((transport) => transport.poll?.(accept, pair, react, approve)),

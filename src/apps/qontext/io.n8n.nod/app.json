@@ -1,0 +1,25 @@
+{
+  "$schema": "https://nod.n8n.io/docs/schemas/apps/v1/app.schema.json",
+  "displayName": "Qontext",
+  "icon": "./io.n8n.nod/icon.svg",
+  "categories": ["Productivity"],
+  "connection": {
+    "type": "mcp",
+    "server": "qontext",
+    "authentication": ["oauth2"]
+  },
+  "prompts": [
+    "What does our context say about the Acme renewal?",
+    "Find our pricing guidelines and summarize the discount rules.",
+    "Add today's meeting decisions to the project notes in Qontext."
+  ],
+  "requirements": [
+    "A Qontext workspace member who can sign in at app.qontext.ai.",
+    "Nod reads and writes only the files and folders that member can access."
+  ],
+  "limitations": [
+    "Nod can't connect sources or manage Skills, members or API keys in Qontext.",
+    "Moving a file and renaming it are separate steps, and only one file moves per step.",
+    "This app does not start automatic monitoring from its MCP connection alone."
+  ]
+}

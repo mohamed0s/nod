@@ -110,18 +110,6 @@ type BasisWords = TrustWords & {
   replacesInstruction?: boolean;
 };
 
-export function citedSource(answer: unknown) {
-  if (!answer || typeof answer !== 'object') return undefined;
-  const { because, source } = answer as { because?: unknown; source?: unknown };
-  return typeof source === 'string'
-    ? source
-    : because === 'read'
-      ? 'read'
-      : because === 'schedule approval'
-        ? 'scheduleApproval'
-        : undefined;
-}
-
 export function trustSources(words: BasisWords) {
   return [
     'read',
@@ -133,39 +121,24 @@ export function trustSources(words: BasisWords) {
   ].filter((source) => trustBasis({ run: true, source, terms: [] }, words));
 }
 
-export function trustBasisProblem(answer: unknown, words: BasisWords) {
-  const cited = citedSource(answer);
-  if (!cited) return 'no_source';
-  if (!trustSources(words).includes(cited)) return 'unlisted_source';
-  const { terms } = answer as { terms?: unknown };
-  return terms === undefined || terms === null ? 'missing_terms' : 'bad_terms';
-}
-
 export function trustBasis(answer: unknown, words: BasisWords): TrustBasis | undefined {
   if (!answer || typeof answer !== 'object') return undefined;
-  const { run, terms } = answer as { run?: unknown; terms?: unknown };
-  if (
-    terms !== undefined &&
-    (!Array.isArray(terms) ||
-      terms.some(
-        (term) =>
-          !term ||
-          typeof term !== 'object' ||
-          term.same !== true ||
-          typeof term.user !== 'string' ||
-          !term.user.trim() ||
-          typeof term.action !== 'string' ||
-          !term.action.trim(),
-      ))
-  )
-    return undefined;
-  const cited = citedSource(answer);
-  if (
-    run !== true ||
-    !cited ||
-    (cited !== 'read' && cited !== 'scheduleApproval' && !Array.isArray(terms)) ||
-    (words.replacesInstruction && !/^(message|schedule):/.test(cited))
-  )
+  const { run, because, source, terms } = answer as {
+    run?: unknown;
+    because?: unknown;
+    source?: unknown;
+    terms?: unknown;
+  };
+  if (Array.isArray(terms) && terms.some((term) => term?.same === false)) return undefined;
+  const cited =
+    typeof source === 'string'
+      ? source
+      : because === 'read'
+        ? 'read'
+        : because === 'schedule approval'
+          ? 'scheduleApproval'
+          : undefined;
+  if (run !== true || !cited || (words.replacesInstruction && !/^(message|schedule):/.test(cited)))
     return undefined;
   const name = words.action?.name ?? '';
   const args = words.action?.arguments ?? {};

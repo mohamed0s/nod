@@ -167,7 +167,7 @@ None of these send a notification. See [Message cadence](/how-it-works/agent-run
 
 Reply to a task's message to continue that task. A message without a reply target goes to the main chat. If it clearly changes an existing task, Nod sends your message to that task. If the target is unclear, Nod asks which task you mean.
 
-Nod keeps quick answers, simple lookups and status questions in chat, including flight searches. It starts a saved task for substantial work, including multi-step work it can finish in one sitting, such as research across sources, checked comparisons or report creation, and for an outside wait, such as a person, a reply or an action elsewhere, or work you ask it to track. You don't choose an execution mode: Nod starts the task itself. Browsing a website, signing in, paying or using a desktop app always runs as its own task, so two requests never mix. Quick web lookups stay in chat. A new independent request while other work runs starts its own task, and each task keeps its goal; send a correction or a related update to the existing task by replying to its message. You can discuss other work while a task runs. Updates may wait for the current step to finish. Different tasks can continue in parallel. See [Track tasks](/use/tasks/).
+Nod keeps quick answers, simple lookups such as flight searches, status questions and short work in your connected apps, such as reading, drafting, sending, forwarding or deleting a few emails, in chat. It starts a saved task for substantial work, including multi-step work it can finish in one sitting, such as research across sources, checked comparisons or report creation, and for an outside wait, such as a person, a reply or an action elsewhere, or work you ask it to track. You don't choose an execution mode: Nod starts the task itself. A new independent request while other work runs starts its own task, and each task keeps its goal; send a correction or a related update to the existing task by replying to its message. You can discuss other work while a task runs. Updates may wait for the current step to finish. Different tasks can continue in parallel. See [Track tasks](/use/tasks/).
 
 ## Notifications
 
@@ -277,7 +277,7 @@ Links stay inline in the reply. Hover over a link, or focus it with the keyboard
 
 ## Replies go back where you wrote
 
-Nod answers each request in the app you sent it from. A message from Telegram gets its reply on Telegram. Everything also appears in the chat in Nod's own app. See [Telegram and WhatsApp](/use/channels/).
+Nod answers each request in the app you sent it from. A message from Telegram gets its reply on Telegram. Schedule results and messages Nod starts on its own also go to the chat app you used last, Telegram or WhatsApp, if you've written from one. Everything also appears in the chat in Nod's own app. See [Telegram and WhatsApp](/use/channels/).
 
 ## Report a bug
 

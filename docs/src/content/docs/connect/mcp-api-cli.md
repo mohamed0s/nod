@@ -1,17 +1,17 @@
 ---
 title: MCP servers, APIs and CLIs
-description: Connect Notion, Linear and n8n through their MCP servers, and let Nod set up other services through an MCP server, an HTTP API or a command-line tool.
+description: Connect Notion, Linear, Qontext, n8n and other custom apps through their MCP servers, and let Nod set up other services through an MCP server, an HTTP API or a command-line tool.
 sidebar:
   order: 4
 ---
 
-Besides [Composio apps](/connect/apps/), Nod connects to Notion, Linear and n8n through their own MCP servers. For other services, it can set up an MCP server, an HTTP API or a command-line tool (CLI).
+Besides [Composio apps](/connect/apps/), Nod connects to [custom apps](/connect/community-apps/) such as Notion, Linear, Qontext and n8n through their own MCP servers. For other services, it can set up an MCP server, an HTTP API or a command-line tool (CLI).
 
 These built-in MCP apps use the same folder format as community apps. Browse their [app pages](/connect/community-apps/), or follow [Creating your own connectors](/contribute/apps/) to add one.
 
-## Notion and Linear
+## Hosted custom apps
 
-Notion and Linear connect through their own hosted MCP servers, the same way as any [other MCP server](#connect-another-service). Open **Apps**, select **Connect** and sign in. If the service ends sign-in with an error, Nod shows that error, with secrets removed.
+Notion, Linear, Qontext and the other hosted custom apps connect through their own MCP servers, the same way as any [other MCP server](#connect-another-service). Open **Apps**, select **Connect** and sign in. If the service ends sign-in with an error, Nod shows that error, with secrets removed.
 
 If an older **Notion MCP** account appears in **Apps** but cannot read pages, connect **Notion** again. After the new connection works, disconnect the old **Notion MCP** account. Its earlier sign-in does not transfer to the direct connection.
 
@@ -19,7 +19,7 @@ If you ask Nod in chat, it sends a link to a private setup page in Nod, and you 
 
 If sign-in is cancelled or fails, select **Try again** in the connection dialog. Select **Start again** if you closed the sign-in window. Finish in the newest window, then dismiss the confirmed connection with **Done**.
 
-Nod can use every tool these servers offer, so it can read and change pages, issues and projects. Each change goes through the same [trust check](/trust/approvals/) as any app action. If Nod can't refresh a sign-in because it expired or was revoked, **Apps** shows **Sign-in required** with **Reconnect** from then on.
+Nod can use every tool these servers offer, so it can read and change pages, issues, projects and files. Each change goes through the same [trust check](/trust/approvals/) as any app action. If Nod can't refresh a sign-in because it expired or was revoked, **Apps** shows **Sign-in required** with **Reconnect** from then on.
 
 ## n8n
 
@@ -37,7 +37,7 @@ Nod loads n8n's tools only when a task needs them and follows n8n's own guide fo
 
 Search **Apps** by service name. If it isn’t listed, select **Ask Nod** on the **Connect another tool** card for help setting it up.
 
-To connect an MCP server yourself, open **Apps** and select **Connect MCP**. Enter a name of up to 80 characters, such as `Work email (n8n)`, and the server URL, then choose browser sign-in, an access token or an API key. Select **Continue** to finish authentication in the private setup dialog. For any MCP server, including Notion, Linear and n8n, the dialog shows the service's reason if sign-in can't start. When the server ends sign-in with an error, the dialog shows that error, with secrets removed. Only a sign-in you decline counts as cancelled. **Connection details** shows any extra setup instructions. Tokens stay outside the chat.
+To connect an MCP server yourself, open **Apps** and select **Connect MCP**. Enter a name of up to 80 characters, such as `Work email (n8n)`, and the server URL, then choose browser sign-in, an access token or an API key. Select **Continue** to finish authentication in the private setup dialog. For any MCP server, including the custom apps, the dialog shows the service's reason if sign-in can't start. When the server ends sign-in with an error, the dialog shows that error, with secrets removed. Only a sign-in you decline counts as cancelled. **Connection details** shows any extra setup instructions. Tokens stay outside the chat.
 
 To rename a server you added with **Connect MCP**, open **Apps**, open **Manage accounts** on the server’s card, and select **Rename**. The new name applies to every account on that card. You can search for it in Apps or ask for it by name in chat.
 

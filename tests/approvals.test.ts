@@ -2464,74 +2464,29 @@ test(
       });
 
       await t.test(
-        'only an answer without terms on an accepted source is asked again, once, for that same source',
+        'the checker gets the sources the server accepts and is asked once',
         async () => {
-          const { withFailureLog } = await import('../src/server/failure-log.ts');
-          const logged: Array<{ event: string; error: unknown }> = [];
-          const sink = (event: string, error: unknown) => {
-            logged.push({ event, error });
-          };
-          const reasked = () =>
-            logged.filter(({ event }) => event === 'trust_check_reask').map(({ error }) => error);
-          const sequence = (...answers: Array<(input: Record<string, any>) => unknown>) => {
-            let index = 0;
-            aligned = (input) => {
-              const next = answers[index++];
-              if (!next) assert.fail('The trust check asked more than twice.');
-              const answer = next(input);
-              if (answer instanceof Error) throw answer;
-              return answer as boolean | Record<string, unknown>;
-            };
-          };
-          const failure = () => new Error('Synthetic checker failure.');
-          const declined = () => false;
           const unsourced = () => ({ run: true });
           const untermed = (input: Record<string, any>) => ({ run: true, source: cite(input) });
-          const sourced = (input: Record<string, any>) => ({
-            run: true,
-            source: cite(input),
-            terms: [],
-          });
           const unlisted = () => ({ run: true, source: 'message:99', terms: [] });
-          const read = () => ({ run: true, source: 'read' });
-          const background = () => ({ run: true, source: 'schedule:0', terms: [] });
-          const cronEdit = () => ({ run: true, source: 'schedule:2', terms: [] });
           const mismatched = (input: Record<string, any>) => ({
             run: true,
             source: cite(input),
             terms: [{ user: 'Ana', action: 'bob@example.test', same: false }],
           });
-          const malformed = (input: Record<string, any>) => ({
-            run: true,
-            source: cite(input),
-            terms: [{ user: 'Ana', action: '', same: true }],
-          });
-          const loose = (input: Record<string, any>) => ({
-            run: true,
-            source: cite(input),
-            terms: { user: 'Ana', action: 'bob@example.test', same: false },
-          });
+          const background = () => ({ run: true, source: 'schedule:0', terms: [] });
+          const cronEdit = () => ({ run: true, source: 'schedule:2', terms: [] });
           const instructed = () => ({ run: true, source: 'schedule:1' });
           const instruction = 'Every evening, email Ana the synthetic report.';
-          const listed =
-            (same: boolean, action = 'ana@example.test') =>
-            () => ({
-              run: true,
-              source: 'schedule:1',
-              terms: [{ user: 'Ana', action, same }],
-            });
-          const invented = listed(true);
           const check = async (
             turn: Awaited<ReturnType<typeof begin>>,
-            action: string,
-            args: Record<string, unknown>,
-            signal?: AbortSignal,
+            answer: (input: Record<string, any>) => boolean | Record<string, unknown>,
           ) => {
-            logged.length = 0;
+            aligned = answer;
             const before = reviews.length;
-            const verdict = await withFailureLog(sink, () =>
-              trust.check(turn, action, args, signal),
-            ).catch((error: unknown) => error);
+            const verdict = await trust
+              .check(turn, 'GMAIL_SEND_EMAIL', email('ana@example.test'))
+              .catch((error: unknown) => error);
             return { verdict, asked: reviews.slice(before) };
           };
           const scheduled = async () => {
@@ -2556,131 +2511,52 @@ test(
             );
             return turn;
           };
-          const send = () => email('ana@example.test');
 
           const chat = await begin('Email Ana the synthetic invoice.');
-          sequence(untermed, sourced);
-          const ran = calls.length;
-          logged.length = 0;
-          const before = reviews.length;
-          const prompted = prompts.length;
-          await withFailureLog(sink, () => approvals.request(chat, 'GMAIL_SEND_EMAIL', send()));
-          assert.equal(calls.length, ran + 1);
-          assert.equal(reviews.length, before + 2);
-          const [first, second] = reviews.slice(before);
-          assert.deepEqual(second, first);
-          assert.equal(JSON.stringify(second).includes('correction'), false);
-          const [plain, corrected] = prompts.slice(prompted);
-          assert.ok(corrected!.startsWith(`${plain}\n`));
-          assert.ok(corrected!.length > plain!.length + 1);
-          assert.deepEqual(first!.validSources, [
+          const ran = await check(chat, untermed);
+          assert.equal(ran.asked.length, 1);
+          assert.equal((ran.verdict as { confirm?: boolean }).confirm, false);
+          assert.deepEqual(ran.asked[0]!.validSources, [
             'read',
-            ...first!.userMessages.flatMap((message: { canAuthorize?: boolean }, index: number) =>
-              message.canAuthorize === false ? [] : [`message:${index}`],
+            ...ran.asked[0]!.userMessages.flatMap(
+              (message: { canAuthorize?: boolean }, index: number) =>
+                message.canAuthorize === false ? [] : [`message:${index}`],
             ),
           ]);
-          assert.deepEqual(reasked(), [
-            { name: 'TrustCheckReask', code: 'missing_terms:accepted' },
-          ]);
           await finish(chat.turnId, 'cancelled');
-
-          for (const [answers, asked, code] of [
-            [[unlisted, read], 1, 'unlisted_source:skipped'],
-            [[unlisted, sourced], 1, 'unlisted_source:skipped'],
-            [[unsourced, sourced], 1, 'no_source:skipped'],
-            [[mismatched, sourced], 1, 'bad_terms:skipped'],
-            [[malformed, sourced], 1, 'bad_terms:skipped'],
-            [[loose, sourced], 1, 'bad_terms:skipped'],
-            [[untermed, read], 2, 'missing_terms:source_changed'],
-            [[untermed, unlisted], 2, 'missing_terms:basis_rejected'],
-            [[untermed, untermed], 2, 'missing_terms:basis_rejected'],
-            [[untermed, declined], 2, 'missing_terms:declined'],
-            [[untermed, failure], 2, 'missing_terms:failed'],
-            [[declined], 1, undefined],
-            [[failure], 1, undefined],
-          ] as const) {
+          for (const answer of [unlisted, unsourced, mismatched, () => false]) {
             const turn = await begin('Email Ana the synthetic invoice.');
-            sequence(...answers);
-            const outcome = await check(turn, 'GMAIL_SEND_EMAIL', send());
+            const outcome = await check(turn, answer);
             compareVerdict(outcome.verdict as Awaited<ReturnType<typeof trust.check>>, {
               confirm: true,
               reason: 'unrequested',
             });
-            assert.equal(outcome.asked.length, asked, code);
-            assert.deepEqual(reasked(), code ? [{ name: 'TrustCheckReask', code }] : []);
+            assert.equal(outcome.asked.length, 1);
             await finish(turn.turnId, 'cancelled');
           }
 
           const nightly = await scheduled();
-          sequence(instructed, invented);
-          const accepted = await check(nightly, 'GMAIL_SEND_EMAIL', send());
+          const accepted = await check(nightly, instructed);
           compareVerdict(accepted.verdict as Awaited<ReturnType<typeof trust.check>>, {
             confirm: false,
             basis: { kind: 'schedule', quote: instruction },
           });
-          assert.equal(accepted.asked.length, 2);
+          assert.equal(accepted.asked.length, 1);
           assert.deepEqual(accepted.asked[0]!.validSources, ['read', 'schedule:1']);
-          assert.deepEqual(reasked(), [
-            { name: 'TrustCheckReask', code: 'missing_terms:accepted' },
-          ]);
           await finish(nightly.turnId, 'cancelled');
-          for (const [answers, asked] of [
-            [[background, invented], 1],
-            [[listed(false, 'bob@example.test'), invented], 1],
-            [[listed(true, ''), invented], 1],
-            [[background, read], 1],
-            [[cronEdit, read], 1],
-            [[instructed, read], 2],
-            [[instructed, instructed], 2],
-            [[failure], 1],
-          ] as const) {
+          for (const answer of [background, cronEdit]) {
             const turn = await scheduled();
-            sequence(...answers);
-            const outcome = await check(turn, 'GMAIL_SEND_EMAIL', send());
+            const outcome = await check(turn, answer);
             assert.ok(outcome.verdict instanceof Error);
             assert.match(outcome.verdict.message, /couldn't decide this action/);
-            assert.equal(outcome.asked.length, asked);
+            assert.equal(outcome.asked.length, 1);
             await finish(turn.turnId, 'cancelled');
           }
-          const refused = await scheduled();
-          sequence(declined);
-          const outcome = await check(refused, 'GMAIL_SEND_EMAIL', send());
-          compareVerdict(outcome.verdict as Awaited<ReturnType<typeof trust.check>>, {
-            confirm: true,
-            reason: 'schedule',
-          });
-          assert.equal(outcome.asked.length, 1);
-          await finish(refused.turnId, 'cancelled');
-
-          const changing = await begin('Email Ana the synthetic invoice.');
-          const args = send();
-          let reviewed = 0;
-          sequence(untermed, sourced);
-          duringReview = async () => {
-            if (++reviewed === 2) args.recipient_email = 'unreviewed@example.test';
-          };
-          const changed = await check(changing, 'GMAIL_SEND_EMAIL', args);
-          assert.ok(changed.verdict instanceof Error);
-          assert.match(changed.verdict.message, /changed while it was being checked/);
-          assert.equal(changed.asked.length, 2);
-          await finish(changing.turnId, 'cancelled');
-
-          const stopping = await begin('Email Ana the synthetic invoice.');
-          const stop = new AbortController();
-          reviewed = 0;
-          sequence(untermed, sourced);
-          duringReview = async () => {
-            if (++reviewed === 2) stop.abort();
-          };
-          const stopped = await check(stopping, 'GMAIL_SEND_EMAIL', send(), stop.signal);
-          assert.ok(stopped.verdict instanceof Error);
-          assert.equal(stopped.asked.length, 2);
-          await finish(stopping.turnId, 'cancelled');
         },
       );
 
       await t.test(
-        'a decision checker gets the base instructions and input unchanged and is never asked again',
+        'a decision checker gets the base instructions and input unchanged',
         async () => {
           const turn = await begin('Email Ana the synthetic invoice.');
           const decided: object[] = [];
@@ -2706,7 +2582,7 @@ test(
             ownerId,
             review: async (instructions, input) => {
               reviewed.push({ instructions, input: input as Record<string, unknown> });
-              return { run: true, source: cite(input as Record<string, any>) };
+              return { run: false };
             },
             decisions: {
               select: async () => (selected ? decision : undefined),
@@ -2741,10 +2617,7 @@ test(
             ...decided.map((input) => JSON.stringify(input)),
           ])
             assert.equal(value.includes(added[0]!), false);
-          for (const input of decided) {
-            assert.equal('validSources' in input, false);
-            assert.equal('correction' in input, false);
-          }
+          for (const input of decided) assert.equal('validSources' in input, false);
           await finish(turn.turnId, 'cancelled');
         },
       );

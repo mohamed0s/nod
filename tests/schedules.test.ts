@@ -75,6 +75,7 @@ test(
         return id;
       },
       refresh() {},
+      ownerChannel: (client) => channels?.ownerChannel(client) ?? Promise.resolve('web'),
       clearBrowser: async (id) => {
         clearedBrowsers.push(id);
       },
@@ -137,6 +138,13 @@ test(
           accountId: 'fixture-bot',
           allowedSenderIds: ['fixture-owner'],
         },
+        {
+          id: 'whatsapp',
+          status: 'configured',
+          missing: [],
+          accountId: 'fixture-phone',
+          allowedSenderIds: ['fixture-owner'],
+        },
       ],
       async poll(accept) {
         for (const message of inbox.splice(0)) await accept(message);
@@ -167,11 +175,11 @@ test(
             })
           ).turnId,
       });
-    const receive = async (text: string, threadId = 'original-thread') => {
+    const receive = async (text: string, threadId = 'original-thread', channelId = 'telegram') => {
       const messageId = randomUUID();
       inbox.push({
-        channelId: 'telegram',
-        accountId: 'fixture-bot',
+        channelId,
+        accountId: channelId === 'telegram' ? 'fixture-bot' : 'fixture-phone',
         senderId: 'fixture-owner',
         messageId,
         threadId,
@@ -179,7 +187,7 @@ test(
         sentAt: new Date(),
       });
       await channels!.drain();
-      const sourceId = `channel:telegram:fixture-bot:${messageId}`;
+      const sourceId = `channel:${channelId}:${channelId === 'telegram' ? 'fixture-bot' : 'fixture-phone'}:${messageId}`;
       const row = (
         await db.pool.query(
           `SELECT i.turn_id,i.message_id,u.channel,m.text FROM channel_inbox i
@@ -2007,7 +2015,7 @@ test(
       const origin = await receive('Remind me in a minute.');
 
       await t.test(
-        'resumed schedules retain their owned source route and instruction',
+        'scheduled runs start in the chat app the owner used last and keep their instruction',
         async () => {
           const continuation = await thread.enqueueTurn('Synthetic continuation.', {
             source: 'resume',
@@ -2015,13 +2023,8 @@ test(
           const provenance = { ...origin, turnId: continuation };
           const schedule = await createRouted(provenance);
           const stored = (
-            await db.pool.query(
-              'SELECT delivery_channel,channel_source_id,authority FROM schedules WHERE id=$1',
-              [schedule.id],
-            )
+            await db.pool.query('SELECT authority FROM schedules WHERE id=$1', [schedule.id])
           ).rows[0];
-          assert.equal(stored.delivery_channel, origin.channel);
-          assert.equal(stored.channel_source_id, origin.sourceId);
           assert.equal(
             stored.authority.messages.find(
               (message: { id: string }) => message.id === origin.sourceMessageId,
@@ -2037,10 +2040,32 @@ test(
                 manualTurn,
               ])
             ).rows[0],
-            {
-              channel: origin.channel,
-              channel_source_id: origin.sourceId,
-            },
+            { channel: origin.channel, channel_source_id: null },
+          );
+          await db.pool.query("UPDATE turns SET status='succeeded' WHERE id=$1", [manualTurn]);
+          const [replyId, fileId] = [randomUUID(), randomUUID()];
+          const file = { id: randomUUID(), name: 'fixture.csv', mimeType: 'text/csv', size: 13 };
+          for (const [id, text, seconds, attachments] of [
+            [replyId, 'The synthetic reminder went to the chat app.', 0, []],
+            [fileId, '', 1, [{ ...file, url: `/api/artifacts/${file.id}` }]],
+          ] as const)
+            await db.pool.query(
+              `INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text,created_at,attachments)
+               SELECT $1,owner_id,thread_id,id,'assistant',$3,now()+$4 * interval '1 second',$5::jsonb
+               FROM turns WHERE id=$2`,
+              [id, manualTurn, text, seconds, JSON.stringify(attachments)],
+            );
+          const history = (await runs(schedule.id)).find((run) => run.turnId === manualTurn);
+          assert.equal(history?.messageText, 'The synthetic reminder went to the chat app.');
+          assert.equal(history?.attachmentMessageId, fileId);
+          const moved = await receive('Hello from my other chat app.', 'phone-thread', 'whatsapp');
+          assert.notEqual(moved.channel, origin.channel);
+          const later = await runNow(await saved(schedule.id));
+          assert.equal(later.statusCode, 200, later.body);
+          assert.equal(
+            (await db.pool.query('SELECT channel FROM turns WHERE id=$1', [later.json().turnId]))
+              .rows[0].channel,
+            moved.channel,
           );
           assert.deepEqual(
             (
@@ -2059,7 +2084,7 @@ test(
             [provenance, { prompt: 'Send the reworded synthetic reminder.' }, true],
             [provenance, { title: 'Reworded synthetic reminder' }, true],
             [sameThread, {}, true],
-            [otherThread, {}, false],
+            [otherThread, {}, true],
             [
               provenance,
               { title: 'Another synthetic reminder', prompt: 'Send another synthetic reminder.' },
@@ -2116,11 +2141,10 @@ test(
           await assert.rejects(
             personal.manage('schedule_update', { id: schedule.id, deliveryChannel: 'web' }),
           );
-          for (const source of [
-            { ...origin, sourceMessageId: randomUUID() },
-            { turnId: origin.turnId, sourceMessageId: null },
-          ])
-            await assert.rejects(createRouted(source), /unavailable/);
+          await assert.rejects(
+            createRouted({ ...origin, sourceMessageId: randomUUID() }),
+            /unavailable/,
+          );
           const foreign = randomUUID();
           const foreignThread = randomUUID();
           await db.pool.query("INSERT INTO threads(id,owner_id) VALUES($1,'foreign')", [

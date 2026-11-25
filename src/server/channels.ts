@@ -25,6 +25,7 @@ import type {
   InboundMessage,
   InboundReaction,
   MessagingAttachment,
+  MessagingChannel,
   MessagingTransport,
 } from '../ports/messaging.ts';
 import type { ChatConfirmationInput } from './approvals.ts';
@@ -145,7 +146,7 @@ interface ChannelOptions {
     expiredConfirmation: string,
   ) => Promise<'new' | 'stale' | 'uncertain'>;
   attributeMediaUsage?(client: PoolClient, ids: string[], turnId: string): Promise<void>;
-  pair?: (request: ChannelPairingRequest) => Promise<unknown>;
+  pair?: (request: ChannelPairingRequest, signal: AbortSignal) => Promise<boolean>;
   activeThread?: (client: PoolClient) => Promise<{ id: string }>;
   activity?: () => Promise<LiveWork[]>;
   commandReply?: (
@@ -329,7 +330,13 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     ...channel,
     allowedSenderIds: [...channel.allowedSenderIds],
   }));
-  let configuration = channels.map((channel) => ({
+  let configuration: Array<{
+    provider: string;
+    status: MessagingChannel['status'];
+    missing: string[];
+    available?: boolean;
+    error?: string;
+  }> = channels.map((channel) => ({
     provider: channel.id,
     status: channel.status,
     missing: channel.missing,
@@ -558,6 +565,41 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
         channel.accountId === row.account_id &&
         channel.allowedSenderIds.includes(row.sender_id),
     );
+  }
+
+  function owned(row: ChannelIdentity) {
+    updateConfiguration();
+    const channel = channels.find((item) => item.id === row.provider);
+    if (!channel || channel.status === 'disabled') return false;
+    return channel.allowedSenderIds.length && channel.accountId
+      ? permitted(row)
+      : channel.status === 'setup_required';
+  }
+
+  async function recentOwners(client: Pool | PoolClient, submitted: boolean) {
+    const rows = await client.query<ChannelIdentity & { channel: string; at: Date }>(
+      `SELECT provider,account_id,sender_id,channel,max(created_at) AS at FROM channel_inbox
+       WHERE owner_id=$1 AND channel IS NOT NULL ${submitted ? "AND state='submitted'" : ''}
+       GROUP BY provider,account_id,sender_id,channel ORDER BY max(created_at) DESC LIMIT 20`,
+      [ownerId],
+    );
+    return rows.rows.filter(owned);
+  }
+
+  async function status() {
+    const recent = await recentOwners(pool, false);
+    return configuration.map((channel) => ({
+      ...channel,
+      ownerLinked: Boolean(
+        channels.find((item) => item.id === channel.provider)?.allowedSenderIds.length,
+      ),
+      lastMessageAt:
+        recent.find((row) => row.provider === channel.provider)?.at.toISOString() ?? null,
+    }));
+  }
+
+  async function ownerChannel(client: Pool | PoolClient = pool) {
+    return (await recentOwners(client, true))[0]?.channel ?? 'web';
   }
 
   async function accept(message: InboundMessage, channelId: string) {
@@ -851,7 +893,6 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     const identity = { provider: channelId, account_id: accountId, sender_id: senderId };
     if (closed || replacing) return;
     if (!permitted(identity)) return dropped('not_linked');
-    if (sentAt.getTime() > Date.now() + 300000) return dropped('future_timestamp');
     let media: Awaited<ReturnType<ChannelMedia['prepare']>> | undefined;
     try {
       const sourceId = `channel:${channelId}:${accountId}:${messageId}`;
@@ -1179,45 +1220,45 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
 
   async function completePairing(request: ChannelPairingRequest) {
     if (closed || !options.pair) return;
+    const current = transport;
     try {
-      await options.pair(request);
+      if (!(await options.pair(request, receiving.signal))) return;
     } catch (cause) {
       logFailure('channel_pairing_failed', cause);
       throw Object.assign(new Error('Channel processing is temporarily unavailable. Try again.'), {
         statusCode: 503,
       });
     }
+    if (closed || replacing || transport !== current) return;
+    transport.link?.(request);
+    updateConfiguration();
+    await announcePairing(request).catch((cause) =>
+      logFailure('channel_pairing_notice_failed', cause),
+    );
   }
 
-  async function announcePairing(
-    request: {
-      senderId: string;
-      accountId: string;
-      messageId: string;
-      threadId: string;
-      sentAt: string;
-    },
-    client: PoolClient,
-  ) {
+  async function announcePairing(request: ChannelPairingRequest) {
     const identity = {
-      provider: 'telegram',
+      provider: request.channelId,
       account_id: request.accountId,
       sender_id: request.senderId,
     };
-    await replyWithoutTurn(
-      client,
-      {
-        ...identity,
-        sourceId: `channel:telegram:${request.accountId}:${request.messageId}`,
-        threadId: request.threadId,
-        sentAt: request.sentAt,
-        text: '/start',
-      },
-      () => ({ text: '', presentation: { kind: 'paired', channel: 'telegram' } }),
+    await transaction(
+      (client) =>
+        replyWithoutTurn(
+          client,
+          {
+            ...identity,
+            sourceId: `channel:${request.channelId}:${request.accountId}:${request.messageId}`,
+            threadId: request.threadId,
+            sentAt: request.sentAt,
+            text: '',
+          },
+          () => ({ text: '', presentation: { kind: 'paired', channel: request.channelId } }),
+        ),
+      pool,
     );
-    return () => {
-      void drain();
-    };
+    void drain();
   }
 
   async function inboxStep() {
@@ -2511,6 +2552,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
   const unsubscribe = options.subscribe(() => {
     void drain();
   });
+  transport.onInput?.(() => void drain());
   const timer = setInterval(() => {
     void drain();
   }, options.intervalMs ?? 2000);
@@ -2542,6 +2584,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       await Promise.allSettled(pendingMedia.values());
       await transport.close();
       transport = next;
+      next.onInput?.(() => void drain());
       confirmedProgress.clear();
       modes.clear();
       mainTopicRetry.clear();
@@ -2569,9 +2612,8 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
   function registerRoutes(app: FastifyInstance) {
     app.addHook('onClose', close);
     app.get('/api/channels', async () => {
-      updateConfiguration();
       return {
-        channels: configuration,
+        channels: await status(),
         error: lastError,
         inbox: (
           await pool.query(
@@ -2644,7 +2686,8 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
         (transport.canDeliverLiteral?.({ channelId, text, literal }) ?? false)
       );
     },
-    announcePairing,
+    ownerChannel,
+    status,
     react,
     renameTopic,
     async notice(

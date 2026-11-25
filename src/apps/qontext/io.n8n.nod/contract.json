@@ -1,0 +1,36 @@
+{
+  "$schema": "https://nod.n8n.io/docs/schemas/apps/v1/contract.schema.json",
+  "type": "mcp",
+  "source": "https://docs.qontext.ai/interfaces/MCP",
+  "tool": {
+    "name": "retrieval-tool",
+    "description": "Retrieves information from the context workspace. Phrase the query as a qualitative question to answer.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 100
+        },
+        "includeSources": {
+          "type": "boolean"
+        }
+      },
+      "required": ["query"]
+    },
+    "annotations": {
+      "readOnlyHint": true
+    }
+  },
+  "input": {
+    "query": "What are the renewal terms for Example Corp?",
+    "limit": 3
+  },
+  "output": {
+    "context": "Example Corp renews every 12 months with net 30 payment terms."
+  }
+}

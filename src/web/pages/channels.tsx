@@ -12,11 +12,12 @@ import {
   UserRound,
 } from '../components/icons';
 import { IntegrationCard } from '../components/integration-card';
-import { TelegramSetup } from '../components/telegram-setup';
+import { TelegramLink, TelegramSetup } from '../components/telegram-setup';
 import { WhatsAppSetup } from '../components/whatsapp-setup';
 import type { ChannelProvider, ChannelSetupSummary } from '../../shared/contracts';
 import { telegramState, useChannelSettings } from '../hooks/use-channel-settings';
 import { channelSetupBody, telegramBotUrl } from '../lib/secondary-pages';
+import { formatDateTime } from '../lib/date-format';
 import {
   Button,
   Checkbox,
@@ -241,6 +242,7 @@ function ChannelCard({
   onReconnect,
   available,
   error,
+  lastMessageAt,
 }: {
   provider: (typeof providers)[number];
   setup?: ChannelSetupSummary;
@@ -252,6 +254,7 @@ function ChannelCard({
   onReconnect(): void;
   available?: boolean;
   error?: string;
+  lastMessageAt?: string | null;
 }) {
   const comingSoon = 'comingSoon' in provider;
   const needsDelivery = Boolean(
@@ -261,7 +264,7 @@ function ChannelCard({
   );
   const needsPairing = Boolean(
     setup?.enabled &&
-    ((provider.id === 'telegram' && (!setup.allowedUserId || setup.pairingExpiresAt)) ||
+    ((provider.id === 'telegram' && !setup.allowedUserId) ||
       (setup.mode === 'linked' && setup.connectionState !== 'connected')),
   );
   const retrying =
@@ -299,11 +302,17 @@ function ChannelCard({
       logo={<img src={`/logos/${provider.id}.svg`} alt="" width={24} height={24} />}
       description={provider.description}
       detail={
-        error
-          ? `${setup?.managed ? 'Managed by your server. ' : ''}${error}`
-          : setup?.managed
-            ? 'Managed by your server'
-            : undefined
+        [
+          setup?.managed ? 'Managed by your server.' : '',
+          error ||
+            (connected && !needsDelivery && !needsPairing && lastMessageAt !== undefined
+              ? lastMessageAt
+                ? `Last message from you: ${formatDateTime(lastMessageAt)}.`
+                : 'No message from you yet.'
+              : ''),
+        ]
+          .filter(Boolean)
+          .join(' ') || undefined
       }
       badge={
         status && (
@@ -396,7 +405,7 @@ export function Channels() {
     setPairingUrl,
     load,
     save,
-    telegramAction: telegramRequest,
+    pairingLink,
     remove,
     reconnect,
   } = useChannelSettings({
@@ -407,7 +416,6 @@ export function Channels() {
   const [fields, setFields] = useState<Record<string, string>>({});
   const whatsappCloud = fields.connection === 'cloud';
   const [policy, setPolicy] = useState(false);
-  const [manualId, setManualId] = useState(false);
   const [resuming, setResuming] = useState(false);
   const [removing, setRemoving] = useState<ChannelProvider | null>(null);
   const [removeError, setRemoveError] = useState('');
@@ -429,6 +437,7 @@ export function Channels() {
       connected: Boolean(setup?.enabled || configured),
       available: live?.available,
       error: live?.error,
+      lastMessageAt: live?.lastMessageAt,
     };
   });
   const telegramSetup = channels[0].setup;
@@ -442,10 +451,8 @@ export function Channels() {
           telegramSetup?.enabled,
           telegramSetup?.webhookStatus,
           telegramSetup?.allowedUserId,
-          telegramSetup?.pairingCandidate?.id,
           telegramWaiting,
           pairingUrl,
-          manualId,
         ].join(':');
   const connected = channels.filter((channel) => channel.connected);
   const available = channels.filter((channel) => !channel.connected);
@@ -462,7 +469,6 @@ export function Channels() {
     setStep(0);
     setError('');
     setPairingUrl(null);
-    setManualId(false);
   }
   function open(provider: ChannelProvider) {
     setupTrigger.current =
@@ -487,14 +493,9 @@ export function Channels() {
       else if (result.ok || result.channel?.enabled) setFields({});
     } else if (result.ok) close();
   }
-  async function telegramAction(action: 'pairing' | 'confirm' | 'user', body: object = {}) {
+  async function newTelegramLink() {
     if (busy || !settings?.ready) return;
-    if (!(await telegramRequest(action, body))) return;
-    if (action !== 'pairing') {
-      close();
-      return;
-    }
-    setManualId(false);
+    if (!(await pairingLink('telegram'))) return;
     setFields({});
     setEditing('telegram');
   }
@@ -503,7 +504,6 @@ export function Channels() {
     setupTrigger.current =
       document.activeElement instanceof HTMLButtonElement ? document.activeElement : null;
     setError('');
-    setManualId(false);
     setEditing('telegram');
     setResuming(true);
     try {
@@ -512,8 +512,7 @@ export function Channels() {
       const state = telegramState(
         latest.channels.find((channel) => channel.provider === 'telegram'),
       );
-      if (state.saved && !state.paired && (!state.candidate || !state.waiting))
-        await telegramAction('pairing');
+      if (state.saved && !state.paired && !state.waiting) await newTelegramLink();
     } finally {
       setResuming(false);
     }
@@ -740,6 +739,23 @@ export function Channels() {
                   </div>
                 </div>
               )}
+              {editing === 'telegram' &&
+                !telegramSetup?.managed &&
+                (telegramStatus.waiting && pairingUrl ? (
+                  <TelegramLink url={pairingUrl} title="Scan to link another Telegram account">
+                    Open the bot from the account you want to use and press <strong>Start</strong>.
+                    It replaces the current account. The code works for 15 minutes.
+                  </TelegramLink>
+                ) : (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => void pairingLink('telegram')}
+                  >
+                    Link another account
+                  </Button>
+                ))}
               {editing === 'telegram' && telegramUrl ? (
                 <TelegramChat key={telegramUrl} url={telegramUrl} />
               ) : editing === 'whatsapp' ? (
@@ -768,23 +784,13 @@ export function Channels() {
               <TelegramSetup
                 setup={telegramSetup}
                 pairingUrl={pairingUrl}
-                manual={manualId}
                 fields={fields}
                 busy={busy || resuming}
                 error={error || loadError}
                 unavailable={!settings?.ready}
                 onField={(name, value) => setFields((current) => ({ ...current, [name]: value }))}
                 onVerify={(event) => void submit(event)}
-                onConfirm={() => void telegramAction('confirm')}
-                onNewLink={() => void telegramAction('pairing')}
-                onManual={(value) => {
-                  setError('');
-                  setManualId(value);
-                }}
-                onSaveId={(event) => {
-                  event.preventDefault();
-                  void telegramAction('user', { allowedUserId: fields.allowedUserId?.trim() });
-                }}
+                onNewLink={() => void newTelegramLink()}
               />
               <div className="channel-wizard-actions">
                 {telegramSetup?.enabled && (
@@ -836,6 +842,7 @@ export function Channels() {
                   setStep(0);
                 }}
                 onDone={close}
+                onPhone={selected?.setup?.managed ? undefined : () => pairingLink('whatsapp')}
               />
             </>
           ) : (

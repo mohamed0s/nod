@@ -61,6 +61,7 @@ export function createDesktopLifecycle({
       phase: 'error',
       message: error.message,
       details: startupErrorDetails(error),
+      failure: error,
       needsRuntimeArchive: error.code === 'RUNTIME_ARCHIVE_REQUIRED',
       needsWsl: error.code === 'NOD_WSL_REQUIRED',
       needsStorage: error.code === 'NOD_COMPUTER_STORAGE_FULL',
@@ -117,7 +118,8 @@ export function createDesktopLifecycle({
         return runtime;
       })
       .catch((error) => {
-        if (error.code === 'NOD_RUNTIME_STOP_FAILED') cleanupRequired = true;
+        if ([error.code, error.cause?.code].includes('NOD_RUNTIME_STOP_FAILED'))
+          cleanupRequired = true;
         runtimeFailure(error);
         throw error;
       })

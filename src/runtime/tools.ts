@@ -69,6 +69,7 @@ export const nodActions = [
   'schedule_pause',
   'schedule_record_observation',
   'usage_get',
+  'channels_get',
   'prepared_list',
   'prepared_update',
   'limits_update',
@@ -364,6 +365,7 @@ export const toolDefinitions = {
       messageId: Type.String({ pattern: '^[0-9a-fA-F-]{36}$' }),
       reaction: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
     }),
+    true,
   ),
   browser: defineTool(
     'browser',
@@ -638,7 +640,7 @@ export const toolDefinitions = {
   ),
   nod: defineTool(
     'nod',
-    "Nod's own docs, schedules, models, usage, limits, prepared work and bug reports. Read current values before a change. Change only the requested fields.\ndocs_search {query} searches Nod's shipped documentation with English keywords and returns sections with source links; docs_read {id,offset?} reads one, following nextOffset. Docs describe the shipped build, not live settings.\nprepared_list {id?|query?} reads complete prepared work and sources; {} lists it. Read before acting and show its draft when asked. prepared_update {id,action,minutes?} records an owner request to snooze, handle, dismiss, or give useful/not_useful feedback.\nmodels_get {} lists models with prices per 1M tokens, the light model, and which work uses its own model. model_select {scope?,id?,connectionId,modelId,effort?} or {scope,id?,use} chooses the model for the next turn of that work: scope chat (default; when the owner talks to you), schedules, background (work you start on your own), or one schedule or task with id. use:light picks the light model of that connection for schedules or background; use:same returns the work to its default. Change a model only when the owner asks; the result has its 30-day cost effect. Model connections need private Settings sign-in.\nschedule_list {} reads current schedules; use it before saying none is active or will act on a file. schedule_create {title,prompt,timeZone,kind:once|recurring,cron?,runAt?,baselineObservation?,watch?,model?}: recurring needs a five-field cron, once a future runAt with offset; baselineObservation is {status:verified,sourceUrl,value,summary}; watch lists manage_apps connectionIds whose changes alone make a run useful; model {connectionId,modelId,effort} only when the owner asks for one. schedule_update {id,...changed fields,enabled?,watch?|null}. schedule_pause {id} disables a schedule without deleting it. After pausing a schedule that was active, Scheduled labels it Paused and it can be resumed; a completed one-time schedule retains its last-run status. schedule_record_observation {status,sourceUrl,value,summary} records a scheduled check; value is null when unavailable.\nusage_get {} reads spend and recent activity; planUsd is ChatGPT plan usage at API prices, not charged; unpriced usage has no price in Nod and is not counted. usage_get {from,to?} (YYYY-MM-DD, owner time, to defaults to from) lists what Nod did on those days: each request or run with its actions in apps, websites, local files and Nod settings, the owner words that allowed each, and sign-ins and card submissions. Answer what you did only from this list; complete false means it was cut, so narrow the days. limits_update {monthlyUsd?,taskUsd?,preparationUsd?} changes requested limits; values are at least 1 USD. Only monthlyUsd and taskUsd accept null to remove the limit.\nbug_report_draft {summary} shows the owner a bug report for the Nod team with a Send report button: write what they were doing, what went wrong and any error, in their language, without secrets. bug_report_send {} sends the draft the owner replied to, or the latest unsent one, as text only, and only after they reply to send it.",
+    "Nod's own docs, schedules, models, usage, chat apps, limits, prepared work and bug reports. Read current values before a change. Change only the requested fields.\ndocs_search {query} searches Nod's shipped documentation with English keywords and returns sections with source links; docs_read {id,offset?} reads one, following nextOffset. Docs describe the shipped build, not live settings.\nprepared_list {id?|query?} reads complete prepared work and sources; {} lists it. Read before acting and show its draft when asked. prepared_update {id,action,minutes?} records an owner request to snooze, handle, dismiss, or give useful/not_useful feedback.\nmodels_get {} lists models with prices per 1M tokens, the light model, and which work uses its own model. model_select {scope?,id?,connectionId,modelId,effort?} or {scope,id?,use} chooses the model for the next turn of that work: scope chat (default; when the owner talks to you), schedules, background (work you start on your own), or one schedule or task with id. use:light picks the light model of that connection for schedules or background; use:same returns the work to its default. Change a model only when the owner asks; the result has its 30-day cost effect. Model connections need private Settings sign-in.\nschedule_list {} reads current schedules; use it before saying none is active or will act on a file. schedule_create {title,prompt,timeZone,kind:once|recurring,cron?,runAt?,baselineObservation?,watch?,model?}: recurring needs a five-field cron, once a future runAt with offset; baselineObservation is {status:verified,sourceUrl,value,summary}; watch lists manage_apps connectionIds whose changes alone make a run useful; model {connectionId,modelId,effort} only when the owner asks for one. schedule_update {id,...changed fields,enabled?,watch?|null}. schedule_pause {id} disables a schedule without deleting it. After pausing a schedule that was active, Scheduled labels it Paused and it can be resumed; a completed one-time schedule retains its last-run status. schedule_record_observation {status,sourceUrl,value,summary} records a scheduled check; value is null when unavailable.\nusage_get {} reads spend and recent activity; planUsd is ChatGPT plan usage at API prices, not charged; unpriced usage has no price in Nod and is not counted. usage_get {from,to?} (YYYY-MM-DD, owner time, to defaults to from) lists what Nod did on those days: each request or run with its actions in apps, websites, local files and Nod settings, the owner words that allowed each, and sign-ins and card submissions. Answer what you did only from this list; complete false means it was cut, so narrow the days. channels_get {} reads Telegram and WhatsApp: whether each is connected, its error, and when the owner last wrote from it. Read it before saying a chat app works or doesn't. limits_update {monthlyUsd?,taskUsd?,preparationUsd?} changes requested limits; values are at least 1 USD. Only monthlyUsd and taskUsd accept null to remove the limit.\nbug_report_draft {summary} shows the owner a bug report for the Nod team with a Send report button: write what they were doing, what went wrong and any error, in their language, without secrets. bug_report_send {} sends the draft the owner replied to, or the latest unsent one, as text only, and only after they reply to send it.",
     Type.Object({
       action: literals(nodActions),
       args: Type.Record(Type.String(), Type.Unknown()),
@@ -713,6 +715,7 @@ export const toolDefinitions = {
         { additionalProperties: false },
       ),
     ]),
+    true,
   ),
   jobs: defineTool('jobs', jobsToolHelp, jobsToolParameters),
   pages: defineTool('pages', pagesToolDescription, pagesToolParameters),
@@ -1057,7 +1060,6 @@ export function nodTools(
     if (appConfirmation in verdict) return { output: await confirm(verdict) };
     return { output: verdict.result };
   };
-  const work = Boolean(context.taskContext || context.background);
   return [
     ...(context.proactivity
       ? [
@@ -1146,10 +1148,6 @@ export function nodTools(
             JSON.stringify(await context.manage('skill_read', { name: p.name })),
           );
         }
-        if (turn.execution.parentRunId)
-          throw new Error(
-            'A subagent cannot save skills. Include what you learned in your answer to the parent agent.',
-          );
         const { action, ...args } = p;
         return context.manage(`skill_${action}`, { action, ...args });
       }),
@@ -1214,179 +1212,162 @@ export function nodTools(
         };
       return context.reactToMessage(p.messageId, p.reaction);
     }),
-    ...(work
-      ? [
-          bind(toolDefinitions.browser, async ({ action, name, ...rest }) => {
-            if (action === 'handoff') {
-              if (turn.execution.parentRunId)
-                throw new Error(
-                  'Return the browser blocker to the parent agent. A subagent cannot hand over its browser.',
-                );
-              const text = rest.text?.trim();
-              if (!text) throw new Error('Say what the user needs to do on the current page.');
-              await computer.currentPage(browserId);
-              signal.throwIfAborted();
-              await pause('browser', text);
-              return 'The browser is in chat. Wait for the user to return control.';
-            }
-            if (action === 'screenshot') {
-              const bytes = await screenshot();
-              if (!bytes) return 'Open a browser URL first.';
-              return {
-                content: [{ type: 'image', data: bytes.toString('base64'), mimeType: 'image/png' }],
-                details: {},
-              };
-            }
-            if (action === 'share_screenshot') {
-              if (!context.publishScreenshot)
-                throw new Error('Screenshot publishing is unavailable.');
-              const bytes = await screenshot();
-              if (!bytes) throw new Error('The browser does not have an available screenshot.');
-              return {
-                ...(await context.publishScreenshot(bytes, name)),
-                delivery:
-                  'Captured and staged for your next message or turn completion. Use this id in an image or booking presentation; do not share the file again.',
-              };
-            }
-            if (action === 'download') {
-              if (!context.publishBrowserFile)
-                throw new Error('Browser file delivery is unavailable.');
-              let file;
-              try {
-                file = await computer.download(
-                  browserId,
-                  { selector: rest.selector, url: rest.url, name },
-                  signal,
-                );
-              } catch (error) {
-                if (!(
-                  error instanceof BrowserActionError && error.code === 'browser_download_control'
-                ))
-                  throw error;
-                const checked = await check({ action: 'click', selector: rest.selector });
-                if ('output' in checked) return checked.output;
-                file = await computer.download(
-                  browserId,
-                  { selector: rest.selector, name, ...checked.binding },
-                  signal,
-                );
-                await checked.record?.();
-              }
-              signal.throwIfAborted();
-              if (!file.bytes.length || file.bytes.length > fileBytes)
-                throw new Error('Browser file delivery exceeds the download limit.');
-              return context.publishBrowserFile(file);
-            }
-            if (action === 'upload') {
-              if (!context.readWorkspaceFile)
-                throw new Error('Browser file upload is unavailable.');
-              if (!rest.selector || !rest.path) throw new Error('Choose a file and upload field.');
-              const bytes = await context.readWorkspaceFile(rest.path, fileBytes);
-              const checked = await check({ action, selector: rest.selector, path: rest.path });
-              if ('output' in checked) return checked.output;
-              const page = await computer.upload(
-                browserId,
-                { selector: rest.selector, name: basename(rest.path), bytes, ...checked.binding },
-                signal,
-              );
-              await checked.record?.();
-              return observed({ action }, page);
-            }
-            const step = { action, ...rest } as BrowserAction;
-            if (action === 'evaluate' && context.browserStep)
-              try {
-                return observed(
-                  step,
-                  await computer.act(browserId, { ...step, readOnly: true }, signal),
-                );
-              } catch (error) {
-                if (!(
-                  error instanceof BrowserActionError && error.code === 'browser_script_writes'
-                ))
-                  throw error;
-              }
-            const checked =
-              commits(step) || (context.checkTyping && ['fill', 'type'].includes(step.action))
-                ? await check(step)
-                : { binding: {} };
-            if ('output' in checked) return checked.output;
-            const page = await computer.act(browserId, { ...step, ...checked.binding }, signal);
-            if ('record' in checked) await checked.record?.();
-            return observed(step, page, checked.choice);
-          }),
-          bind(toolDefinitions.sign_in, async ({ message, action, ...request }) => {
-            const result = await context.requestCredential(request);
-            if (appConfirmation in result) return confirm(result);
-            if ('filled' in result) {
-              signal.throwIfAborted();
-              try {
-                return {
-                  filled: true,
-                  observation: observed(
-                    { action: 'snapshot' },
-                    await computer.act(browserId, { action: 'snapshot' }, signal),
-                  ),
-                };
-              } catch {
-                signal.throwIfAborted();
-                return { filled: true };
-              }
-            }
-            await pause(
-              'credentials',
-              vaultInvitation(request.origin, result.url, message, action),
+    bind(toolDefinitions.browser, async ({ action, name, ...rest }) => {
+      if (action === 'handoff') {
+        if (turn.execution.parentRunId)
+          throw new Error(
+            'Return the browser blocker to the parent agent. A subagent cannot hand over its browser.',
+          );
+        const text = rest.text?.trim();
+        if (!text) throw new Error('Say what the user needs to do on the current page.');
+        await computer.currentPage(browserId);
+        signal.throwIfAborted();
+        await pause('browser', text);
+        return 'The browser is in chat. Wait for the user to return control.';
+      }
+      if (action === 'screenshot') {
+        const bytes = await screenshot();
+        if (!bytes) return 'Open a browser URL first.';
+        return {
+          content: [{ type: 'image', data: bytes.toString('base64'), mimeType: 'image/png' }],
+          details: {},
+        };
+      }
+      if (action === 'share_screenshot') {
+        if (!context.publishScreenshot) throw new Error('Screenshot publishing is unavailable.');
+        const bytes = await screenshot();
+        if (!bytes) throw new Error('The browser does not have an available screenshot.');
+        return {
+          ...(await context.publishScreenshot(bytes, name)),
+          delivery:
+            'Captured and staged for your next message or turn completion. Use this id in an image or booking presentation; do not share the file again.',
+        };
+      }
+      if (action === 'download') {
+        if (!context.publishBrowserFile) throw new Error('Browser file delivery is unavailable.');
+        let file;
+        try {
+          file = await computer.download(
+            browserId,
+            { selector: rest.selector, url: rest.url, name },
+            signal,
+          );
+        } catch (error) {
+          if (!(error instanceof BrowserActionError && error.code === 'browser_download_control'))
+            throw error;
+          const checked = await check({ action: 'click', selector: rest.selector });
+          if ('output' in checked) return checked.output;
+          file = await computer.download(
+            browserId,
+            { selector: rest.selector, name, ...checked.binding },
+            signal,
+          );
+          await checked.record?.();
+        }
+        signal.throwIfAborted();
+        if (!file.bytes.length || file.bytes.length > fileBytes)
+          throw new Error('Browser file delivery exceeds the download limit.');
+        return context.publishBrowserFile(file);
+      }
+      if (action === 'upload') {
+        if (!context.readWorkspaceFile) throw new Error('Browser file upload is unavailable.');
+        if (!rest.selector || !rest.path) throw new Error('Choose a file and upload field.');
+        const bytes = await context.readWorkspaceFile(rest.path, fileBytes);
+        const checked = await check({ action, selector: rest.selector, path: rest.path });
+        if ('output' in checked) return checked.output;
+        const page = await computer.upload(
+          browserId,
+          { selector: rest.selector, name: basename(rest.path), bytes, ...checked.binding },
+          signal,
+        );
+        await checked.record?.();
+        return observed({ action }, page);
+      }
+      const step = { action, ...rest } as BrowserAction;
+      if (action === 'evaluate' && context.browserStep)
+        try {
+          return observed(step, await computer.act(browserId, { ...step, readOnly: true }, signal));
+        } catch (error) {
+          if (!(error instanceof BrowserActionError && error.code === 'browser_script_writes'))
+            throw error;
+        }
+      const checked =
+        commits(step) || (context.checkTyping && ['fill', 'type'].includes(step.action))
+          ? await check(step)
+          : { binding: {} };
+      if ('output' in checked) return checked.output;
+      const page = await computer.act(browserId, { ...step, ...checked.binding }, signal);
+      if ('record' in checked) await checked.record?.();
+      return observed(step, page, checked.choice);
+    }),
+    bind(toolDefinitions.sign_in, async ({ message, action, ...request }) => {
+      const result = await context.requestCredential(request);
+      if (appConfirmation in result) return confirm(result);
+      if ('filled' in result) {
+        signal.throwIfAborted();
+        try {
+          return {
+            filled: true,
+            observation: observed(
+              { action: 'snapshot' },
+              await computer.act(browserId, { action: 'snapshot' }, signal),
+            ),
+          };
+        } catch {
+          signal.throwIfAborted();
+          return { filled: true };
+        }
+      }
+      await pause('credentials', vaultInvitation(request.origin, result.url, message, action));
+      return 'Waiting for secure input.';
+    }),
+    bind(toolDefinitions.pay, async (p) => {
+      if (!context.requestPayment) throw new Error('Payments are unavailable.');
+      const result = await context.requestPayment(p);
+      await pause(
+        'credentials',
+        result.url
+          ? paymentInvitation(result.url, result.question, result.action)
+          : paymentExplanation(result.question),
+      );
+      return 'Waiting for private payment approval.';
+    }),
+    bind(toolDefinitions.browser_session, async (p) => {
+      if (!context.browserConnection) throw new Error('Browser connections are unavailable.');
+      const outcome = await context.browserConnection(p);
+      if (outcome && typeof outcome === 'object' && appConfirmation in outcome)
+        return confirm(outcome);
+      const result = outcome as Record<string, unknown>;
+      if (result.status === 'rejected') {
+        switch (result.code) {
+          case 'invalid_browser_connection_arguments':
+            throw new Error(
+              'Invalid browser session input. Valid forms: connect {url, label?}; use {url, connectionId}; save {url, connectionId, signedIn:true}.',
             );
-            return 'Waiting for secure input.';
-          }),
-          bind(toolDefinitions.pay, async (p) => {
-            if (!context.requestPayment) throw new Error('Payments are unavailable.');
-            const result = await context.requestPayment(p);
-            await pause(
-              'credentials',
-              result.url
-                ? paymentInvitation(result.url, result.question, result.action)
-                : paymentExplanation(result.question),
+          case 'browser_connection_origin_mismatch':
+            throw new Error(
+              'This browser connection belongs to a different website. Use a saved connection for the current origin.',
             );
-            return 'Waiting for private payment approval.';
-          }),
-          bind(toolDefinitions.browser_session, async (p) => {
-            if (!context.browserConnection) throw new Error('Browser connections are unavailable.');
-            const outcome = await context.browserConnection(p);
-            if (outcome && typeof outcome === 'object' && appConfirmation in outcome)
-              return confirm(outcome);
-            const result = outcome as Record<string, unknown>;
-            if (result.status === 'rejected') {
-              switch (result.code) {
-                case 'invalid_browser_connection_arguments':
-                  throw new Error(
-                    'Invalid browser session input. Valid forms: connect {url, label?}; use {url, connectionId}; save {url, connectionId, signedIn:true}.',
-                  );
-                case 'browser_connection_origin_mismatch':
-                  throw new Error(
-                    'This browser connection belongs to a different website. Use a saved connection for the current origin.',
-                  );
-                case 'browser_connection_unavailable':
-                  throw new Error(
-                    'This browser connection is unavailable for the current task. List saved connections and inspect the current page before choosing one.',
-                  );
-                case 'browser_connection_busy':
-                  throw new Error(
-                    'This browser profile is open in another task, waiting for the user to finish signing in. Open public pages with browser instead, or try again later.',
-                  );
-                default:
-                  throw new Error(
-                    'The browser session request was rejected. Check the current page and saved connection before trying again.',
-                  );
-              }
-            }
-            if (p.action === 'connect' || result.status === 'needs_sign_in') {
-              const { url: _url, ...safe } = result;
-              return safe;
-            }
-            return result;
-          }),
-        ]
-      : []),
+          case 'browser_connection_unavailable':
+            throw new Error(
+              'This browser connection is unavailable for the current task. List saved connections and inspect the current page before choosing one.',
+            );
+          case 'browser_connection_busy':
+            throw new Error(
+              'This browser profile is open in another task, waiting for the user to finish signing in. Open public pages with browser instead, or try again later.',
+            );
+          default:
+            throw new Error(
+              'The browser session request was rejected. Check the current page and saved connection before trying again.',
+            );
+        }
+      }
+      if (p.action === 'connect' || result.status === 'needs_sign_in') {
+        const { url: _url, ...safe } = result;
+        return safe;
+      }
+      return result;
+    }),
     ...(context.localFiles
       ? [
           bind(toolDefinitions.files, async ({ action, ...args }) => {
@@ -1408,7 +1389,7 @@ export function nodTools(
           }),
         ]
       : []),
-    ...(context.computerUse && work && !turn.execution.parentRunId
+    ...(context.computerUse && !turn.execution.parentRunId
       ? [
           bind(toolDefinitions.computer, async ({ action, ...args }) => {
             const result = await context.integration(

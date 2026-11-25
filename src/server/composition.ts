@@ -679,15 +679,14 @@ export function createDefaultAdapters(
         if (
           configured.WHATSAPP_ENABLED !== 'true' ||
           configured.WHATSAPP_POLICY_CONFIRMED !== 'true' ||
-          (mode !== 'bot' && mode !== 'self-chat') ||
-          (mode === 'bot' && !/^\d{7,15}$/.test(configured.WHATSAPP_ALLOWED_NUMBER ?? ''))
+          !['linked', 'bot', 'self-chat'].includes(mode ?? '')
         )
           return createChatSdkTransport(pool, configured);
         return combineMessagingTransports(
           createChatSdkTransport(pool, { ...configured, WHATSAPP_ENABLED: 'false' }),
           createWhatsAppLinkedTransport({
-            mode,
-            allowedNumber: configured.WHATSAPP_ALLOWED_NUMBER,
+            allowedNumber: configured.WHATSAPP_ALLOWED_NUMBER || undefined,
+            allowedLid: configured.WHATSAPP_ALLOWED_LID || undefined,
             store: createChannelSessionStore({ pool, ownerId, keyStore }),
             onDrop: (drop) =>
               logFailure('channel_message_dropped', null, { provider: 'whatsapp', ...drop }),
@@ -944,10 +943,12 @@ async function initializeApplication(
     ? ledger.curator(adapters.onboardingCurator)
     : curator;
   void adapters.models?.setSelectionCheck(() =>
-    onboardingCurator.curate(
-      { task: 'check', instructions: 'Return only {"ok":true}.', input: {}, automatic: false },
-      AbortSignal.timeout(30_000),
-    ),
+    onboardingCurator.curate({
+      task: 'check',
+      instructions: 'Return only {"ok":true}.',
+      input: {},
+      automatic: false,
+    }),
   );
   const decisions = adapters.decisions && ledger.decisions(adapters.decisions);
   const review: ModelReview = async (instructions, input, signal, question, responseSchema) => {
@@ -1146,6 +1147,7 @@ async function initializeApplication(
     scheduler: boss,
     enqueueTurn,
     refresh,
+    ownerChannel: (client) => channels?.ownerChannel(client) ?? Promise.resolve('web'),
     retireScheduleConfirmations: (client, id, waitForSend) => {
       if (!retireScheduleConfirmations) throw new Error('Approvals are not ready.');
       return retireScheduleConfirmations(client, id, waitForSend);
@@ -2579,6 +2581,7 @@ async function initializeApplication(
         ? await adapters.models.automaticRequestsAllowed({ kind: 'background' }, true)
         : adapters.model.configured),
     redact: createTextRedactor(secrets),
+    ownerChannel: (client) => channels?.ownerChannel(client) ?? Promise.resolve('web'),
     sources: (client) => observations.sources(client),
     read: async (turn, input, signal) => {
       const source = (await observations.sources()).find(
@@ -3290,6 +3293,21 @@ async function initializeApplication(
         }
         if (action === 'memory_find' || action === 'memory_read')
           return agentMemory.read(turn.turnId, action, args);
+        if (action === 'channels_get')
+          return untrustedBlock(
+            'channels',
+            JSON.stringify(
+              (await channels?.status())?.map((channel) => ({
+                channel: channel.provider,
+                connected:
+                  channel.status === 'configured' &&
+                  channel.ownerLinked &&
+                  channel.available !== false,
+                ...(channel.error ? { error: channel.error } : {}),
+                lastMessageFromOwner: channel.lastMessageAt,
+              })) ?? [],
+            ),
+          );
         if (action === 'usage_get')
           return untrustedBlock(
             'usage',
@@ -3834,10 +3852,6 @@ async function initializeApplication(
         apply: async (environment) => {
           if (!channels) throw new Error('Messaging is not ready.');
           await channels.replaceTransport(setup.create(environment));
-        },
-        paired: async (candidate, client) => {
-          if (!channels) throw new Error('Messaging is not ready.');
-          return channels.announcePairing(candidate, client);
         },
         observed: () => {
           const consent = analytics.consent(ownerId);

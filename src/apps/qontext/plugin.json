@@ -1,0 +1,17 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "qontext",
+  "version": "1.0.0",
+  "description": "Search, read and update your company context in Qontext.",
+  "homepage": "https://qontext.ai",
+  "license": "Apache-2.0",
+  "extensions": {
+    "io.n8n.nod": {
+      "app": "./io.n8n.nod/app.json"
+    }
+  },
+  "author": {
+    "name": "n8n",
+    "url": "https://github.com/n8n-io/nod"
+  }
+}
