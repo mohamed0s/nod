@@ -179,7 +179,7 @@ export function createTasks(options: {
     const rows = (
       await client.query<Row>(
         `WITH ranked AS (
-           SELECT t.*,row_number() OVER (ORDER BY t.state='open' DESC,COALESCE(t.closed_at,t.updated_at) DESC,t.id) AS position
+           SELECT t.*,row_number() OVER (ORDER BY t.state='open' DESC,t.archived_at IS NULL DESC,COALESCE(t.closed_at,t.updated_at) DESC,t.id) AS position
            FROM tasks t LEFT JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
            WHERE t.owner_id=$1 AND ($2::uuid IS NULL OR t.id=$2) AND ($3 OR t.state='open')
              AND ($4::uuid IS NULL OR u.thread_id=$4)
