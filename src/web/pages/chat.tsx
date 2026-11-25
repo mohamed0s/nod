@@ -55,7 +55,7 @@ import { LiveLine } from '../components/live-line';
 import { TaskChip, TaskLine, TaskStackCard } from '../components/task-stack';
 import { TaskCard } from './tasks';
 import { MainChatModel, NewChatModel, TaskChatModel } from '../components/chat-model';
-import { NewAgentChat, TaskChatAgent } from '../components/chat-agent';
+import { BotWelcome, TaskChatAgent } from '../components/chat-agent';
 import { RoomHeader } from '../components/chat-room';
 import { recordingSource } from '../lib/recording';
 import { money } from '../lib/money';
@@ -344,6 +344,7 @@ export function Chat({
   chatId,
   startsChat = false,
   chatAgent,
+  chatModel,
   browserLink = false,
   onOpenChat,
 }: {
@@ -366,6 +367,7 @@ export function Chat({
   chatId?: string;
   startsChat?: boolean;
   chatAgent?: string;
+  chatModel?: ModelSelection;
   browserLink?: boolean;
   onOpenChat?(id?: string, focus?: string): void;
 }) {
@@ -385,7 +387,7 @@ export function Chat({
   const [startedChat, setStartedChat] = useState<string>();
   const freshAgent = startsChat ? state.agents?.find((agent) => agent.id === chatAgent) : undefined;
   const [newChatModel, setNewChatModel] = useState<ModelSelection | null>(
-    () => freshAgent?.model ?? null,
+    () => chatModel ?? freshAgent?.model ?? null,
   );
   const { data: connections } = usePageData<Connection[]>('/api/apps');
   const { data: trust, refresh: refreshTrust } = usePageData<TrustView>('/api/trust');
@@ -2435,7 +2437,6 @@ export function Chat({
             )}
             {startsChat ? (
               <>
-                {freshAgent && <NewAgentChat agent={freshAgent} />}
                 <NewChatModel value={newChatModel} onChange={setNewChatModel} />
               </>
             ) : (
@@ -2493,7 +2494,15 @@ export function Chat({
               !welcoming &&
               !working &&
               !sending &&
-              (state.configuration.llmReady ? <Welcome /> : modelSetup)}
+              (state.configuration.llmReady ? (
+                freshAgent ? (
+                  <BotWelcome agent={freshAgent} />
+                ) : (
+                  <Welcome />
+                )
+              ) : (
+                modelSetup
+              ))}
             <div
               className="messages"
               role="log"

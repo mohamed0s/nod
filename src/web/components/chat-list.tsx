@@ -1,13 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Task } from '../../shared/contracts';
 import type { Agent } from '../../shared/agents';
+import type { ModelSelection } from '../../shared/models';
 import type { Room } from '../../shared/rooms';
 import { taskLabels } from '../../shared/task-status';
 import { api, errorMessage } from '../lib/api';
 import { captureAnalytics } from '../lib/analytics';
 import { ActionMenu, ActionMenuItem } from './action-menu';
-import { Bot, Ellipsis, MessageCircle, Plus } from './icons';
+import { BotPicture } from './bot-picture';
+import { Ellipsis, MessageCircle, Plus } from './icons';
 import { Button, Dialog, Input, Notice } from './ui';
+import { NewChatMenu } from './new-chat-menu';
+import { BotDialog } from './chat-agent';
 import { NewRoomDialog } from './chat-room';
 
 const groups = [
@@ -36,7 +40,7 @@ export function ChatList({
   freshAgent?: string;
   unread: Record<string, number>;
   onChat(id?: string): void;
-  onNewChat(agent?: string): void;
+  onNewChat(agent?: string, model?: ModelSelection | null): void;
   refresh(): Promise<void>;
 }) {
   const [closing, setClosing] = useState<string>();
@@ -49,6 +53,7 @@ export function ChatList({
   const items = useRef(new Map<string, HTMLButtonElement>());
   const renamed = useRef<string | undefined>(undefined);
   const [creatingRoom, setCreatingRoom] = useState(false);
+  const [creatingBot, setCreatingBot] = useState(false);
   const agentChats = new Set([
     ...agents.map((agent) => agent.chatId),
     ...rooms.map(({ id }) => id),
@@ -110,122 +115,139 @@ export function ChatList({
   }
   return (
     <nav className="chat-list" aria-label="Chats">
-      <Button
-        variant="outline"
-        size="sm"
-        className="chat-list-new"
-        aria-current={fresh ? 'page' : undefined}
-        onClick={() => onNewChat()}
-      >
-        <Plus size={16} aria-hidden="true" />
-        New chat
-      </Button>
+      <NewChatMenu
+        agents={agents}
+        fresh={fresh}
+        onChat={onChat}
+        onNewChat={onNewChat}
+        onNewBot={() => setCreatingBot(true)}
+      />
+      <Dialog open={creatingBot} onOpenChange={setCreatingBot}>
+        {creatingBot && (
+          <BotDialog
+            agents={agents}
+            onClose={() => setCreatingBot(false)}
+            onCreated={(id, model) => {
+              setCreatingBot(false);
+              onNewChat(id, model);
+            }}
+            refresh={refresh}
+          />
+        )}
+      </Dialog>
       <button
         type="button"
         className="chat-list-item"
-        aria-current={!chat && !fresh ? 'page' : undefined}
+        aria-current={!chat && !fresh && !freshAgent ? 'page' : undefined}
         onClick={() => onChat()}
       >
         <MessageCircle size={16} aria-hidden="true" />
         <span className="chat-list-title">Main</span>
       </button>
       {error && <Notice onDismiss={() => setError('')}>{error}</Notice>}
-      {agents.length > 0 && (
-        <section className="chat-list-group" aria-label="Agents">
-          <h2>Agents</h2>
-          <ul role="list">
-            {agents.map((agent) => {
-              const task = tasks.find((item) => item.id === agent.chatId);
-              return (
-                <li key={agent.id} className="chat-list-row">
-                  <button
-                    type="button"
-                    className="chat-list-item"
-                    aria-current={
-                      (agent.chatId ? chat === agent.chatId : freshAgent === agent.id)
-                        ? 'page'
-                        : undefined
-                    }
-                    title={agent.description || undefined}
-                    onClick={() => (agent.chatId ? onChat(agent.chatId) : onNewChat(agent.id))}
-                  >
-                    {task ? (
+      <section className="chat-list-group" aria-label="Bots">
+        <h2>Bots</h2>
+        <ul role="list">
+          {agents.map((agent) => {
+            const task = tasks.find((item) => item.id === agent.chatId);
+            return (
+              <li key={agent.id} className="chat-list-row">
+                <button
+                  type="button"
+                  className="chat-list-item"
+                  aria-current={
+                    (agent.chatId ? chat === agent.chatId : freshAgent === agent.id)
+                      ? 'page'
+                      : undefined
+                  }
+                  title={agent.description || undefined}
+                  onClick={() => (agent.chatId ? onChat(agent.chatId) : onNewChat(agent.id))}
+                >
+                  <span className="chat-list-bot">
+                    <BotPicture bot={agent} />
+                    {task && task.status !== 'done' && task.status !== 'cancelled' && (
                       <span
                         className="chat-list-dot"
                         data-status={task.status}
                         aria-hidden="true"
                       />
-                    ) : (
-                      <Bot size={16} aria-hidden="true" />
                     )}
-                    <span className="chat-list-title">{agent.name}</span>
-                    {task && <span className="sr-only">, {taskLabels[task.status]}</span>}
-                    {task && Boolean(unread[task.id]) && chat !== task.id && (
-                      <span className="chat-list-unread">
-                        {unread[task.id]! > 99 ? '99+' : unread[task.id]}
-                        <span className="sr-only"> unread</span>
-                      </span>
-                    )}
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        </section>
-      )}
-      {(agents.length > 0 || rooms.length > 0) && (
-        <section className="chat-list-group" aria-label="Rooms">
-          <h2>Rooms</h2>
-          <ul role="list">
-            {rooms.map((room) => {
-              const task = tasks.find((item) => item.id === room.id);
-              return (
-                <li key={room.id} className="chat-list-row">
-                  <button
-                    type="button"
-                    className="chat-list-item"
-                    aria-current={chat === room.id ? 'page' : undefined}
-                    title={room.members.map(({ name }) => name).join(', ') || undefined}
-                    onClick={() => onChat(room.id)}
-                  >
-                    <span className="chat-list-dot" data-status={task?.status} aria-hidden="true" />
-                    <span className="chat-list-title">{room.name}</span>
-                    {task && <span className="sr-only">, {taskLabels[task.status]}</span>}
-                    {Boolean(unread[room.id]) && chat !== room.id && (
-                      <span className="chat-list-unread">
-                        {unread[room.id]! > 99 ? '99+' : unread[room.id]}
-                        <span className="sr-only"> unread</span>
-                      </span>
-                    )}
-                  </button>
-                </li>
-              );
-            })}
-            <li className="chat-list-row">
-              <Dialog open={creatingRoom} onOpenChange={setCreatingRoom}>
+                  </span>
+                  <span className="chat-list-title">{agent.name}</span>
+                  {task && <span className="sr-only">, {taskLabels[task.status]}</span>}
+                  {task && Boolean(unread[task.id]) && chat !== task.id && (
+                    <span className="chat-list-unread">
+                      {unread[task.id]! > 99 ? '99+' : unread[task.id]}
+                      <span className="sr-only"> unread</span>
+                    </span>
+                  )}
+                </button>
+              </li>
+            );
+          })}
+          <li className="chat-list-row">
+            <button type="button" className="chat-list-item" onClick={() => setCreatingBot(true)}>
+              <Plus size={16} aria-hidden="true" />
+              <span className="chat-list-title">New bot</span>
+            </button>
+          </li>
+        </ul>
+      </section>
+      <section className="chat-list-group" aria-label="Rooms">
+        <h2>Rooms</h2>
+        <ul role="list">
+          {rooms.map((room) => {
+            const task = tasks.find((item) => item.id === room.id);
+            return (
+              <li key={room.id} className="chat-list-row">
                 <button
                   type="button"
                   className="chat-list-item"
-                  onClick={() => setCreatingRoom(true)}
+                  aria-current={chat === room.id ? 'page' : undefined}
+                  title={room.members.map(({ name }) => name).join(', ') || undefined}
+                  onClick={() => onChat(room.id)}
                 >
-                  <Plus size={16} aria-hidden="true" />
-                  <span className="chat-list-title">New room</span>
+                  <span className="chat-list-dot" data-status={task?.status} aria-hidden="true" />
+                  <span className="chat-list-title">{room.name}</span>
+                  {task && <span className="sr-only">, {taskLabels[task.status]}</span>}
+                  {Boolean(unread[room.id]) && chat !== room.id && (
+                    <span className="chat-list-unread">
+                      {unread[room.id]! > 99 ? '99+' : unread[room.id]}
+                      <span className="sr-only"> unread</span>
+                    </span>
+                  )}
                 </button>
-                {creatingRoom && (
-                  <NewRoomDialog
-                    agents={agents}
-                    onCreated={async (id) => {
-                      await refresh();
-                      setCreatingRoom(false);
-                      onChat(id);
-                    }}
-                  />
-                )}
-              </Dialog>
-            </li>
-          </ul>
-        </section>
-      )}
+              </li>
+            );
+          })}
+          <li className="chat-list-row">
+            <Dialog open={creatingRoom} onOpenChange={setCreatingRoom}>
+              <button
+                type="button"
+                className="chat-list-item"
+                onClick={() => setCreatingRoom(true)}
+              >
+                <Plus size={16} aria-hidden="true" />
+                <span className="chat-list-title">New room</span>
+              </button>
+              {creatingRoom && (
+                <NewRoomDialog
+                  agents={agents}
+                  onCreated={async (id) => {
+                    await refresh();
+                    setCreatingRoom(false);
+                    onChat(id);
+                  }}
+                  onNewBot={() => {
+                    setCreatingRoom(false);
+                    setCreatingBot(true);
+                  }}
+                />
+              )}
+            </Dialog>
+          </li>
+        </ul>
+      </section>
       {groups.map((group) => {
         const shown = open.filter((task) =>
           (group.statuses as readonly string[]).includes(task.status),

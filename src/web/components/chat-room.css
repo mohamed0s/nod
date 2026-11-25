@@ -9,11 +9,14 @@
 .chat-room-chip {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
   padding-inline-start: 8px;
   border: 1px solid var(--border);
   border-radius: 999px;
   color: var(--foreground);
+}
+.chat-room-chip:has(> .bot-picture) {
+  padding-inline-start: 4px;
 }
 .chat-room-add {
   width: auto;
