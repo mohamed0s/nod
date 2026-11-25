@@ -15,6 +15,7 @@ interface VerificationInput {
   sessionId?: string;
   verificationRequestId?: string;
   receiptOnly?: boolean;
+  newChat?: boolean;
   attachmentIds?: string[];
   signal?: AbortSignal;
   persistOrdinary?: (client: PoolClient) => Promise<void>;
@@ -259,6 +260,8 @@ export async function createChatVerification(
           input.sessionId ?? null,
         ],
       );
+      if (input.newChat && requests.rowCount)
+        throw conflict('Reply to the verification request you want to complete.');
       if (!requests.rowCount) {
         if (requestId) throw conflict(unavailableMessage);
         const waiting = (
