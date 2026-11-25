@@ -12,7 +12,13 @@ import rateLimit from '@fastify/rate-limit';
 import { randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import type { SpeechService } from './speech.ts';
-import { messageInput, registerAudioMessages } from './audio-messages.ts';
+import {
+  codeChat,
+  messageInput,
+  newChatOnly,
+  registerAudioMessages,
+  startsWithoutReply,
+} from './audio-messages.ts';
 import { messageTooLongError } from '../shared/message-limits.ts';
 import type { ServerResponse } from 'node:http';
 import { z } from 'zod';
@@ -589,6 +595,8 @@ export async function createApp(dependencies: AppDependencies = {}) {
   app.post('/api/messages', textMessageOptions, async (request) => {
     const arrival = stopSignal();
     const input = messageInput
+      .refine(startsWithoutReply)
+      .refine(newChatOnly)
       .refine((value) => value.text.length > 0 || value.attachmentIds.length > 0)
       .refine(
         (value) =>
@@ -625,6 +633,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
         : await dependencies.verification?.accept(input.text, {
             ...input,
             clientMessageId,
+            chat: codeChat(input),
             channel: 'web',
             signal,
           });
@@ -707,6 +716,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
                   text: event.text,
                   streamId: event.streamId,
                   done: event.done,
+                  taskId: event.taskId,
                 }
               : undefined;
       if (payload && !reply.raw.destroyed) reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);

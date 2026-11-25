@@ -816,8 +816,13 @@ test(
         )
       ).rows[0].count,
     });
-    const deltas: Array<{ turnId?: string; threadId?: string }> = [];
-    const onEvent = (event: { type: string; turnId?: string; threadId?: string }) => {
+    const deltas: Array<{ turnId?: string; threadId?: string; taskId?: string }> = [];
+    const onEvent = (event: {
+      type: string;
+      turnId?: string;
+      threadId?: string;
+      taskId?: string;
+    }) => {
       if (event.type === 'delta') deltas.push(event);
     };
     events.on('event', onEvent);
@@ -2539,6 +2544,21 @@ test(
             'confirmed',
           );
           await waitFor(settled(topicAnswered.turnId));
+          const streamedChat = randomUUID();
+          const streamed = await chatMessages.submit('Fresh conversation', [], {
+            sessionId: streamedChat,
+          });
+          await waitFor(settled(streamed.turnId));
+          assert.deepEqual(
+            [
+              ...new Set(
+                deltas
+                  .filter(({ turnId }) => turnId === streamed.turnId)
+                  .map(({ taskId }) => taskId),
+              ),
+            ],
+            [streamedChat],
+          );
         },
       );
 
@@ -2685,6 +2705,62 @@ test(
           assert.equal(ran(stopped.turnId), undefined);
         },
       );
+
+      await t.test('closed chats leave the 100-task window before any other task', async (t) => {
+        const current = (await thread.activeThread(db.pool)).id;
+        const [turn, kept] = [randomUUID(), randomUUID()];
+        t.after(async () => {
+          await db.pool.query('DELETE FROM tasks WHERE turn_id=$1', [turn]);
+          await db.pool.query('DELETE FROM turns WHERE id=$1', [turn]);
+        });
+        await db.pool.query(
+          "INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status) VALUES($1,$2,$3,$3,'user','Synthetic window','succeeded')",
+          [turn, ownerId, current],
+        );
+        await db.pool.query(
+          `INSERT INTO tasks(id,owner_id,turn_id,session_id,title,done_when,now_text,state,closed_at,archived_at)
+           SELECT CASE WHEN n=0 THEN $1::uuid ELSE gen_random_uuid() END,$2,$3,gen_random_uuid(),'Synthetic window task',
+             'Checked','Done','done',now()-interval '1 day'+n*interval '1 minute',CASE WHEN n>0 THEN now() END
+           FROM generate_series(0,100) n`,
+          [kept, ownerId, turn],
+        );
+        assert.ok((await tasks.read()).some(({ id }) => id === kept));
+      });
+
+      await t.test('a task chat is marked read only for its own owner', async (t) => {
+        const current = (await thread.activeThread(db.pool)).id;
+        const [turn, own, foreign] = [randomUUID(), randomUUID(), randomUUID()];
+        t.after(async () => {
+          await db.pool.query('DELETE FROM messages WHERE turn_id=$1', [turn]);
+          await db.pool.query('DELETE FROM tasks WHERE id=ANY($1::uuid[])', [[own, foreign]]);
+          await db.pool.query('DELETE FROM turns WHERE id=$1', [turn]);
+        });
+        await db.pool.query(
+          "INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,background) VALUES($1,$2,$3,$4,'user','Synthetic read','succeeded',true)",
+          [turn, ownerId, current, own],
+        );
+        await db.pool.query(
+          `INSERT INTO tasks(id,owner_id,turn_id,session_id,title,done_when,now_text,read_at)
+           VALUES($1,$2,$3,$1,'Synthetic read chat','Checked','Checking',now()-interval '1 day'),
+             ($4,'foreign-owner',NULL,$4,'Foreign read chat','Checked','Checking',now()-interval '1 day')`,
+          [own, ownerId, turn, foreign],
+        );
+        await db.pool.query(
+          "INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id) VALUES($1,$2,'assistant','Synthetic unread reply',$3,$4)",
+          [randomUUID(), ownerId, current, turn],
+        );
+        const readAt = async (id: string) =>
+          (
+            await db.pool.query('SELECT read_at FROM tasks WHERE id=$1', [id])
+          ).rows[0].read_at.getTime();
+        const unread = async () => (await tasks.read()).find(({ id }) => id === own)?.unread;
+        const foreignRead = await readAt(foreign);
+        assert.equal((await request('POST', `/api/tasks/${foreign}/read`)).statusCode, 404);
+        assert.equal(await readAt(foreign), foreignRead);
+        assert.equal(await unread(), 1);
+        assert.equal((await request('POST', `/api/tasks/${own}/read`)).statusCode, 200);
+        assert.equal(await unread(), undefined);
+      });
 
       await t.test(
         'a task started inside another session takes only its own turns from the main chat',
@@ -2936,7 +3012,8 @@ test(
           });
           assert.ok(seen(afterNote.turnId).includes(note));
           assert.ok(!seen(afterNote.turnId).some((text) => /lanterns|canoes/.test(text)));
-          const [askTurn, pairTask, pairTurn, yesTurn] = [
+          const [askTurn, pairTask, pairTurn, resumeTurn, yesTurn] = [
+            randomUUID(),
             randomUUID(),
             randomUUID(),
             randomUUID(),
@@ -2946,10 +3023,10 @@ test(
             await db.pool.query('UPDATE turns SET task_id=NULL WHERE id=$1', [pairTurn]);
             await db.pool.query('DELETE FROM tasks WHERE id=$1', [pairTask]);
             await db.pool.query('DELETE FROM messages WHERE turn_id=ANY($1::uuid[])', [
-              [askTurn, pairTurn, yesTurn],
+              [askTurn, pairTurn, resumeTurn, yesTurn],
             ]);
             await db.pool.query('DELETE FROM turns WHERE id=ANY($1::uuid[])', [
-              [askTurn, pairTurn, yesTurn],
+              [askTurn, pairTurn, resumeTurn, yesTurn],
             ]);
           });
           const addTurn = (id: string, session: string) =>
@@ -2975,6 +3052,8 @@ test(
           );
           await db.pool.query('UPDATE turns SET task_id=$1 WHERE id=$2', [pairTask, pairTurn]);
           await addMessage(pairTurn, 'assistant', 'Shall I sell the synthetic bicycle?');
+          await addTurn(resumeTurn, pairTask);
+          await addMessage(resumeTurn, 'assistant', 'Shall I ship the synthetic bicycle?');
           await addTurn(yesTurn, current);
           const yes = await addMessage(yesTurn, 'user', 'yes');
           assert.deepEqual((await checked(yes, null)).slice(-2), [
@@ -8301,6 +8380,90 @@ test(
           }
         }
       });
+
+      await t.test(
+        'with Telegram topics on, a General message pairs only with what Nod sent in General',
+        async (t) => {
+          const { createChannels } = await import('../src/server/channels.ts');
+          const { recentOwnerWords } = await import('../src/server/owner-instructions.ts');
+          await (
+            await createChannels(db.pool, {
+              ownerId,
+              transport: {
+                channels: [],
+                poll: async () => {},
+                receive: async () => ({ status: 200, body: {} }),
+                post: async () => ({ id: 'synthetic-unused' }),
+                close: async () => {},
+              },
+              subscribe: () => () => {},
+              intervalMs: 600_000,
+              activeThread: (client) => thread.activeThread(client),
+              submit: async () => {
+                throw new Error('Pairing must not start a model turn.');
+              },
+            })
+          ).close();
+          const current = (await thread.activeThread(db.pool)).id;
+          const channel = 'telegram:synthetic-topics';
+          const source = `synthetic-topics-${randomUUID()}`;
+          const [mainTurn, topicTurn, yesTurn, yes] = [
+            randomUUID(),
+            randomUUID(),
+            randomUUID(),
+            randomUUID(),
+          ];
+          const turns = [mainTurn, topicTurn, yesTurn];
+          t.after(async () => {
+            await db.pool.query('DELETE FROM channel_outbox WHERE source_id=$1', [source]);
+            await db.pool.query('DELETE FROM channel_inbox WHERE source_id=$1', [source]);
+            await db.pool.query(
+              "DELETE FROM channel_topics WHERE owner_id=$1 AND account_id='synthetic-topics'",
+              [ownerId],
+            );
+            await db.pool.query('DELETE FROM messages WHERE turn_id=ANY($1::uuid[])', [turns]);
+            await db.pool.query('DELETE FROM turns WHERE id=ANY($1::uuid[])', [turns]);
+          });
+          for (const turn of turns)
+            await db.pool.query(
+              "INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,channel) VALUES($1,$2,$3,$3,'user','Synthetic topics','succeeded',$4)",
+              [turn, ownerId, current, channel],
+            );
+          const say = async (turnId: string, role: string, text: string, id = randomUUID()) => {
+            await db.pool.query(
+              'INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id) VALUES($1,$2,$3,$4,$5,$6)',
+              [id, ownerId, role, text, current, turnId],
+            );
+            return id;
+          };
+          const inGeneral = await say(
+            mainTurn,
+            'assistant',
+            'Shall I archive the synthetic receipts?',
+          );
+          const inTopic = await say(topicTurn, 'assistant', 'Shall I sell the synthetic bicycle?');
+          await say(yesTurn, 'user', 'yes', yes);
+          await db.pool.query(
+            `INSERT INTO channel_inbox(source_id,provider,account_id,sender_id,thread_id,text,received_at,owner_id,channel,turn_id,message_id,state)
+             VALUES($1,'telegram','synthetic-topics','synthetic-sender','synthetic-chat','yes',now(),$2,$3,$4,$5,'submitted')`,
+            [source, ownerId, channel, yesTurn, yes],
+          );
+          await db.pool.query(
+            "INSERT INTO channel_outbox(message_id,source_id,state,topic_id) VALUES($1,$3,'sent',NULL),($2,$3,'sent','801')",
+            [inGeneral, inTopic, source],
+          );
+          const paired = async () =>
+            (await recentOwnerWords(db.pool, ownerId, current, [yes])).words.userMessages?.find(
+              ({ text }) => text === 'yes',
+            )?.replyTo;
+          assert.equal(await paired(), 'Shall I sell the synthetic bicycle?');
+          await db.pool.query(
+            "INSERT INTO channel_topics(owner_id,provider,account_id,sender_id,topic_id,task_id) VALUES($1,'telegram','synthetic-topics','synthetic-sender','801',gen_random_uuid())",
+            [ownerId],
+          );
+          assert.equal(await paired(), 'Shall I archive the synthetic receipts?');
+        },
+      );
 
       await t.test(
         'a context restart keeps chat, files and independent work and refuses stale requests',

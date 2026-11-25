@@ -25,7 +25,7 @@ flowchart TD
 
 The conversation is the owner's view of the work. The coordinator assigns work and routes ordinary follow-ups. A task session does the work, asks its own questions and delivers its own results. The coordinator does not rewrite each result through another model call.
 
-Explicit replies go to the selected task before the coordinator runs. The task's message identifies which work the owner is answering. The web app also lets the owner start a task directly with **New chat**, without the coordinator.
+Explicit replies go to the selected task before the coordinator runs. The task's message identifies which work the owner is answering. The web and desktop apps also let the owner start a task directly with **New chat**, without the coordinator.
 
 ## Three separate concepts
 
@@ -51,7 +51,7 @@ The `tasks` table is the source of truth for task state. Task messages, web card
 | `turn_events` | Tool and helper activity for the task's activity view.                                                                                                      |
 | `model_usage` | Model requests and their cost.                                                                                                                              |
 
-Each turn sees up to 100 tasks of the active conversation, open ones first, then finished ones with their results, newest first. The web chat list shows the same tasks. After a conversation reset in a development build, tasks from the archived conversation stay saved and on the Tasks page, which lists up to 100, open ones first, but leave the turn context.
+Each turn sees up to 100 tasks of the active conversation, open ones first, then finished ones with their results, newest first. When more than 100 qualify, closed chats are left out first. The web chat list shows the same tasks. After a conversation reset in a development build, tasks from the archived conversation stay saved and on the Tasks page, which lists up to 100, open ones first, but leave the turn context.
 
 A model-written task list in the workspace does not replace the ledger. The existing turn queue runs the sessions. The task system does not add another scheduler or cost ledger.
 
@@ -72,7 +72,7 @@ A schedule or other event session can also create a task record for its work. It
 
 ## Start a task with New chat
 
-**New chat** in the web app starts a task without the coordinator:
+**New chat** in the web and desktop apps starts a task without the coordinator:
 
 1. The owner's message is saved as a `user` turn in a new session. The server marks it as background work for that session.
 2. The same transaction saves a task whose ID is that session ID. Its title starts as the message's first line, its brief is the message, and its source owner message is that message. It has no completion condition, no first task message and no steps until the task writes them.
@@ -116,6 +116,8 @@ In web chat, a task has a chip under its first message and a card that opens fro
 The web chat list shows **Main** and one chat per task of the active conversation. A message belongs to the chat of a task when its turn is linked to that task, or when it ran in a session that task owns. Other messages belong to **Main**, including the first message of a task started from chat, which shows as the task's card there. A task's chat shows its own messages after its card, and `GET /api/messages?task=<task ID>` pages through them; `task=main` pages through **Main**. Each message in a task's chat is an explicit reply to the chat's latest message from Nod. It takes the same reply path as a chat-app reply, so it continues the task's session, answers only that task's question or confirmation, and reopens a finished task.
 
 Each chat in the list has an options menu with **Rename** and, once it is done, **Close chat**. Double-click a chat or press F2 on it to rename it in place; Enter or leaving the field saves and Escape cancels. A rename uses `PATCH /api/tasks/:id` with `title`.
+
+Each task saves when its chat was last read in `tasks.read_at`, set by `POST /api/tasks/:id/read` when the owner reaches the chat's latest message. A task's unread count is its chat's Nod messages after that, up to 100, and a closed chat has none. **Main** keeps its own read position on each device.
 
 Closing a chat sets `tasks.archived_at`, which hides it from the list. Only a finished or stopped task can be closed; closing an open one is refused. A later owner input to the task clears it, so a reopened task shows again. The task's live browser view uses the same task-to-session mapping, through `GET /api/browser?task=<task ID>`.
 

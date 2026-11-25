@@ -18,6 +18,7 @@ import { untrustedBlock } from '../shared/untrusted.ts';
 import { localTimestamp } from '../shared/date-locale.ts';
 import { lockKey, locksTable } from './locks.ts';
 import { withdrawnSql } from './turn-chain.ts';
+import { turnChatSql } from './chat-scope.ts';
 import { afterCommit, transaction } from './transaction.ts';
 import { computerRequestArgs, isComputerAction } from './computer-use.ts';
 import { createErrorRedactor } from './redaction.ts';
@@ -863,7 +864,7 @@ export async function createApprovals(
         await pool.query(
           `SELECT m.id FROM messages m JOIN turns u ON u.id=m.turn_id WHERE m.owner_id=$1 AND u.owner_id=$1 AND m.thread_id=$2 AND m.role='assistant' AND m.hidden_at IS NULL
            AND (u.channel=$3${delivered ? ` OR ${deliveredSql('m.id', '$1', '$3')}` : ''})
-           AND ($3<>'web' OR to_jsonb(u)->>'task_id' IS NULL)
+           AND ($3<>'web' OR ${turnChatSql('u')} IS NULL)
            AND NOT EXISTS (SELECT 1 FROM messages s WHERE s.id=$4 AND s.owner_id=$1 AND s.thread_id=$2 AND date_trunc('milliseconds',s.created_at)<date_trunc('milliseconds',m.created_at))
            AND NOT EXISTS (SELECT 1 FROM messages n WHERE n.owner_id=$1 AND (n.thread_id=$2 OR n.thread_id IS NULL) AND n.role='assistant' AND n.turn_id IS NULL AND n.delivered_channel=$3 AND n.hidden_at IS NULL
              AND (n.created_at,n.id)>(m.created_at,m.id)

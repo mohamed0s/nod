@@ -44,6 +44,20 @@ export const messageInput = z
   })
   .strict();
 
+export const startsWithoutReply = (value: z.infer<typeof messageInput>) =>
+  !value.newChat ||
+  (!value.replyToMessageId &&
+    value.replyQuote === undefined &&
+    !value.questionAnswer &&
+    !value.approvalAnswer &&
+    !value.verificationRequestId);
+
+export const newChatOnly = (value: z.infer<typeof messageInput>) =>
+  Boolean(value.newChat) || (!value.chatModel && !value.chatAgent);
+
+export const codeChat = (value: { newChat?: true; replyToMessageId?: string }) =>
+  value.newChat ? ('new' as const) : value.replyToMessageId ? undefined : ('main' as const);
+
 const conflict = () =>
   Object.assign(
     new Error(
@@ -125,6 +139,8 @@ export function registerAudioMessages(app: FastifyInstance, dependencies: AppDep
       validateRequestText(rawMessage);
       const input = messageInput
         .extend({ clientMessageId: z.uuid(), threadId: z.uuid() })
+        .refine(startsWithoutReply)
+        .refine(newChatOnly)
         .refine((value) => !value.approvalAnswer)
         .refine(
           (value) =>
@@ -247,6 +263,7 @@ export function registerAudioMessages(app: FastifyInstance, dependencies: AppDep
         ...input,
         verificationRequestId,
         receiptOnly: codeLike && !verificationRequestId && !input.replyToMessageId,
+        chat: codeChat(input),
         channel: 'web',
         signal,
         persistVerification: persist,

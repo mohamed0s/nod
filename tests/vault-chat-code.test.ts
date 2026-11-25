@@ -816,6 +816,79 @@ test(
           /482913/,
         );
       });
+      await t.test('a new chat never completes another chat’s code request', async () => {
+        const { createSpeech } = await import('../src/server/speech.ts');
+        const spoken = await createApp({
+          verification,
+          configuration: () => ({ ...configuration(), llmReady: true }),
+          speech: createSpeech({
+            id: 'fixture',
+            configured: true,
+            transcribe: async () => '482913',
+            synthesize: async () => {
+              throw new Error('Unexpected synthetic speech output.');
+            },
+          }),
+        });
+        const boundary = 'synthetic-new-chat-audio';
+        const speak = (message: object) =>
+          spoken.inject({
+            method: 'POST',
+            url: '/api/messages/audio',
+            headers: { ...headers, 'content-type': `multipart/form-data; boundary=${boundary}` },
+            payload: Buffer.from(
+              `--${boundary}\r\nContent-Disposition: form-data; name="message"\r\n\r\n${JSON.stringify(message)}\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="voice.webm"\r\nContent-Type: audio/webm\r\n\r\nSynthetic private recording\r\n--${boundary}--\r\n`,
+            ),
+          });
+        const submissions = async () =>
+          (await db.pool.query('SELECT count(*)::int AS count FROM chat_verification_submissions'))
+            .rows[0].count;
+        try {
+          await reset();
+          const { threadId } = await seed();
+          for (const refused of [
+            await send('482913', { newChat: true }),
+            await speak({ newChat: true, threadId, clientMessageId: randomUUID() }),
+          ]) {
+            assert.equal(refused.statusCode, 409, refused.body);
+            assert.ok(!refused.body.includes('482913'));
+          }
+          assert.equal(await submissions(), 0);
+          assert.deepEqual(ordinary, []);
+          assert.deepEqual(injected, []);
+          assert.equal((await send('482913')).statusCode, 200);
+          assert.equal(await submissions(), 1);
+        } finally {
+          await spoken.close();
+        }
+      });
+      await t.test('a code in Main never completes a task chat’s code request', async () => {
+        await reset();
+        const asked = await seed();
+        const task = randomUUID();
+        await db.pool.query('UPDATE turns SET session_id=$1 WHERE id=$2', [task, asked.turnId]);
+        await db.pool.query(
+          "INSERT INTO tasks(id,owner_id,turn_id,session_id,title,done_when,now_text) VALUES($1,$2,$3,$1,'Synthetic sign-in chat','Signed in','Signing in')",
+          [task, ownerId, asked.turnId],
+        );
+        try {
+          for (const extra of [{}, { verificationRequestId: asked.requestId }]) {
+            const refused = await send('482913', extra);
+            assert.equal(refused.statusCode, 409, refused.body);
+            assert.ok(!refused.body.includes('482913'));
+          }
+          assert.deepEqual(injected, []);
+          assert.deepEqual(ordinary, []);
+          const answered = await send('482913', { replyToMessageId: asked.messageId });
+          assert.equal(answered.statusCode, 200, answered.body);
+          assert.deepEqual(
+            injected.map(({ requestId }) => requestId),
+            [asked.requestId],
+          );
+        } finally {
+          await db.pool.query('DELETE FROM tasks WHERE id=$1', [task]);
+        }
+      });
       await t.test(
         'an unavailable fingerprint key never routes pending codes or replays receipts',
         async () => {

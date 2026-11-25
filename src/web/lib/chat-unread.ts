@@ -69,9 +69,10 @@ export async function reconcileUnreadChat(
   load: (before: MessageMarker, signal: AbortSignal) => Promise<MessageHistoryPage>,
   signal: AbortSignal,
   progress: (count: number) => void,
+  loaded: MessageMarker[] = messages,
 ) {
   const unread = unreadChatMessageIds(messages, cursor);
-  let page = { messages, hasMore: hasEarlier };
+  let page = { messages: loaded, hasMore: hasEarlier };
   while (unread.size < 100 && hasUnreadHistory(page.messages, page.hasMore, cursor)) {
     signal.throwIfAborted();
     const before = page.messages[0];
@@ -152,34 +153,4 @@ export async function writeChatReadCursor(
   const native = saveDesktopChatReadCursor(ownerId, threadId, value);
   if (native) await native;
   else window.localStorage.setItem(chatReadStorageKey(ownerId, threadId), JSON.stringify(value));
-}
-
-function taskReadStorageKey(ownerId: string, threadId: string) {
-  return `nod.chat-read-tasks.${JSON.stringify([ownerId, threadId])}`;
-}
-
-export function readTaskReadCursors(ownerId: string, threadId: string) {
-  try {
-    const saved = JSON.parse(
-      window.localStorage.getItem(taskReadStorageKey(ownerId, threadId)) ?? '{}',
-    );
-    return Object.fromEntries(
-      Object.entries(saved && typeof saved === 'object' ? saved : {}).flatMap(([id, value]) => {
-        const cursor = parseChatReadCursor(value);
-        return cursor ? [[id, cursor]] : [];
-      }),
-    ) as Record<string, ChatReadCursor>;
-  } catch {
-    return {};
-  }
-}
-
-export function writeTaskReadCursors(
-  ownerId: string,
-  threadId: string,
-  cursors: Record<string, ChatReadCursor>,
-) {
-  try {
-    window.localStorage.setItem(taskReadStorageKey(ownerId, threadId), JSON.stringify(cursors));
-  } catch {}
 }

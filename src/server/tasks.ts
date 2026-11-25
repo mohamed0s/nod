@@ -39,6 +39,7 @@ import {
   taskMessageSql,
 } from './turn-chain.ts';
 import { resemblesTaskAcknowledgement } from '../shared/task-ack.ts';
+import { inChatSql } from './chat-scope.ts';
 import { bareConfirmationAnswer } from './owner-instructions.ts';
 
 const now = z.string().trim().min(1);
@@ -110,6 +111,7 @@ type Row = {
   updated_at: Date;
   closed_at: Date | null;
   archived_at: Date | null;
+  unread: number;
   turn_status: string | null;
   answered: boolean;
   question: string | null;
@@ -181,14 +183,18 @@ export function createTasks(options: {
     const rows = (
       await client.query<Row>(
         `WITH ranked AS (
-           SELECT t.*,row_number() OVER (ORDER BY t.state='open' DESC,COALESCE(t.closed_at,t.updated_at) DESC,t.id) AS position
+           SELECT t.*,row_number() OVER (ORDER BY t.state='open' DESC,t.archived_at IS NULL DESC,COALESCE(t.closed_at,t.updated_at) DESC,t.id) AS position
            FROM tasks t LEFT JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
            WHERE t.owner_id=$1 AND ($2::uuid IS NULL OR t.id=$2) AND ($3 OR t.state='open')
              AND ($4::uuid IS NULL OR u.thread_id=$4)
          )
          SELECT t.id,t.title,t.done_when,t.now_text,t.result,t.state,t.waiting_for,t.next_check,
            t.message_id,t.steps,t.step_index,t.revision,t.applied_revision,
-           t.created_at,t.updated_at,t.closed_at,t.archived_at,COALESCE((SELECT r.status FROM turns r WHERE r.owner_id=t.owner_id AND r.session_id=t.session_id AND r.status='running'),u.status) AS turn_status,
+           t.created_at,t.updated_at,t.closed_at,t.archived_at,
+           (SELECT count(*)::int FROM (SELECT 1 FROM turns w JOIN messages m ON m.turn_id=w.id AND m.owner_id=w.owner_id
+             WHERE w.owner_id=t.owner_id AND t.archived_at IS NULL AND ${inChatSql('w', false, 't.id', 't.owner_id')}
+               AND m.role='assistant' AND m.hidden_at IS NULL AND m.created_at>t.read_at AND NOT ${reactionReplySql('m')}
+             LIMIT 100) unread) AS unread,COALESCE((SELECT r.status FROM turns r WHERE r.owner_id=t.owner_id AND r.session_id=t.session_id AND r.status='running'),u.status) AS turn_status,
            EXISTS(SELECT 1 FROM turns n WHERE n.owner_id=u.owner_id AND n.thread_id=u.thread_id
              AND n.session_id=u.session_id AND n.parent_turn_id=u.id) AS answered,
            COALESCE(${activeHandoffSql},false) AS handoff,
@@ -245,6 +251,7 @@ export function createTasks(options: {
         updatedAt: row.updated_at.toISOString(),
         closedAt: row.closed_at?.toISOString() ?? null,
         ...(row.archived_at ? { archivedAt: row.archived_at.toISOString() } : {}),
+        ...(row.unread ? { unread: row.unread } : {}),
         ...(row.work
           ? {
               model: row.model,
@@ -850,6 +857,7 @@ export function createTasks(options: {
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS activity_key text;
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS model jsonb;
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS archived_at timestamptz;
+      ALTER TABLE tasks ADD COLUMN IF NOT EXISTS read_at timestamptz NOT NULL DEFAULT now();
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS title_by text;
       UPDATE tasks SET title_by='line' WHERE title_by IS NULL AND session_id=id AND message_id IS NULL
         AND done_when='' AND activity_key IS NULL
@@ -941,6 +949,16 @@ export function createTasks(options: {
       }
       refresh();
       if (title !== undefined) options.renamed?.(id, title);
+      return { ok: true };
+    });
+    app.post<{ Params: { id: string } }>('/api/tasks/:id/read', async (request) => {
+      const id = z.uuid().parse(request.params.id);
+      const { rowCount } = await pool.query(
+        'UPDATE tasks SET read_at=GREATEST(read_at,now()) WHERE id=$1 AND owner_id=$2',
+        [id, ownerId],
+      );
+      if (!rowCount) throw failure('Task not found.', 404);
+      refresh();
       return { ok: true };
     });
     app.put<{ Params: { id: string } }>('/api/tasks/:id/model', async (request) => {

@@ -6,6 +6,7 @@ import { classifyVerificationReply, securityCodeIn } from '../shared/verificatio
 import { lockThread } from './thread.ts';
 import { transaction } from './transaction.ts';
 import { supersededSql, waitingTurnSql } from './turn-chain.ts';
+import { turnChatSql } from './chat-scope.ts';
 
 interface VerificationInput {
   clientMessageId: string;
@@ -15,6 +16,7 @@ interface VerificationInput {
   sessionId?: string;
   verificationRequestId?: string;
   receiptOnly?: boolean;
+  chat?: 'main' | 'new';
   attachmentIds?: string[];
   signal?: AbortSignal;
   persistOrdinary?: (client: PoolClient) => Promise<void>;
@@ -238,18 +240,21 @@ export async function createChatVerification(
         )
           throw conflict(unavailableMessage);
       }
-      const requests = await client.query<{
+      const found = await client.query<{
         id: string;
         turn_id: string;
         kind: 'otp' | 'payment';
+        in_chat: boolean;
       }>(
-        `SELECT r.id,r.turn_id,r.kind FROM ${codeRequests} r JOIN turns u ON u.id=r.turn_id
+        `SELECT r.id,r.turn_id,r.kind,${
+          input.chat === 'main' ? `${turnChatSql('u')} IS NULL` : String(input.chat !== 'new')
+        } AS in_chat FROM ${codeRequests} r JOIN turns u ON u.id=r.turn_id
          WHERE r.owner_id=$1 AND u.owner_id=$1 AND u.channel=$2 AND r.thread_id=$5
            AND r.status='pending' AND (r.kind<>'payment' OR u.channel='web')
            AND ${waitingTurnSql('u', 'credentials')}
            AND ($3::uuid IS NULL OR r.turn_id=$3) AND ($4::text IS NULL OR r.id=$4)
            AND ($6::uuid IS NULL OR u.session_id=$6)
-           ORDER BY u.created_at,r.id LIMIT 2`,
+           ORDER BY u.created_at,r.id LIMIT 50`,
         [
           options.ownerId,
           channel,
@@ -259,7 +264,10 @@ export async function createChatVerification(
           input.sessionId ?? null,
         ],
       );
-      if (!requests.rowCount) {
+      const requests = found.rows.filter((row) => row.in_chat);
+      if (found.rowCount && !requests.length)
+        throw conflict('Send the code in the chat where Nod asked for it.');
+      if (!requests.length) {
         if (requestId) throw conflict(unavailableMessage);
         const waiting = (
           await client.query<{ kind: 'otp' | 'payment'; channel: string }>(
@@ -298,11 +306,11 @@ export async function createChatVerification(
         await input.persistOrdinary?.(client);
         return;
       }
-      if (requests.rowCount !== 1)
+      if (requests.length !== 1)
         throw conflict(
           'More than one sign-in needs a code. Reply to the verification request you want to complete.',
         );
-      const request = requests.rows[0]!;
+      const request = requests[0]!;
       const code = codes[request.kind];
       if (
         !code &&

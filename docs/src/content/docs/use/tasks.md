@@ -35,7 +35,7 @@ Select a chat to open it. A task's chat shows only that task. Its card sits at t
 
 To give a chat a name, instructions and a model that last, make it an [agent](/use/agents/). Agents have their own group under **Main**.
 
-A number next to a chat counts its unread replies, and the badge on **Chat** counts them all. Reading **Main** doesn't mark a task's replies as read; opening that task's chat does.
+A number next to a chat counts its unread replies, and the badge on **Chat** counts them all. Reading **Main** doesn't mark a task's replies as read; opening that task's chat does. A task's chat is marked read for all your devices at once, and the desktop app's Dock badge counts the same replies.
 
 **Main** shows your conversation with Nod and the card of each task it started. To open a task's chat, select **Open chat** on its card or its pulsing dot above the message box. A task's questions, approvals and results appear in its own chat, not in **Main**.
 
@@ -51,7 +51,7 @@ Each chat runs on a model. Under a task's card, **Model** shows the chat's own m
 
 In a new chat, select **Change** beside **Model** before you send your first message, and the chat starts on that model. **Main** shows your chat model and a link to **Settings > Models**. Changing it there changes every chat without its own model.
 
-You can also tell Nod in a chat, for example "Use Opus for this chat", in the web app or in the chat's Telegram topic. Nod changes that chat's model, not your default, and asks you first when your words don't cover the change. To change your default from a task's chat, say so, for example "Make Opus my main model".
+You can also tell Nod in a chat, for example "Use Opus for this chat", in the web or desktop app, or in the chat's Telegram topic. Nod changes that chat's model, not your default, and asks you first when your words don't cover the change. To change your default from a task's chat, say so, for example "Make Opus my main model".
 
 ### Continue or close a chat
 
@@ -101,9 +101,9 @@ The progress indicator shows the task title above its current step. Both wrap so
 
 ## Reply or stop one task
 
-In the web app, open the task's chat and type to continue that task. Each message there replies to the chat's latest message from Nod, so a "yes" answers that task's own question or approval. In Telegram and WhatsApp, use their reply controls on the task's first message, a question or a result. With [Telegram topics](/use/channels/#telegram-topics) on, write in the task's topic instead; it works like the task's chat in the web app. A message in **Main**, in Telegram's General or Main topic, or without a reply target in a chat app, goes to the main chat. Nod can send that message to one or more open tasks when your intent is clear. If the target is unclear, Nod asks. To pick up a finished or stopped task, write in its chat, or reply to one of its messages in a chat app.
+In the web and desktop apps, open the task's chat and type to continue that task. Each message there replies to the chat's latest message from Nod, so a "yes" answers that task's own question or approval. In Telegram and WhatsApp, use their reply controls on the task's first message, a question or a result. With [Telegram topics](/use/channels/#telegram-topics) on, write in the task's topic instead; it works like the task's chat in the web and desktop apps. A message in **Main**, in Telegram's General or Main topic, or without a reply target in a chat app, goes to the main chat. Nod can send that message to one or more open tasks when your intent is clear. If the target is unclear, Nod asks. To pick up a finished or stopped task, write in its chat, or reply to one of its messages in a chat app.
 
-Say "Try again" just after Nod reports the result of a task you requested. In the web app, say it in that task's chat. In a chat app, the result must be in that chat. Nod continues the task with your original request and checks whether an action already happened before repeating it.
+Say "Try again" just after Nod reports the result of a task you requested. In the web and desktop apps, say it in that task's chat. In a chat app, the result must be in that chat. Nod continues the task with your original request and checks whether an action already happened before repeating it.
 
 When a task waits for you in its browser, its card in chat and its preview on **Scheduled** show **Open browser**, which takes you to the live page. See [Take over the browser](/use/browser/#take-over-the-browser).
 
@@ -164,7 +164,7 @@ The task list sends one message per task. You can reply to that message, the tas
 
 A status message that shows a pending question keeps a link to that exact question. Your approval applies only to the saved action it shows. An old status message cannot approve a later action.
 
-With [Telegram topics](/use/channels/#telegram-topics) on, each task has its own topic, including chats you start in the web app. Its messages, questions, approvals, files and result arrive there. The main chat stays in General, or in a topic named **Main** when BotFather lets you create topics. Anything you write in the topic goes to that task, without the Reply control, and `/status` or `/stop` there applies to that task only. A topic you start yourself becomes a new chat. A task started inside a scheduled run stays with that run.
+With [Telegram topics](/use/channels/#telegram-topics) on, each task has its own topic, including chats you start in the web or desktop app. Its messages, questions, approvals, files and result arrive there. The main chat stays in General, or in a topic named **Main** when BotFather lets you create topics. Anything you write in the topic goes to that task, without the Reply control, and `/status` or `/stop` there applies to that task only. A topic you start yourself becomes a new chat. A task started inside a scheduled run stays with that run.
 
 Telegram, WhatsApp and web use the same task record and saved session. Task commands do not grant permission for an outside action. Private sign-in and payment steps still use Nod's private forms.
 
@@ -198,7 +198,7 @@ stateDiagram-v2
 
 A question stays **Needs you** until you reply to it or continue its session. An unrelated chat message does not answer it. Select a failed task's title to open its details, **Open chat** and **Stop this task**. A task that stops without a plan or a result shows **Needs you** with a note to reply to continue. A task that fails, including one Nod started on its own, says so in chat with the task's name and what stopped it. When a task reaches its spending check-in, it shows **Needs you** with the check-in question. A stopped task shows **Stopped**. Reply to the task to continue the same saved session. While a task works on your reply, the chat shows that Nod is working. In the web and desktop apps, when Main hands your message to a task, the bottom of Main shows the task's title and current step until it posts a message, finishes or needs you.
 
-In the web app, a message in **Main** never answers a question or approval that a task's chat is waiting on. Answer it in that task's chat. With Telegram topics on, a message in General or the Main topic answers only the latest message Nod sent there, so answer a task's approval in its topic. Otherwise, in Telegram and WhatsApp, if you ask a question in the main chat after a task's yes/no approval without replying directly, Nod closes that approval without running its action. The task remains open with a message that says its current work stopped. Reply to that message to continue what is unfinished.
+In the web and desktop apps, a message in **Main** never answers a question or approval that a task's chat is waiting on. Answer it in that task's chat. With Telegram topics on, a message in General or the Main topic answers only the latest message Nod sent there, so answer a task's approval in its topic. Otherwise, in Telegram and WhatsApp, if you ask a question in the main chat after a task's yes/no approval without replying directly, Nod closes that approval without running its action. The task remains open with a message that says its current work stopped. Reply to that message to continue what is unfinished.
 
 If you pause or delete a schedule directly while a task is waiting for approval to change that schedule, the old confirmation expires. The task stays open and shows a new message you can reply to if it has more work to do.
 

@@ -6,17 +6,14 @@ import {
   latestChatReadCursor,
   mergeChatReadCursor,
   readChatReadCursor,
-  readTaskReadCursors,
   reconcileUnreadChat,
   unreadChatMessageIds,
   writeChatReadCursor,
-  writeTaskReadCursors,
   type ChatReadCursor,
 } from '../lib/chat-unread';
 
-const baseline = '*';
-
 export function useChatUnread(ownerId: string, state: AppState | null) {
+  const loaded = state?.messages;
   const messages = useMemo(
     () => state?.messages.filter((message) => !message.taskId),
     [state?.messages],
@@ -101,7 +98,7 @@ export function useChatUnread(ownerId: string, state: AppState | null) {
   const earlier = state?.hasEarlierMessages === true;
   const count = cursor && messages ? Math.min(unreadChatMessageIds(messages, cursor).size, 100) : 0;
   const missing =
-    !!cursor && !!messages && count < 100 && hasUnreadHistory(messages, earlier, cursor);
+    !!cursor && !!messages && count < 100 && hasUnreadHistory(loaded!, earlier, cursor);
   useEffect(() => {
     if (!scope || !cursor || !messages || !missing) return;
     const controller = new AbortController();
@@ -125,11 +122,12 @@ export function useChatUnread(ownerId: string, state: AppState | null) {
       },
       signal,
       (count) => update(count, count < 100),
+      loaded,
     )
       .then((count) => update(count, false))
       .catch(() => {});
     return () => controller.abort();
-  }, [scope, cursor, messages, earlier, missing, attempt]);
+  }, [scope, cursor, messages, loaded, earlier, missing, attempt]);
   const markRead = useCallback(
     (threadId: string) => {
       if (!scope || current.current !== scope || threadId !== scope.threadId || !messages) return;
@@ -145,40 +143,23 @@ export function useChatUnread(ownerId: string, state: AppState | null) {
     },
     [scope, messages, persist],
   );
-  const [taskRead, setTaskRead] = useState<{
-    scope: typeof scope;
-    cursors: Record<string, ChatReadCursor>;
-  } | null>(null);
-  useEffect(() => {
-    if (scope) setTaskRead({ scope, cursors: readTaskReadCursors(scope.ownerId, scope.threadId) });
-  }, [scope]);
-  const taskCursors = taskRead?.scope === scope ? taskRead.cursors : undefined;
-  useEffect(() => {
-    if (!scope || !cursor || !taskCursors || taskCursors[baseline]) return;
-    const cursors = { ...taskCursors, [baseline]: cursor };
-    writeTaskReadCursors(scope.ownerId, scope.threadId, cursors);
-    setTaskRead({ scope, cursors });
-  }, [scope, cursor, taskCursors]);
-  const taskCounts: Record<string, number> = {};
-  for (const message of taskCursors?.[baseline] ? (state?.messages ?? []) : []) {
-    const from = message.taskId && (taskCursors![message.taskId] ?? taskCursors![baseline]);
-    if (from && unreadChatMessageIds([message], from).size)
-      taskCounts[message.taskId!] = (taskCounts[message.taskId!] ?? 0) + 1;
-  }
+  const taskCounts = useMemo(
+    () =>
+      Object.fromEntries(
+        (state?.tasks ?? []).flatMap((task) => (task.unread ? [[task.id, task.unread]] : [])),
+      ) as Record<string, number>,
+    [state?.tasks],
+  );
+  const marking = useRef(new Set<string>());
   const markTaskRead = useCallback(
     (taskId: string) => {
-      if (!scope || current.current !== scope || !state || !taskCursors) return;
-      const latest = latestChatReadCursor(
-        state.messages.filter((message) => message.taskId === taskId),
-      );
-      const saved = taskCursors[taskId] ?? taskCursors[baseline];
-      const next = saved ? mergeChatReadCursor(saved, latest) : latest;
-      if (JSON.stringify(next) === JSON.stringify(saved)) return;
-      const cursors = { ...taskCursors, [taskId]: next };
-      writeTaskReadCursors(scope.ownerId, scope.threadId, cursors);
-      setTaskRead({ scope, cursors });
+      if (!taskCounts[taskId] || marking.current.has(taskId)) return;
+      marking.current.add(taskId);
+      void api(`/api/tasks/${encodeURIComponent(taskId)}/read`, { method: 'POST' })
+        .catch(() => {})
+        .finally(() => marking.current.delete(taskId));
     },
-    [scope, state?.messages, taskCursors],
+    [taskCounts],
   );
   const reconciled =
     history?.scope === scope && history.cursor === cursor && history.messages === messages;

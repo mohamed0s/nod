@@ -51,4 +51,4 @@ You can also tell Nod, for example "run the weekly report as my research agent".
 
 Agents belong to you, not to one conversation. When you reset the conversation, the chat list empties but **Agents** keeps every agent with its profile and model. Select an agent and write to it: your first message starts a new chat for it, with the same name, instructions and model. The old chat stays with the old conversation.
 
-With [Telegram topics](/use/channels/#telegram-topics) on, you can also write in the agent's topic. Your message starts the agent's new chat there, in the same topic. If you started the agent's new chat in the web app first, that chat gets a topic of its own, and a message in the old topic starts an ordinary chat.
+With [Telegram topics](/use/channels/#telegram-topics) on, you can also write in the agent's topic. Your message starts the agent's new chat there, in the same topic. If you started the agent's new chat in the web or desktop app first, that chat gets a topic of its own, and a message in the old topic starts an ordinary chat.
