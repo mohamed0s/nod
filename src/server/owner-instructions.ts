@@ -189,6 +189,7 @@ export async function recentOwnerWords(
   threadId: string,
   requestIds: string[],
   taskId: string | null = null,
+  chainIds: string[] = requestIds,
 ) {
   const tables = (
     await pool.query(
@@ -303,7 +304,9 @@ export async function recentOwnerWords(
        AND m.text NOT IN (SELECT task->>'title' FROM messages offer,jsonb_array_elements(offer.suggestions->'tasks') task
          WHERE offer.owner_id=$1 AND offer.thread_id=$2 AND offer.suggestions IS NOT NULL AND task->>'title' IS NOT NULL)
      ORDER BY m.created_at,m.id`,
-    taskId ? [ownerId, threadId, requestIds, taskId] : [ownerId, threadId, requestIds],
+    taskId
+      ? [ownerId, threadId, agentChat ? chainIds : requestIds, taskId]
+      : [ownerId, threadId, requestIds],
   );
   const messages = rows.map((row) => {
     const replied =

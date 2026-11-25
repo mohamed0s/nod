@@ -122,9 +122,10 @@ export function createAgents(options: {
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS apps text[] NOT NULL DEFAULT '{}';
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS skills text[] NOT NULL DEFAULT '{}';
       CREATE TABLE IF NOT EXISTS agent_chats (
-        owner_id text NOT NULL, agent_id uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        owner_id text NOT NULL, agent_id uuid NOT NULL,
         chat_id uuid NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, PRIMARY KEY (agent_id,chat_id)
       );
+      ALTER TABLE agent_chats DROP CONSTRAINT IF EXISTS agent_chats_agent_id_fkey;
       CREATE INDEX IF NOT EXISTS agent_chats_chat ON agent_chats(owner_id,chat_id);
       INSERT INTO agent_chats(owner_id,agent_id,chat_id)
         SELECT owner_id,id,chat_id FROM agents WHERE chat_id IS NOT NULL ON CONFLICT DO NOTHING;

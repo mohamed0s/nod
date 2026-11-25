@@ -28,7 +28,7 @@ The agent's model is the chat's [model](/use/tasks/#choose-the-model-for-a-chat)
 
 Agents sit in their own **Agents** group in the chat list, under **Main**. Select one to open its chat.
 
-To change a profile, select **Edit** beside **Agent**. **Remove agent, keep the chat** removes the profile and deletes the agent's own memory; the chat stays as an ordinary chat.
+To change a profile, select **Edit** beside **Agent**. **Remove agent, keep the chat** removes the profile and deletes the agent's own memory; the chat stays as an ordinary chat, and its action check keeps the [one-day window](#send-work-to-an-agent) of an agent's chat.
 
 ## Memory
 
@@ -96,7 +96,7 @@ That note is Main's, not yours. The agent reads it as data, and the [action chec
 | "Make me a research agent that writes formally"                  | Nod asks first, unless your words cover that exact agent                                          |
 | The agent needs your approval                                    | It asks in its own chat or topic. Main's tasks line shows **Needs you**, and Main can't answer it |
 
-An agent's chat can run for weeks, so its action check works as in Main: it sees your messages there from the past day, at most the last 20, plus the message behind the work the agent is doing. An older order in that chat stops counting the next day.
+An agent's chat can run for weeks, so its action check works as in Main: it sees your messages there from the past day, at most the last 20, plus the message behind the work the agent is doing. An older order in that chat stops counting the next day, and so does a limit: "never email Bob" written there more than a day ago no longer holds. Put lasting limits in your [rules](/trust/approvals/#your-rules).
 
 ### What Main can't do
 
