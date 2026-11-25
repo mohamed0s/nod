@@ -4495,7 +4495,7 @@ test(
       );
 
       await t.test(
-        'a relayed owner message shows the question it answered, and only the main chat steers or stops tasks',
+        'a relayed owner message carries no Main question, a bare yes is not relayed, and only the main chat steers or stops tasks',
         async (t) => {
           const start = async (request: string, title: string) => {
             const parent = await begin(request);
@@ -4562,17 +4562,25 @@ test(
             "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text,hidden_at) VALUES($1,$2,$3,$4,'assistant','Retired schedule confirmation fixture',now())",
             [randomUUID(), ownerId, worker.threadId, worker.turnId],
           );
-          assert.equal(lastReply(await relay('Yes.', dentist.id)), 'Working on Fixture dentist.');
+          const bare = await begin('Yes.');
+          t.after(() => finish(bare.turnId, 'cancelled'));
+          await assert.rejects(
+            tasks.execute(
+              bare,
+              { action: 'reply', ids: [dentist.id] },
+              (await row(bare.turnId)).message_id,
+            ),
+            /A yes or no can't be sent to a task/,
+          );
           const chat = await begin('Anything else pending?');
           await db.pool.query(
             "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text) VALUES($1,$2,$3,$4,'assistant','Shall I send the fixture summary to Ana now?')",
             [randomUUID(), ownerId, chat.threadId, chat.turnId],
           );
           await finish(chat.turnId, 'succeeded');
-          assert.equal(
-            lastReply(await relay('Yes.', dentist.id)),
-            'Shall I send the fixture summary to Ana now?',
-          );
+          const relayed = await relay('Sure, go ahead with Ana.', dentist.id);
+          assert.equal(relayed.userMessages.at(-1).text, 'Sure, go ahead with Ana.');
+          assert.equal(lastReply(relayed), undefined);
           const parcel = await start('Watch the fixture parcel.', 'Fixture parcel');
           const backgrounds: string[] = [];
           for (const source of ['event', 'schedule'] as const) {
