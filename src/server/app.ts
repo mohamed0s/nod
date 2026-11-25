@@ -72,11 +72,10 @@ import { registerWorkAdmission, type WorkAdmission } from './work-admission.ts';
 import { registerAnalyticsRoutes, snapshotAnalytics, type CaptureAnalytics } from './analytics.ts';
 import { messagePreview } from './message-preview.ts';
 import { messageChatSql } from './chat-scope.ts';
-import { roomSpeakerSql } from './rooms.ts';
 import { validateRequestText } from './request-text.ts';
 
 const messageTaskSql = messageChatSql('m');
-const messageFields = `m.id,m.role,m.text,${messageTaskSql} AS "taskId",CASE WHEN m.role='user' THEN m.display_text END AS "displayText",m.audio_caption AS "audioCaption",m.turn_id AS "turnId",${roomSpeakerSql('m')} AS "agent",m.created_at AS "createdAt",m.attachments,m.stream_id AS "streamId",m.reaction,m.assistant_reaction AS "assistantReaction",m.reply_to_message_id AS "replyToMessageId",m.suggestions,m.presentation,m.answer_choices AS "answerChoices",(${pendingAnswerChoicesSql}) AS "answerChoicesPending",
+const messageFields = `m.id,m.role,m.text,${messageTaskSql} AS "taskId",CASE WHEN m.role='user' THEN m.display_text END AS "displayText",m.audio_caption AS "audioCaption",m.turn_id AS "turnId",m.created_at AS "createdAt",m.attachments,m.stream_id AS "streamId",m.reaction,m.assistant_reaction AS "assistantReaction",m.reply_to_message_id AS "replyToMessageId",m.suggestions,m.presentation,m.answer_choices AS "answerChoices",(${pendingAnswerChoicesSql}) AS "answerChoicesPending",
  (m.role='user' AND (m.approval_answer IS NOT NULL OR (m.question_answer IS NOT NULL AND m.text<>'' AND jsonb_array_length(m.attachments)=0))) AS "cardAnswer",
  CASE WHEN m.role='assistant' AND m.answer_choices IS NOT NULL THEN (SELECT json_build_object('answer',a.question_answer,'text',a.text) FROM messages a
    WHERE a.reply_to_message_id=m.id AND a.owner_id=m.owner_id AND a.role='user' AND a.question_answer IS NOT NULL AND a.text<>'' AND jsonb_array_length(a.attachments)=0 ORDER BY a.created_at,a.id LIMIT 1) END AS "choiceAnswer",
@@ -169,7 +168,6 @@ function messageView(row: MessageRow): Message {
     choiceAnswer,
     cardAnswer,
     work,
-    agent,
     ...message
   } = row;
   const visual =
@@ -182,7 +180,6 @@ function messageView(row: MessageRow): Message {
   return {
     ...message,
     ...(message.role === 'user' && typeof displayText === 'string' ? { displayText } : {}),
-    ...(agent ? { agent } : {}),
     ...(typeof audioCaption === 'string' ? { audioCaption } : {}),
     ...(visual?.success ? { presentation: visual.data } : {}),
     ...(choices?.success
@@ -236,6 +233,7 @@ export interface AppDependencies {
   taskLedger?: (threadId?: string) => Promise<import('../shared/contracts.ts').Task[]>;
   agents?: (threadId: string) => Promise<import('../shared/agents.ts').Agent[]>;
   rooms?: (threadId: string) => Promise<import('../shared/rooms.ts').Room[]>;
+  speakers?: (turnIds: string[]) => Promise<Map<string, string>>;
   activity?: () => Promise<Activity[]>;
   planningTasks?: () => string | undefined;
   rateLimit?: boolean;
@@ -267,16 +265,21 @@ export async function createApp(dependencies: AppDependencies = {}) {
         ),
       ]),
     );
-    return rows.map((message) =>
-      messageView(
+    const speakers = await dependencies.speakers?.(
+      rows.flatMap((row) => (row.role === 'assistant' && row.turnId ? [row.turnId] : [])),
+    );
+    return rows.map((message) => {
+      const view = messageView(
         message.replyTo && !message.replyTo.isQuote
           ? {
               ...message,
               replyTo: { ...message.replyTo, text: previews.get(message.replyTo.id) ?? '' },
             }
           : message,
-      ),
-    );
+      );
+      const agent = message.role === 'assistant' && speakers?.get(message.turnId ?? '');
+      return agent ? { ...view, agent } : view;
+    });
   }
   const app = Fastify({
     logger: false,

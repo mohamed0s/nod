@@ -3701,6 +3701,7 @@ async function initializeApplication(
     taskLedger: tasks.read,
     agents: agents.list,
     rooms: rooms.list,
+    speakers: rooms.speakers,
     activity: activity.current,
     planningTasks: onboardingSuggestions.planning,
     computer,

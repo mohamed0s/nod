@@ -369,7 +369,8 @@ export function createRooms(options: {
              AND w.created_at>COALESCE((SELECT created_at FROM owner),'-infinity'))::int AS hops,
            (SELECT id::text FROM owner) AS anchor
          FROM room_members r JOIN turns w ON w.owner_id=r.owner_id AND w.session_id=r.session_id AND w.source='task'
-         WHERE r.owner_id=$1 AND r.room_id=$2`,
+         WHERE r.owner_id=$1 AND r.room_id=$2
+           AND w.created_at>LEAST(now()-interval '1 hour',COALESCE((SELECT created_at FROM owner),'-infinity'))`,
         [ownerId, roomId],
       )
     ).rows[0]!;
@@ -879,6 +880,18 @@ export function createRooms(options: {
     return { budgetUsd: taskUsd, spentUsd: spent };
   }
 
+  async function speakers(turnIds: string[]) {
+    if (!turnIds.length) return new Map<string, string>();
+    const { rows } = await pool.query<{ id: string; name: string }>(
+      `SELECT u.id,COALESCE(a.name,r.name) AS name FROM turns u
+       JOIN room_members r ON r.session_id=u.session_id AND r.owner_id=u.owner_id
+       LEFT JOIN agents a ON a.id=r.agent_id AND a.owner_id=r.owner_id
+       WHERE u.owner_id=$1 AND u.id=ANY($2::uuid[])`,
+      [ownerId, [...new Set(turnIds)]],
+    );
+    return new Map(rows.map(({ id, name }) => [id, name]));
+  }
+
   async function speaker(messageId: string) {
     return (
       (
@@ -924,6 +937,7 @@ export function createRooms(options: {
     watched,
     checkIn,
     speaker,
+    speakers,
     registerRoutes,
   };
 }
