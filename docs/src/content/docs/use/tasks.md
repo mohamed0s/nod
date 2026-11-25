@@ -35,7 +35,7 @@ Select a chat to open it. A task's chat shows only that task. Its card sits at t
 
 To give a chat a name, instructions and a model that last, make it an [agent](/use/agents/). Agents have their own group under **Main**.
 
-A number next to a chat counts its unread replies, and the badge on **Chat** counts them all. Reading **Main** doesn't mark a task's replies as read; opening that task's chat does.
+A number next to a chat counts its unread replies, and the badge on **Chat** counts them all. Reading **Main** doesn't mark a task's replies as read; opening that task's chat does. A task's chat is marked read for all your devices at once, and the desktop app's Dock badge counts the same replies.
 
 **Main** shows your conversation with Nod and the card of each task it started. To open a task's chat, select **Open chat** on its card or its pulsing dot above the message box. A task's questions, approvals and results appear in its own chat, not in **Main**.
 

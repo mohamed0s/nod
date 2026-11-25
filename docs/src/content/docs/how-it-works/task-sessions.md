@@ -117,6 +117,8 @@ The web chat list shows **Main** and one chat per task of the active conversatio
 
 Each chat in the list has an options menu with **Rename** and, once it is done, **Close chat**. Double-click a chat or press F2 on it to rename it in place; Enter or leaving the field saves and Escape cancels. A rename uses `PATCH /api/tasks/:id` with `title`.
 
+Each task saves when its chat was last read in `tasks.read_at`, set by `POST /api/tasks/:id/read` when the owner reaches the chat's latest message. A task's unread count is its chat's Nod messages after that, up to 100, and a closed chat has none. **Main** keeps its own read position on each device.
+
 Closing a chat sets `tasks.archived_at`, which hides it from the list. Only a finished or stopped task can be closed; closing an open one is refused. A later owner input to the task clears it, so a reopened task shows again. The task's live browser view uses the same task-to-session mapping, through `GET /api/browser?task=<task ID>`.
 
 Telegram shows the task as messages Nod writes. If its first message arrives as one short text message, a quoted progress section in your language updates there without another notification, then is removed when work stops. Other message types keep typing status only; see [While Nod works](/use/channels/#while-nod-works). Each task keeps its own message and reply target. Its questions and result reply to that first message. `/tasks` sends a replyable status message for each open task. Reply with `/status` to inspect it or `/stop` to stop it. Native reply links for text parts and files select the same saved task in Telegram and WhatsApp.
