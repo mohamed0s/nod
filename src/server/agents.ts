@@ -295,6 +295,7 @@ export function createAgents(options: {
           renamed: boolean;
           repictured: boolean;
           previous_image: string | null;
+          chat_title: string | null;
         }>(
           `UPDATE agents a SET name=COALESCE($4,a.name),description=COALESCE($5,a.description),
              instructions=COALESCE($6,a.instructions),memory_mode=COALESCE($7,a.memory_mode),
@@ -304,7 +305,8 @@ export function createAgents(options: {
              revision=a.revision+1,updated_at=now()
            FROM agents before WHERE a.id=$1 AND a.owner_id=$2 AND a.revision=$3 AND before.id=a.id
            RETURNING a.name,a.chat_id,a.name IS DISTINCT FROM before.name AS renamed,
-             a.emoji IS DISTINCT FROM before.emoji AS repictured,before.image_id AS previous_image`,
+             a.emoji IS DISTINCT FROM before.emoji AS repictured,before.image_id AS previous_image,
+             (SELECT title FROM tasks WHERE id=a.chat_id AND owner_id=a.owner_id) AS chat_title`,
           [
             id,
             ownerId,
@@ -336,8 +338,10 @@ export function createAgents(options: {
     }
     const chatId = updated.chat_id;
     if (updated.renamed) await title(client, chatId, updated.name);
-    else if (updated.repictured && chatId)
-      afterCommit(client, () => options.renamed?.(chatId, updated.name));
+    else if (updated.repictured && chatId && updated.chat_title !== null) {
+      const chatTitle = updated.chat_title;
+      afterCommit(client, () => options.renamed?.(chatId, chatTitle));
+    }
     if (input.imageId !== undefined && updated.previous_image !== input.imageId)
       await pictures.release(client, updated.previous_image);
     afterCommit(client, refresh);
