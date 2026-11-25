@@ -5336,9 +5336,14 @@ export const approvalCases = inParts(
           const reviews: Array<Record<string, any>> = [];
           sendReview = (input) => {
             reviews.push(input);
-            const said = (input.userMessages ?? []) as Array<{ text: string }>;
-            const index = said.findIndex(({ text }) =>
-              text.includes(String(input.action?.arguments?.recipient_email)),
+            const said = (input.userMessages ?? []) as Array<{
+              text: string;
+              canAuthorize?: boolean;
+            }>;
+            const index = said.findIndex(
+              ({ text, canAuthorize }) =>
+                canAuthorize !== false &&
+                text.includes(String(input.action?.arguments?.recipient_email)),
             );
             return index >= 0
               ? { run: true, source: `message:${index}`, terms: [] }
@@ -5416,7 +5421,41 @@ export const approvalCases = inParts(
             'succeeded',
           );
           assert.equal(sends(), before + 1);
+
+          const toScout = `@${scout} synthetic send the report to ana@example.test ${tag}`;
+          reply(toScout, [], `@${writer} please send the report to ana@example.test ${tag}`);
+          reply(roomHopPrompt, [{ action: 'GMAIL_SEND_EMAIL', args: email('ana@example.test') }]);
+          const handing = reviews.length;
+          const handed = await dispatched(scout, await say(toScout));
+          await waitFor(handed, 'succeeded');
+          const handHop = await turnOf(writer, `room-hop:${handed}:${ids[writer]}`);
+          await waitFor(handHop, 'waiting');
+          assert.equal((await approvalsFor(handHop))[0]?.status, 'pending');
+          assert.equal(sends(), before + 1);
+          const handReviews = reviews.slice(handing);
+          assert.ok(handReviews.length > 0);
+          for (const input of handReviews)
+            assert.equal(
+              (input.userMessages as Array<{ text: string; canAuthorize?: boolean }>).find(
+                ({ text }) => text === toScout,
+              )?.canAuthorize,
+              false,
+            );
+          await waitFor(
+            await main('No', (await approvalsFor(handHop))[0].confirmation_message_id),
+            'succeeded',
+          );
           batches.delete(roomHopPrompt);
+          const both = `@${scout} synthetic find the report and @${writer} send it to bea@example.test ${tag}`;
+          reply(both, [{ action: 'GMAIL_SEND_EMAIL', args: email('bea@example.test') }]);
+          const bothTurn = await say(both);
+          const scoutPart = await dispatched(scout, bothTurn);
+          await waitFor(scoutPart, 'succeeded');
+          const writerPart = await turnOf(writer, `room:${bothTurn}:${ids[writer]}`);
+          await waitFor(writerPart, 'succeeded');
+          assert.equal((await approvalsFor(scoutPart)).length, 0);
+          assert.equal((await approvalsFor(writerPart)).length, 0);
+          assert.equal(sends(), before + 3);
 
           const relayText = `@${scout} @${writer} over to you ${tag}`;
           reply(roomHopPrompt, [], relayText);
@@ -5437,7 +5476,8 @@ export const approvalCases = inParts(
           ).rows[0]!.n;
           assert.equal(hops, roomLimits.hops);
           batches.delete(roomHopPrompt);
-          for (const text of [look, relay, yes, propose, goAhead, start]) batches.delete(text);
+          for (const text of [look, relay, yes, propose, goAhead, toScout, both, start])
+            batches.delete(text);
 
           const filler = (
             await pool.query<{ n: number }>(
