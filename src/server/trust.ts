@@ -115,7 +115,14 @@ export function createTrust(options: {
           : undefined;
       const said =
         origin.source === 'user'
-          ? await recentOwnerWords(pool, ownerId, turn.threadId, origin.messageIds, origin.taskId)
+          ? await recentOwnerWords(
+              pool,
+              ownerId,
+              turn.threadId,
+              origin.messageIds,
+              origin.taskId,
+              origin.chainMessageIds,
+            )
           : undefined;
       const words: TrustWords = {
         timeZone: preferences?.time_zone ?? 'UTC',

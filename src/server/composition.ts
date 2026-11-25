@@ -162,6 +162,7 @@ import { createChannels } from './channels.ts';
 import { createChatTitles } from './chat-titles.ts';
 import { chatModelArgs } from './chat-model.ts';
 import { createAgents } from './agents.ts';
+import { createChiefOfStaff } from './chief-of-staff.ts';
 import { createAgentMemory, sharedReflection } from './agent-memory.ts';
 import { createAgentTools } from './agent-tools.ts';
 import { createAgentSchedules } from './agent-schedules.ts';
@@ -1231,6 +1232,10 @@ async function initializeApplication(
       ? { validateModel: (choice: ModelSelection) => adapters.models!.validateChoice(choice) }
       : {}),
     renamed: renameTopic,
+    agents: {
+      send: (...args) => chiefOfStaff.send(...args),
+      read: (...args) => chiefOfStaff.read(...args),
+    },
   });
   await tasks.initialize();
   const agents = createAgents({
@@ -1242,6 +1247,14 @@ async function initializeApplication(
     removed: (id) => agentMemory.remove(id),
   });
   await agents.initialize();
+  const chiefOfStaff = createChiefOfStaff({
+    pool,
+    ownerId,
+    agents,
+    halt: tasks.halt,
+    checkIn: ledger.checkIn,
+  });
+  await chiefOfStaff.initialize();
   const agentMemory = createAgentMemory({
     pool,
     ownerId,
@@ -1417,6 +1430,7 @@ async function initializeApplication(
     sweep: async () => {
       await sweepArtifacts();
       await tasks.wakeDue().catch((error) => logFailure('task_wake', error));
+      await chiefOfStaff.watch().catch((error) => logFailure('agent_watch', error));
       await vault.forgetExpiredHolds().catch((error) => logFailure('vault_expiry', error));
     },
     due: () => proactivity.due(),
@@ -1753,8 +1767,8 @@ async function initializeApplication(
         'NOD_schedule_create',
         'NOD_schedule_update',
       ].includes(action);
-      if (action === 'NOD_agent_update') {
-        const result = await withTurnLock(turnLock, (client) => agents.apply(args, client));
+      if (action === 'NOD_agent_update' || action === 'NOD_agent_create') {
+        const result = await withTurnLock(turnLock, (client) => agents.apply(args, client, action));
         await ledger.action(
           provenance.turnId,
           action,
@@ -2142,7 +2156,8 @@ async function initializeApplication(
       return result;
     },
     async (action, args, expectedRevision, client) => {
-      if (action === 'NOD_agent_update') return agents.validate(args, client);
+      if (action === 'NOD_agent_update' || action === 'NOD_agent_create')
+        return agents.validate(args, client, action);
       if (action === 'NOD_agent_schedule')
         return void (await agentSchedules.validate(args, client));
       if (
@@ -2170,7 +2185,7 @@ async function initializeApplication(
     (proposal, signal) =>
       proposal.action === applySiteAction
         ? jobs.apply.siteQuestion(proposal.args)
-        : proposal.action === 'NOD_agent_update'
+        : proposal.action === 'NOD_agent_update' || proposal.action === 'NOD_agent_create'
           ? agents.describe(proposal, signal, communication.describe, (channel, text, literal) =>
               Boolean(channels?.canDeliverLiteral(channel, text, literal)),
             )
@@ -2776,7 +2791,8 @@ async function initializeApplication(
       checkTyping: jobs.apply.isApplyChat,
       settleTask: tasks.settle,
       taskLedger: tasks.read,
-      agentContext: agents.context,
+      agentContext: chiefOfStaff.context,
+      fromMain: chiefOfStaff.fromMain,
       task: async (turn, raw, sourceMessageId, priorMessageId, priorHandoff) => {
         const request = raw as { action?: unknown; model?: unknown } | undefined;
         if (request?.action === 'start' && request.model) {
@@ -2997,6 +3013,17 @@ async function initializeApplication(
             check: (input) => trust.check(turn, 'NOD_agent_update', input, signal),
             ask: (input, decision) =>
               approvals.request(turn, 'NOD_agent_update', input, {
+                ...provenance,
+                signal,
+                admit,
+                ...decision,
+              }),
+          });
+        if (action === 'agent_create')
+          return agents.requestCreate(args, {
+            check: (input) => trust.check(turn, 'NOD_agent_create', input, signal),
+            ask: (input, decision) =>
+              approvals.request(turn, 'NOD_agent_create', input, {
                 ...provenance,
                 signal,
                 admit,

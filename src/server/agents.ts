@@ -2,7 +2,13 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type { Pool, PoolClient } from 'pg';
 import { z } from 'zod';
-import { agentAllowlist, agentLimits, type Agent, type AgentChoices } from '../shared/agents.ts';
+import {
+  agentAllowlist,
+  agentLimits,
+  agentMemoryModes,
+  type Agent,
+  type AgentChoices,
+} from '../shared/agents.ts';
 import { afterCommit, transaction } from './transaction.ts';
 import type { ApprovalDescription, ApprovalPresentation } from './approvals.ts';
 import { channelText } from './channel-text.ts';
@@ -42,6 +48,30 @@ const approvedChange = profile
   .partial()
   .extend({ id: z.uuid(), revision: z.number().int().positive() })
   .strict();
+const newAgent = profile.extend({ memoryMode }).strict();
+const newAgentInput = profile
+  .partial({ description: true, instructions: true, apps: true, skills: true })
+  .extend({ memoryMode: memoryMode.optional() })
+  .strict();
+
+type Review = {
+  check(
+    input: Record<string, unknown>,
+  ): Promise<{ confirm: false; basis: TrustBasis } | { confirm: true; reason: TrustReason }>;
+  ask(
+    input: Record<string, unknown>,
+    decision: { allowed: boolean; basis?: TrustBasis; details: Record<string, unknown> },
+  ): Promise<unknown>;
+};
+
+function readable(values: Record<string, unknown>) {
+  for (const [key, value] of Object.entries(values))
+    for (const text of [value].flat())
+      if (typeof text === 'string' && (publicText(text) !== text || hidden.test(text)))
+        throw new Error(
+          `The new ${key} has a secret, a private Nod link or invisible characters, so the owner could not read it exactly before approving. Write it without them.`,
+        );
+}
 
 function failure(message: string, statusCode: number) {
   return Object.assign(new Error(message), { statusCode });
@@ -92,9 +122,10 @@ export function createAgents(options: {
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS apps text[] NOT NULL DEFAULT '{}';
       ALTER TABLE agents ADD COLUMN IF NOT EXISTS skills text[] NOT NULL DEFAULT '{}';
       CREATE TABLE IF NOT EXISTS agent_chats (
-        owner_id text NOT NULL, agent_id uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        owner_id text NOT NULL, agent_id uuid NOT NULL,
         chat_id uuid NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, PRIMARY KEY (agent_id,chat_id)
       );
+      ALTER TABLE agent_chats DROP CONSTRAINT IF EXISTS agent_chats_agent_id_fkey;
       CREATE INDEX IF NOT EXISTS agent_chats_chat ON agent_chats(owner_id,chat_id);
       INSERT INTO agent_chats(owner_id,agent_id,chat_id)
         SELECT owner_id,id,chat_id FROM agents WHERE chat_id IS NOT NULL ON CONFLICT DO NOTHING;
@@ -287,10 +318,10 @@ export function createAgents(options: {
     await chatOf(client, agentId, chatId);
   }
 
-  async function taken(client: Client, id: string, name: string | undefined) {
+  async function taken(client: Client, id: string | null, name: string | undefined) {
     if (name === undefined) return;
     const other = await client.query(
-      'SELECT 1 FROM agents WHERE owner_id=$1 AND lower(name)=lower($2) AND id<>$3',
+      'SELECT 1 FROM agents WHERE owner_id=$1 AND lower(name)=lower($2) AND ($3::uuid IS NULL OR id<>$3)',
       [ownerId, name, id],
     );
     if (other.rowCount) throw failure('Another agent already has this name.', 409);
@@ -326,38 +357,45 @@ export function createAgents(options: {
       ),
     ) as Partial<z.infer<typeof profile>>;
     if (!Object.keys(changes).length) throw new Error('Choose a detail of the agent to change.');
-    for (const [key, value] of Object.entries(changes))
-      for (const text of [value].flat())
-        if (publicText(text) !== text || hidden.test(text))
-          throw new Error(
-            `The new ${key} has a secret, a private Nod link or invisible characters, so the owner could not read it exactly before approving. Write it without them.`,
-          );
+    readable(changes);
     await checkChoices(changes);
     await taken(pool, id, changes.name);
     return { input: { id, revision, ...changes }, current };
   }
 
-  async function request(
-    turnId: string,
-    args: Record<string, unknown>,
-    review: {
-      check(
-        input: Record<string, unknown>,
-      ): Promise<{ confirm: false; basis: TrustBasis } | { confirm: true; reason: TrustReason }>;
-      ask(
-        input: Record<string, unknown>,
-        decision: { allowed: boolean; basis?: TrustBasis; details: Record<string, unknown> },
-      ): Promise<unknown>;
-    },
+  async function decide(
+    review: Review,
+    input: Record<string, unknown>,
+    checked: Record<string, unknown>,
+    details: Record<string, unknown>,
   ) {
-    const { input, current } = await proposed(turnId, args);
-    const verdict = await review.check({ ...input, currentAgent: current });
+    const verdict = await review.check(checked);
     const allowed = !verdict.confirm && verdict.basis.kind === 'message';
     return review.ask(input, {
       allowed,
       ...(!verdict.confirm && allowed ? { basis: verdict.basis } : {}),
-      details: { current, ...(verdict.confirm ? { reason: verdict.reason } : {}) },
+      details: { ...details, ...(verdict.confirm ? { reason: verdict.reason } : {}) },
     });
+  }
+
+  async function request(turnId: string, args: Record<string, unknown>, review: Review) {
+    const { input, current } = await proposed(turnId, args);
+    return decide(review, input, { ...input, currentAgent: current }, { current });
+  }
+
+  async function requestCreate(args: Record<string, unknown>, review: Review) {
+    const input = newAgent.parse({
+      description: '',
+      instructions: '',
+      apps: [],
+      skills: [],
+      memoryMode: 'shared',
+      ...newAgentInput.parse(args),
+    });
+    readable(input);
+    await checkChoices(input);
+    await taken(pool, null, input.name);
+    return decide(review, input, input, {});
   }
 
   async function describe(
@@ -366,7 +404,11 @@ export function createAgents(options: {
     base: (proposal: ApprovalDescription, signal?: AbortSignal) => Promise<ApprovalPresentation>,
     canDeliverLiteral: (channel: string, text: string, literal: string) => boolean,
   ): Promise<ApprovalPresentation> {
-    const change = approvedChange.parse(proposal.args);
+    const change =
+      proposal.action === 'NOD_agent_create'
+        ? newAgent.parse(proposal.args)
+        : approvedChange.parse(proposal.args);
+    const memory = 'memoryMode' in change ? change.memoryMode : undefined;
     const accounts = new Map(
       change.apps?.some((value) => z.uuid().safeParse(value).success)
         ? ((await options.choices?.())?.apps ?? []).flatMap((app) =>
@@ -377,6 +419,7 @@ export function createAgents(options: {
     const literal = [
       change.name !== undefined && `Name: ${change.name}`,
       change.description !== undefined && `What it's for: ${change.description}`,
+      memory && `Memory: ${agentMemoryModes.find(({ id }) => id === memory)?.label ?? memory}`,
       change.apps !== undefined &&
         `Apps: ${agentAllowlist(
           change.apps.map((value) => accounts.get(value) ?? value),
@@ -418,14 +461,23 @@ export function createAgents(options: {
   async function answerRefusal(approvalId: string) {
     const refused = await pool.query(
       `SELECT 1 FROM approvals a JOIN messages m ON m.id=a.confirmation_message_id AND m.owner_id=a.owner_id
-       WHERE a.id=$1 AND a.owner_id=$2 AND a.action='NOD_agent_update' AND a.status='pending'
+       WHERE a.id=$1 AND a.owner_id=$2 AND a.action IN ('NOD_agent_update','NOD_agent_create') AND a.status='pending'
          AND right(m.text,$3)=$4`,
       [approvalId, ownerId, outsideApp.length, outsideApp],
     );
     return refused.rowCount ? appOnly : undefined;
   }
 
-  async function validate(raw: Record<string, unknown>, client: Client = pool) {
+  async function validate(
+    raw: Record<string, unknown>,
+    client: Client = pool,
+    action = 'NOD_agent_update',
+  ) {
+    if (action === 'NOD_agent_create') {
+      const { name, ...choices } = newAgent.parse(raw);
+      await checkChoices(choices);
+      return taken(client, null, name);
+    }
     const { id, revision, name } = approvedChange.parse(raw);
     const current = await client.query(
       'SELECT 1 FROM agents WHERE id=$1 AND owner_id=$2 AND revision=$3',
@@ -435,7 +487,30 @@ export function createAgents(options: {
     await taken(client, id, name);
   }
 
-  async function apply(raw: Record<string, unknown>, client: Client) {
+  async function apply(raw: Record<string, unknown>, client: Client, action = 'NOD_agent_update') {
+    if (action === 'NOD_agent_create') {
+      const input = newAgent.parse(raw);
+      await client
+        .query(
+          `INSERT INTO agents(id,owner_id,name,description,instructions,memory_mode,apps,skills)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+          [
+            randomUUID(),
+            ownerId,
+            input.name,
+            input.description,
+            input.instructions,
+            input.memoryMode,
+            input.apps,
+            input.skills,
+          ],
+        )
+        .catch((error: unknown) => {
+          throw conflict(error);
+        });
+      afterCommit(client, refresh);
+      return { agent: input.name, created: true };
+    }
     const { id, revision, ...input } = approvedChange.parse(raw);
     return { agent: await change(client, id, revision, input), changed: Object.keys(input) };
   }
@@ -495,6 +570,7 @@ export function createAgents(options: {
     context,
     attach,
     request,
+    requestCreate,
     describe,
     validate,
     apply,

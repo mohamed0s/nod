@@ -189,9 +189,23 @@ export async function recentOwnerWords(
   threadId: string,
   requestIds: string[],
   taskId: string | null = null,
+  chainIds: string[] = requestIds,
 ) {
-  const topics = Boolean(
-    (await pool.query("SELECT to_regclass('channel_main_topics') AS name")).rows[0]?.name,
+  const tables = (
+    await pool.query(
+      "SELECT to_regclass('channel_main_topics') AS topics,to_regclass('agent_chats') AS agents",
+    )
+  ).rows[0];
+  const topics = Boolean(tables?.topics);
+  const agentChat = Boolean(
+    taskId &&
+    tables?.agents &&
+    (
+      await pool.query('SELECT 1 FROM agent_chats WHERE owner_id=$1 AND chat_id=$2', [
+        ownerId,
+        taskId,
+      ])
+    ).rowCount,
   );
   const { rows } = await pool.query<{
     id: string;
@@ -202,6 +216,8 @@ export async function recentOwnerWords(
     reply_text: string | null;
     reply_presentation: unknown;
     reply_withdrawn: boolean | null;
+    reply_chat: string | null;
+    founding: boolean;
   }>(
     `WITH cleared AS (SELECT COALESCE((SELECT chat_cleared_at FROM threads WHERE id=$2 AND owner_id=$1),'-infinity'::timestamptz) AS at),
      visible AS NOT MATERIALIZED (SELECT m.id,m.created_at FROM messages m
@@ -211,11 +227,13 @@ export async function recentOwnerWords(
            AND NOT EXISTS (SELECT 1 FROM turns tt WHERE tt.owner_id=m.owner_id
              AND (tt.id=m.turn_id OR tt.message_id=m.id) AND tt.task_id IS NOT NULL)),
      anchors AS (${
-       taskId
-         ? `SELECT t.created_at FROM tasks t WHERE t.id=$4::uuid AND t.owner_id=$1
+       agentChat
+         ? 'SELECT NULL::timestamptz AS created_at WHERE false'
+         : taskId
+           ? `SELECT t.created_at FROM tasks t WHERE t.id=$4::uuid AND t.owner_id=$1
            AND NOT EXISTS (SELECT 1 FROM messages s JOIN turns st ON st.id=s.turn_id AND st.owner_id=s.owner_id
              WHERE s.id=t.source_message_id AND s.owner_id=t.owner_id AND st.session_id=t.id)`
-         : 'SELECT m.created_at FROM messages m WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.id=ANY($3::uuid[])'
+           : 'SELECT m.created_at FROM messages m WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.id=ANY($3::uuid[])'
      }),
      recent AS (${
        taskId
@@ -228,13 +246,27 @@ export async function recentOwnerWords(
              AND v.created_at>=CASE WHEN r.created_at>=cleared.at THEN cleared.at ELSE '-infinity'::timestamptz END
            ORDER BY v.created_at DESC,v.id DESC LIMIT ${recentMessages}) w${
              taskId
-               ? ` UNION SELECT tm.id FROM turns tu JOIN messages tm ON tm.owner_id=tu.owner_id
+               ? ` UNION (SELECT tm.id FROM turns tu JOIN messages tm ON tm.owner_id=tu.owner_id
            AND (tm.id=tu.message_id OR tm.turn_id=tu.id)
-           WHERE tu.owner_id=$1 AND tu.task_id=$4::uuid AND tm.role='user'`
+           WHERE tu.owner_id=$1 AND tu.task_id=$4::uuid AND tm.role='user'${
+             agentChat
+               ? ` AND tm.created_at>now()-interval '24 hours' ORDER BY tm.created_at DESC,tm.id DESC LIMIT ${recentMessages}`
+               : ''
+           })`
                : ''
            })
      SELECT m.id,m.text,m.created_at,r.id AS reply_id,r.text AS reply_text,r.presentation AS reply_presentation,
-       r.withdrawn AS reply_withdrawn,EXISTS (SELECT 1 FROM approvals p
+       r.withdrawn AS reply_withdrawn,${
+         taskId
+           ? `(SELECT ${turnChatSql('rt')} FROM messages rm JOIN turns rt ON rt.id=rm.turn_id AND rt.owner_id=rm.owner_id
+               WHERE rm.id=r.id AND rm.owner_id=$1)`
+           : 'NULL::uuid'
+       } AS reply_chat,${
+         taskId && !agentChat
+           ? `EXISTS (SELECT 1 FROM tasks k WHERE k.id=$4::uuid AND k.owner_id=$1
+               AND (k.source_message_id=m.id OR m.created_at<=k.created_at))`
+           : 'false'
+       } AS founding,EXISTS (SELECT 1 FROM approvals p
          JOIN turns e ON e.id=p.execution_turn_id AND e.owner_id=p.owner_id
          WHERE p.owner_id=$1 AND e.message_id=m.id) AS answer
      FROM (SELECT id FROM recent UNION SELECT unnest($3::uuid[])) ids
@@ -278,10 +310,15 @@ export async function recentOwnerWords(
        AND m.text NOT IN (SELECT task->>'title' FROM messages offer,jsonb_array_elements(offer.suggestions->'tasks') task
          WHERE offer.owner_id=$1 AND offer.thread_id=$2 AND offer.suggestions IS NOT NULL AND task->>'title' IS NOT NULL)
      ORDER BY m.created_at,m.id`,
-    taskId ? [ownerId, threadId, requestIds, taskId] : [ownerId, threadId, requestIds],
+    taskId
+      ? [ownerId, threadId, agentChat ? chainIds : requestIds, taskId]
+      : [ownerId, threadId, requestIds],
   );
   const messages = rows.map((row) => {
-    const replied = row.reply_id && !row.reply_withdrawn;
+    const replied =
+      row.reply_id &&
+      !row.reply_withdrawn &&
+      (!taskId || row.reply_chat === taskId || row.founding);
     const visual = replied ? presentationSchema.safeParse(row.reply_presentation) : undefined;
     const reply = replied
       ? [row.reply_text ?? '', visual?.success ? presentationText(visual.data) : '']

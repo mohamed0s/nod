@@ -201,6 +201,8 @@ export interface RuntimeContext {
     skills?: string[];
   };
   agentMemory?: { index: string; readsShared: boolean };
+  agents?: Array<{ name: string; description: string; chatId: string | null }>;
+  fromMain?: string;
   workspacePath: string;
   signal: AbortSignal;
   attachments: Array<{
@@ -293,6 +295,7 @@ export interface RuntimeContext {
       audioCaption?: string;
       replyTo?: RuntimeContext['replyTo'];
       attachments: RuntimeContext['attachments'];
+      fromMain?: string;
     }>
   >;
 }

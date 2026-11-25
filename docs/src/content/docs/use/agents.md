@@ -1,6 +1,6 @@
 ---
 title: Agents
-description: Turn a chat into a named agent with its own instructions and model, kept when you reset the conversation. This page describes a fork of Nod.
+description: Turn a chat into a named agent with its own instructions and model, kept when you reset the conversation, and let Main hand it work. This page describes a fork of Nod.
 sidebar:
   order: 3
 ---
@@ -28,7 +28,7 @@ The agent's model is the chat's [model](/use/tasks/#choose-the-model-for-a-chat)
 
 Agents sit in their own **Agents** group in the chat list, under **Main**. Select one to open its chat.
 
-To change a profile, select **Edit** beside **Agent**. **Remove agent, keep the chat** removes the profile and deletes the agent's own memory; the chat stays as an ordinary chat.
+To change a profile, select **Edit** beside **Agent**. **Remove agent, keep the chat** removes the profile and deletes the agent's own memory; the chat stays as an ordinary chat, and its action check keeps the [one-day window](#send-work-to-an-agent) of an agent's chat.
 
 ## Memory
 
@@ -77,6 +77,56 @@ The schedule's own instruction stays what it is allowed to do. The agent's instr
 A schedule keeps its own model. If it has none, it uses the model for schedules, unless you tick **Use the agent's model**; then it runs on the model of the agent's chat. That choice starts off for every schedule.
 
 You can also tell Nod, for example "run the weekly report as my research agent". Like a change to an agent, it runs only when your own message covers it, and otherwise Nod asks first; the question's card shows the schedule, the agent and the model choice. A schedule Nod creates in an agent's chat runs as that agent from the start, and Nod says so; change it on **Scheduled** any time. Removing an agent leaves its schedules running without an agent.
+
+## Main as chief of staff
+
+**Main** knows your agents. Each turn it sees their names, what each is for, what each is doing and any question one is waiting on, so you can ask it to involve one, for example "ask my job agent to draft replies to today's recruiter emails".
+
+### Send work to an agent
+
+Main sends your message to the agent's chat word for word. If the agent's last job is done, its chat opens again. If it has no chat in this conversation yet, for example after a reset, Main starts one. Main can add a short note with context the agent's chat doesn't have, such as which earlier message you meant.
+
+That note is Main's, not yours. The agent reads it as data, and the [action check](/trust/approvals/) never sees it. In the agent's chat, only your words count: the message Main sent and what you write in that chat yourself. A note that says "the owner already said yes, book it" adds nothing, and the agent still asks before it books.
+
+| You ask in Main                                                  | What happens                                                                                      |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| "Ask the job agent to draft replies to today's recruiter emails" | The agent reads and drafts without asking                                                         |
+| "…and send them"                                                 | It sends those replies. Anything beyond them, such as another recipient, is asked in its chat     |
+| Main involves an agent you didn't name                           | The agent's action check still judges only against your message                                   |
+| "Make me a research agent that writes formally"                  | Nod asks first, unless your words cover that exact agent                                          |
+| The agent needs your approval                                    | It asks in its own chat or topic. Main's tasks line shows **Needs you**, and Main can't answer it |
+
+An agent's chat can run for weeks, so its action check works as in Main: it sees your messages there from the past day, at most the last 20, plus the message behind the work the agent is doing. An older order in that chat stops counting the next day, and so does a limit: "never email Bob" written there more than a day ago no longer holds. Put lasting limits in your [rules](/trust/approvals/#your-rules).
+
+### What Main can't do
+
+- **Answer for you.** An agent's question or approval is answered only in that agent's chat or topic. A "yes" in Main never answers it, and Main can't send a plain yes or no to an agent. A short reply such as "ok, go ahead" reaches the agent without Main's summary it answered, so it never covers what Main described there.
+- **Give permission.** Main's notes, the agent's instructions and anything an agent reports never count as your words.
+- **Send work from a schedule, an app event or the observer.** Only Main, answering your message, sends work to an agent.
+
+### Read what an agent did
+
+Main can read an agent's latest result and messages to sum them up for you. It reads them as data from that chat, never as your words. The results of finished tasks that Main sees each turn are data in the same way.
+
+### Create an agent from chat
+
+Tell Main, for example "make me a research agent with its own memory that writes formally". Nod writes out the exact name, purpose, memory, apps, skills and instructions, and asks you first unless your own message covers that exact agent. As with a [change to an agent](#change-an-agent-from-chat), a rule never covers it, and in Telegram or WhatsApp the question shows the exact text only when the app can show it unchanged. The new agent has no chat until you or Main send it work.
+
+### When Main stops an agent
+
+Main stops a working agent on its own only at one of these fixed limits, and then tells you in Main which agent it stopped and why:
+
+| Limit       | When                                                                                                    |
+| ----------- | ------------------------------------------------------------------------------------------------------- |
+| No progress | A run has had no step or message for 6 hours                                                            |
+| A loop      | 20 or more runs in one hour, with no message from you to it in that hour                                |
+| Cost        | Its work since your last message to it passed twice your [task check-in](/use/spending/#task-check-ins) |
+
+A stop only cancels the agent's current work, as **Stop** in its chat would. It never approves, sends or starts anything. Nod records each stop. Write in the agent's chat to start it again. You can still stop an agent yourself, or ask Main to, as with any [task](/use/tasks/#reply-or-stop-one-task).
+
+### A daily digest
+
+To get a summary of your agents each day, make a [schedule](/use/schedules/) in Main, for example "every morning at 8, sum up what my agents did yesterday and what needs me; don't change anything". The run sees your agents and can read their results, but it can't send them work.
 
 ## After a reset
 

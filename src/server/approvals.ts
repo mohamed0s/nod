@@ -264,19 +264,19 @@ export async function turnOrigin(turnId: string) {
           )
         ).rows[0]
       : undefined;
+    const chained =
+      origin.source === 'user'
+        ? chain.flatMap((turn) => (turn.message_id ? [turn.message_id] : []))
+        : [];
     const said =
       origin.source === 'user'
-        ? [
-            ...new Set([
-              ...chain.flatMap((turn) => (turn.message_id ? [turn.message_id] : [])),
-              ...(task?.source_message_id ? [task.source_message_id] : []),
-            ]),
-          ]
+        ? [...new Set([...chained, ...(task?.source_message_id ? [task.source_message_id] : [])])]
         : [];
     return {
       taskId: current.task_id,
       source: origin.source,
       messageIds: said,
+      chainMessageIds: [...new Set(chained)],
       channel: current.channel,
       scheduleInstruction: run?.authority ?? undefined,
       ...(run

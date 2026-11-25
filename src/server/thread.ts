@@ -258,7 +258,8 @@ export interface ThreadDependencies {
   checkTyping?: (turn: TurnRef) => Promise<boolean>;
   settleTask?: (turn: TurnRef, result: string) => Promise<void>;
   taskLedger?: (threadId: string) => Promise<NonNullable<RuntimeContext['tasks']>>;
-  agentContext?: (turnId: string) => Promise<RuntimeContext['agent']>;
+  agentContext?: (turnId: string) => Promise<Pick<RuntimeContext, 'agent' | 'agents' | 'fromMain'>>;
+  fromMain?: (sessionId: string, messageId: string) => Promise<string | undefined>;
   startTurn?: (turn: TurnRef) => Promise<void>;
   runTurn: (context: RuntimeContext) => Promise<RuntimeResult>;
   speech: Pick<SpeechService, 'synthesize'> & Partial<Pick<SpeechService, 'configured'>>;
@@ -2355,7 +2356,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     const checkTyping = Boolean(taskContext && (await dependencies.checkTyping?.(ref)));
     const tasks = await dependencies.taskLedger?.(threadId);
     const workspacePath = join(dataRoot, 'workspaces', threadId);
-    const agent = await dependencies.agentContext?.(turn.id);
+    const agentParts = await dependencies.agentContext?.(turn.id);
     await mkdir(workspacePath, { recursive: true });
     const workspaceReference = (path: string) =>
       taskContext ? `/workspace/${threadId}/${path}` : path;
@@ -2555,7 +2556,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       channel: String(turn.channel).split(':')[0],
       ...loaded.context,
       speech,
-      ...(agent ? { agent } : {}),
+      ...agentParts,
       ...(proactivity ? { proactivity } : {}),
       taskContext,
       ...(checkTyping ? { checkTyping } : {}),
@@ -2743,8 +2744,10 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
                 const { uploads, replyTo } = loadedMessage;
                 voice ||= loadedMessage.voice;
                 ownerMessage = true;
+                const fromMain = await dependencies.fromMain?.(turn.session_id, message.id);
                 messages.push({
                   ...message,
+                  ...(fromMain ? { fromMain } : {}),
                   ...(loadedMessage.audioCaption !== undefined
                     ? { audioCaption: loadedMessage.audioCaption }
                     : {}),

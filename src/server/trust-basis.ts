@@ -101,6 +101,7 @@ const ownSettings = new Set([
   'NOD_model_select',
   'NOD_agent_update',
   'NOD_agent_schedule',
+  'NOD_agent_create',
 ]);
 
 type BasisWords = TrustWords & {

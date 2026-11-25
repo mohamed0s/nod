@@ -53,10 +53,13 @@ const input = z.discriminatedUnion('action', [
   z
     .object({
       action: z.literal('reply'),
-      ids: z.array(z.uuid()).min(1),
+      ids: z.array(z.uuid()).min(1).optional(),
+      agent: z.string().trim().min(1).max(60).optional(),
+      brief: z.string().trim().min(1).max(2000).optional(),
       retry: z.boolean().optional(),
     })
     .strict(),
+  z.object({ action: z.literal('read'), id: z.uuid() }).strict(),
   z.object({ action: z.literal('stop'), id: z.uuid().optional() }).strict(),
   z
     .object({
@@ -122,6 +125,21 @@ type Row = {
   schedule_model: ModelSelection | null;
 };
 
+export interface TaskAgents {
+  send(
+    client: PoolClient,
+    request: {
+      turn: TurnRef;
+      current: { thread_id: string; background: boolean; proactive: boolean; channel: string };
+      name: string;
+      messageId: string;
+      brief?: string;
+      deliver(id: string): Promise<void>;
+    },
+  ): Promise<void>;
+  read(client: Pick<PoolClient, 'query'>, task: Task): Promise<{ chat: string }>;
+}
+
 function failure(message: string, statusCode = 400) {
   return Object.assign(new Error(message), { statusCode });
 }
@@ -167,6 +185,7 @@ export function createTasks(options: {
   clearBrowser?: (id: string) => Promise<void>;
   validateModel?: (choice: ModelSelection) => ModelSelection;
   renamed?: (taskId: string, title: string) => void;
+  agents?: TaskAgents;
 }) {
   const { pool, ownerId } = options;
   const refresh = options.refresh ?? (() => {});
@@ -439,6 +458,7 @@ export function createTasks(options: {
     sourceMessageId: string,
     parentTurnId: string,
     retry?: boolean,
+    reopen?: boolean,
   ) {
     const task = (
       await client.query(
@@ -465,7 +485,7 @@ export function createTasks(options: {
       )
     ).rows[0];
     if (!message) throw failure('A task update needs an owner message.');
-    const closed = task.state !== 'open';
+    const closed = task.state !== 'open' && !reopen;
     if (closed) {
       const bound =
         retry &&
@@ -568,10 +588,42 @@ export function createTasks(options: {
     if (request.action === 'reply') {
       if (current.task_id || current.session_id !== turn.threadId || !sourceMessageId)
         throw failure('Only the main chat can send owner updates to tasks.');
+      if (!request.ids && !request.agent) throw failure('Name the tasks or the agent to send to.');
+      const owner = (
+        await client.query<{ text: string }>(
+          "SELECT text FROM messages WHERE id=$1 AND owner_id=$2 AND role='user'",
+          [sourceMessageId, ownerId],
+        )
+      ).rows[0];
+      if (owner && bareConfirmationAnswer(owner.text))
+        throw failure(
+          "A yes or no can't be sent to a task or an agent. The owner answers its question or approval in that chat.",
+        );
+      if (request.brief && !request.agent) throw failure('Only a reply to an agent takes a brief.');
       const ids = new Set(request.ids);
-      if (request.retry && ids.size !== 1) throw failure('A retry must name one task.');
+      if (request.retry && (ids.size !== 1 || request.agent))
+        throw failure('A retry must name one task.');
       for (const id of ids) await deliver(client, id, sourceMessageId, turn.turnId, request.retry);
+      if (request.agent) {
+        if (!options.agents) throw failure('Agents are unavailable.');
+        await options.agents.send(client, {
+          turn,
+          current,
+          name: request.agent,
+          messageId: sourceMessageId,
+          brief: request.brief,
+          deliver: (id) => deliver(client, id, sourceMessageId, turn.turnId, false, true),
+        });
+      }
       return { tasks: await read(client) };
+    }
+    if (request.action === 'read') {
+      if (current.task_id || current.session_id !== turn.threadId)
+        throw failure('Only the main chat can read task chats.');
+      const task = (await read(client, { id: request.id, closed: true }))[0];
+      if (!task) throw failure('Task not found.', 404);
+      if (!options.agents) throw failure('Reading task chats is unavailable.');
+      return options.agents.read(client, task);
     }
     if (request.action === 'stop') {
       if (current.task_id) throw failure('Use finish to close your own task.');
@@ -1034,6 +1086,21 @@ export function createTasks(options: {
     );
   }
 
+  async function halt(
+    id: string,
+    guard: (client: PoolClient, threadId: string) => Promise<boolean>,
+  ) {
+    const capture = snapshotAnalytics(options.analytics);
+    const cancelled = await cancellationTransaction(async (client) => {
+      const thread = await lockThread(client);
+      return (await guard(client, thread.id))
+        ? stop(client, id, thread.id, capture, 'agent')
+        : undefined;
+    }, pool);
+    if (cancelled) await afterStop(cancelled);
+    return Boolean(cancelled);
+  }
+
   async function afterStop(cancelled: { ids: string[]; browsers: string[] }) {
     abortTurns(cancelled.ids);
     await Promise.allSettled(cancelled.browsers.map((id) => options.clearBrowser?.(id)));
@@ -1146,6 +1213,7 @@ export function createTasks(options: {
     read: (thread?: string) => read(pool, { closed: true, thread }),
     resumeDue,
     wakeDue,
+    halt,
     registerRoutes,
   };
 }
