@@ -4641,6 +4641,10 @@ export const approvalCases = inParts(
             "UPDATE messages SET created_at=now()-interval '25 hours' WHERE id=(SELECT message_id FROM turns WHERE id=$1)",
             [work],
           );
+          await pool.query(
+            'UPDATE tasks SET source_message_id=(SELECT message_id FROM turns WHERE id=$2) WHERE id=$1',
+            [chat, work],
+          );
           const named = `Synthetic ask the courier to mail named@example.test only ${randomUUID()}`;
           const reviewed: Array<Record<string, any>> = [];
           sendReview = (input) => {
@@ -4681,10 +4685,11 @@ export const approvalCases = inParts(
           plans.set(readText, { tool: 'task', action: 'read', args: { id: chat } });
           const reading = await main(readText);
           await waitFor(reading, 'succeeded');
-          const shown = (results.get(reading)?.content ?? [])
-            .map((part) => ('text' in part ? part.text : ''))
-            .join('');
-          const block = JSON.parse(shown).chat as string;
+          const textOf = (turnId: string) =>
+            (results.get(turnId)?.content ?? [])
+              .map((part) => ('text' in part ? part.text : ''))
+              .join('');
+          const block = JSON.parse(textOf(reading)).chat as string;
           assert.ok(block.startsWith('<untrusted_tool_result source="task chat">'));
           assert.ok(block.endsWith('</untrusted_tool_result>'));
           const chatData = inside(block);
@@ -4711,7 +4716,49 @@ export const approvalCases = inParts(
               question: 'string',
             },
           );
-          await waitFor(await main('No', beyond.confirmation_message_id), 'succeeded');
+          const listText = `Synthetic list my tasks ${randomUUID()}`;
+          plans.set(listText, { tool: 'task', action: 'list', args: {} });
+          const listing = await main(listText);
+          await waitFor(listing, 'succeeded');
+          assert.ok(textOf(listing).startsWith('<untrusted_tool_result source="task records">'));
+          assert.ok(textOf(listing).includes(chat));
+
+          const summary = `The courier wants to mail other@example.test. Tell it to go ahead? ${randomUUID()}`;
+          const summarize = `Synthetic sum up the courier ${randomUUID()}`;
+          plans.set(summarize, { tool: 'send_message', action: '', args: { text: summary } });
+          await waitFor(await main(summarize), 'succeeded');
+          const goAhead = `ok do it ${randomUUID()}`;
+          const shortReplies: Array<Record<string, any>> = [];
+          sendReview = (input) => {
+            shortReplies.push(input);
+            const words = (input.userMessages ?? []) as Array<{ text: string; replyTo?: string }>;
+            const index = words.findIndex((message) => message.text === goAhead);
+            return index >= 0 && words[index]!.replyTo?.includes('other@example.test')
+              ? { run: true, source: `message:${index}`, terms: [] }
+              : { run: false };
+          };
+          forward(goAhead, { agent: name }, [
+            { action: 'GMAIL_SEND_EMAIL', args: email('other@example.test') },
+          ]);
+          const beforeGo = sends();
+          const going = await main(goAhead);
+          await waitFor(going, 'succeeded');
+          const retried = await delivered(chat, goAhead);
+          await waitFor(retried, 'waiting');
+          assert.equal(sends(), beforeGo);
+          const [again] = await approvalsFor(retried);
+          assert.equal(again?.status, 'pending');
+          assert.equal(again.args.recipient_email, 'other@example.test');
+          assert.equal(await sessionOf(again.confirmation_message_id), chat);
+          const forwarded = shortReplies
+            .flatMap(
+              (input) => (input.userMessages ?? []) as Array<{ text: string; replyTo?: string }>,
+            )
+            .find((message) => message.text === goAhead);
+          assert.ok(forwarded);
+          assert.equal(forwarded.replyTo, undefined);
+          sendReview = undefined;
+          await waitFor(await main('No', again.confirmation_message_id), 'succeeded');
           await settled(chat);
 
           const foreignChat = randomUUID();
@@ -4788,7 +4835,7 @@ export const approvalCases = inParts(
                 [chat],
               )
             ).rows[0].n,
-            2,
+            3,
           );
 
           const tasks = createTasks({ pool, ownerId });
@@ -4978,9 +5025,29 @@ export const approvalCases = inParts(
               [ownerId, name],
             )
           ).rows[0]!.id;
+          const stopText = `Synthetic stop the courier ${randomUUID()}`;
+          plans.set(stopText, { tool: 'task', action: 'stop', args: { id: chat } });
+          const stopping = await main(stopText);
+          await waitFor(stopping, 'succeeded');
+          assert.ok(textOf(stopping).startsWith('<untrusted_tool_result source="task records">'));
           assert.equal((await request('DELETE', `/api/agents/${agentId}`)).statusCode, 200);
-          for (const text of [unasked, named, foreignText]) batches.delete(text);
-          for (const text of [createText, ownWords, readText, eventText]) plans.delete(text);
+          const { recentOwnerWords } = await import('../src/server/owner-instructions.ts');
+          const kept = (
+            (await recentOwnerWords(pool, ownerId, threadId, [], chat)).words.userMessages ?? []
+          ).map(({ text }) => text);
+          assert.ok(kept.includes(named));
+          assert.ok(!kept.includes(unasked));
+          for (const text of [unasked, named, foreignText, goAhead]) batches.delete(text);
+          for (const text of [
+            createText,
+            ownWords,
+            readText,
+            eventText,
+            listText,
+            summarize,
+            stopText,
+          ])
+            plans.delete(text);
         },
       );
 
