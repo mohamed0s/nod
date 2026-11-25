@@ -190,8 +190,21 @@ export async function recentOwnerWords(
   requestIds: string[],
   taskId: string | null = null,
 ) {
-  const topics = Boolean(
-    (await pool.query("SELECT to_regclass('channel_main_topics') AS name")).rows[0]?.name,
+  const tables = (
+    await pool.query(
+      "SELECT to_regclass('channel_main_topics') AS topics,to_regclass('agent_chats') AS agents",
+    )
+  ).rows[0];
+  const topics = Boolean(tables?.topics);
+  const agentChat = Boolean(
+    taskId &&
+    tables?.agents &&
+    (
+      await pool.query('SELECT 1 FROM agent_chats WHERE owner_id=$1 AND chat_id=$2', [
+        ownerId,
+        taskId,
+      ])
+    ).rowCount,
   );
   const { rows } = await pool.query<{
     id: string;
@@ -211,11 +224,13 @@ export async function recentOwnerWords(
            AND NOT EXISTS (SELECT 1 FROM turns tt WHERE tt.owner_id=m.owner_id
              AND (tt.id=m.turn_id OR tt.message_id=m.id) AND tt.task_id IS NOT NULL)),
      anchors AS (${
-       taskId
-         ? `SELECT t.created_at FROM tasks t WHERE t.id=$4::uuid AND t.owner_id=$1
+       agentChat
+         ? 'SELECT NULL::timestamptz AS created_at WHERE false'
+         : taskId
+           ? `SELECT t.created_at FROM tasks t WHERE t.id=$4::uuid AND t.owner_id=$1
            AND NOT EXISTS (SELECT 1 FROM messages s JOIN turns st ON st.id=s.turn_id AND st.owner_id=s.owner_id
              WHERE s.id=t.source_message_id AND s.owner_id=t.owner_id AND st.session_id=t.id)`
-         : 'SELECT m.created_at FROM messages m WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.id=ANY($3::uuid[])'
+           : 'SELECT m.created_at FROM messages m WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.id=ANY($3::uuid[])'
      }),
      recent AS (${
        taskId
@@ -228,9 +243,13 @@ export async function recentOwnerWords(
              AND v.created_at>=CASE WHEN r.created_at>=cleared.at THEN cleared.at ELSE '-infinity'::timestamptz END
            ORDER BY v.created_at DESC,v.id DESC LIMIT ${recentMessages}) w${
              taskId
-               ? ` UNION SELECT tm.id FROM turns tu JOIN messages tm ON tm.owner_id=tu.owner_id
+               ? ` UNION (SELECT tm.id FROM turns tu JOIN messages tm ON tm.owner_id=tu.owner_id
            AND (tm.id=tu.message_id OR tm.turn_id=tu.id)
-           WHERE tu.owner_id=$1 AND tu.task_id=$4::uuid AND tm.role='user'`
+           WHERE tu.owner_id=$1 AND tu.task_id=$4::uuid AND tm.role='user'${
+             agentChat
+               ? ` AND tm.created_at>now()-interval '24 hours' ORDER BY tm.created_at DESC,tm.id DESC LIMIT ${recentMessages}`
+               : ''
+           })`
                : ''
            })
      SELECT m.id,m.text,m.created_at,r.id AS reply_id,r.text AS reply_text,r.presentation AS reply_presentation,
