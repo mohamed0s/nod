@@ -106,7 +106,7 @@ export function ChatList({
         variant="outline"
         size="sm"
         className="chat-list-new"
-        aria-pressed={fresh}
+        aria-current={fresh ? 'page' : undefined}
         onClick={() => onNewChat()}
       >
         <Plus size={16} aria-hidden="true" />

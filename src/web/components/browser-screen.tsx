@@ -120,7 +120,7 @@ export function BrowserScreen({
       if (imageUrl.current) URL.revokeObjectURL(imageUrl.current);
       imageUrl.current = '';
     };
-  }, [browserId, captureAttempt]);
+  }, [browserId, captureAttempt, task]);
   return (
     <>
       {error && <Notice>{error}</Notice>}
