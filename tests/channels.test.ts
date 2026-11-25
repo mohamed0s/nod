@@ -6935,16 +6935,22 @@ test(
     const commands: Array<{ command: string; replyToMessageId?: string; hasReply?: boolean }> = [];
     const codes: Array<string | undefined> = [];
     const tapped: Array<{ messageId: string; approvalId: string }> = [];
+    const appOnly = new Set<string>();
+    let typed: { approvalId: string; approved: boolean } | undefined;
     channels = await createChannels(pool, {
       ownerId,
       transport: createChatSdkTransport(pool, fixtureEnv),
       present: async (_thread, input) => (input.kind === 'delivery' ? input.text : 'Synthetic'),
       subscribe: () => () => {},
       intervalMs: 600_000,
-      answer: async (_text, _channel, replyToMessageId, shownMessageId) => {
+      answer: async (text, _channel, replyToMessageId, shownMessageId) => {
         answers.push({ replyToMessageId, shownMessageId });
-        return undefined;
+        return text === 'Synthetic typed answer' ? typed : undefined;
       },
+      answerRefusal: async (approvalId) =>
+        appOnly.has(approvalId)
+          ? 'Open Nod in the app to read the exact new text and answer there.'
+          : undefined,
       acceptApproval: async (_client, input) => {
         tapped.push({ messageId: input.messageId, approvalId: input.approvalId });
       },
@@ -7168,6 +7174,39 @@ test(
     );
     await receive('yes', 701, beforeInvoice);
     assert.deepEqual(answers.at(-1), { replyToMessageId: undefined, shownMessageId: seenInMain });
+    const before = submitted.length;
+    typed = { approvalId: invoice, approved: true };
+    await receive('Synthetic typed answer', 701);
+    assert.equal(submitted.length, before + 1);
+    await pool.query("UPDATE approvals SET status='confirmed' WHERE id=$1", [invoice]);
+    await pool.query("UPDATE turns SET status='succeeded' WHERE id=$1", [invoiceTurn]);
+    const agentTurn = await turn(general.channel, null, 'waiting');
+    const agentQuestion = 'Change the synthetic agent? Open the chat in Nod to read the exact text';
+    const agentApproval = await approve(agentTurn, await say(agentTurn, agentQuestion));
+    appOnly.add(agentApproval);
+    await service.drain();
+    assert.equal(delivery(agentQuestion).reply_markup, undefined);
+    const taps = tapped.length;
+    await tap(agentQuestion);
+    assert.equal(tapped.length, taps);
+    const classified = answers.length;
+    for (const approved of [true, false]) {
+      typed = { approvalId: agentApproval, approved };
+      await say(agentTurn, `Synthetic agent note ${approved}`);
+      await service.drain();
+      await receive('Synthetic typed answer', 701);
+    }
+    typed = undefined;
+    assert.equal(submitted.length, before + 1);
+    assert.equal(answers.length, classified + 2);
+    await service.drain();
+    assert.equal(
+      sent.filter(({ text }) =>
+        String(text).startsWith('Open Nod in the app to read the exact new text and answer there'),
+      ).length,
+      2,
+    );
+    await pool.query("UPDATE turns SET status='succeeded' WHERE id=$1", [agentTurn]);
 
     const web = await chat('Synthetic price check', 'running');
     const progress = await say(web.turn, 'Checking synthetic prices');

@@ -3736,6 +3736,10 @@ export const approvalCases = inParts(
             /Open this chat in the Nod app to read the exact new text before you answer\.$/,
           );
           await pool.query("UPDATE turns SET channel='web' WHERE id=$1", [edit]);
+          assert.equal(
+            await agents.answerRefusal(change.id),
+            'Open Nod in the app to read the exact new text and answer there.',
+          );
           const approved = await send({
             text: 'Yes',
             replyToMessageId: change.confirmation_message_id,
@@ -3771,6 +3775,11 @@ export const approvalCases = inParts(
           await waitFor(described, 'waiting');
           const [held2] = await approvalsFor(described);
           assert.equal(held2?.status, 'pending');
+          await pool.query(
+            "UPDATE messages SET text=text||E'\\n\\nThe exact new text:\\n\\n```\\nSynthetic\\n```' WHERE id=$1",
+            [held2.confirmation_message_id],
+          );
+          assert.equal(await agents.answerRefusal(held2.id), undefined);
           assert.equal(
             (await pool.query('SELECT description FROM agents WHERE id=$1', [agentId])).rows[0]
               .description,
