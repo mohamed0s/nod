@@ -239,7 +239,7 @@ export interface ThreadDependencies {
   localFiles?: boolean;
   computerUse?: boolean;
   mcpServers?: () => Promise<NonNullable<RuntimeContext['mcpServers']>>;
-  memoryContext?: () => Promise<RuntimeContext['memory']>;
+  memoryContext?: (turnId: string) => Promise<Pick<RuntimeContext, 'memory' | 'agentMemory'>>;
   recall?: (
     text: string,
     before: Date | undefined,
@@ -2049,7 +2049,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
       [ownerId],
     ),
     dependencies.accountProfile?.().catch(() => undefined),
-    dependencies.memoryContext?.().catch(() => ''),
+    dependencies.memoryContext?.(turn.id).catch(() => undefined),
     dependencies.learnedSkills?.().catch(() => undefined),
     turn.background
       ? dependencies.connectedApps?.()
@@ -2102,7 +2102,8 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
         quietEnd: preference?.quiet_end ?? defaultPreferences.quietEnd,
       }),
       ...(account ? { account } : {}),
-      memory: memory ?? '',
+      memory: '',
+      ...memory,
       ...(previous.rows[0]?.status === 'failed' && previous.rows[0].error
         ? { previousFailure: previous.rows[0].error }
         : {}),

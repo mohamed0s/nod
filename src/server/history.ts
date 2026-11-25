@@ -56,6 +56,8 @@ export function createHistorySearch({
     const { query, before, cursor, from, to, around, order, chats } = inputSchema.parse(raw);
     const scoped = chat !== undefined;
     const current = scoped && chats === 'current';
+    const allowed = scoped ? chat.within : undefined;
+    const within = chats === 'all' ? allowed : undefined;
     const other = (value: string, parameter: string) =>
       scoped
         ? `,CASE WHEN ${value} IS DISTINCT FROM ${parameter}::uuid THEN ${chatNameSql(value, '$1')} END AS chat`
@@ -66,10 +68,10 @@ export function createHistorySearch({
     if (around) {
       const { rows } = await pool.query<HistoryMessage>(
         `WITH target AS (
-           SELECT m.created_at,m.id FROM messages m WHERE m.id=$2 AND m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')}
+           SELECT m.created_at,m.id FROM messages m WHERE m.id=$2 AND m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')}${allowed ? ` AND ${messageChatSql('m')}=ANY($4::uuid[])` : ''}
            UNION ALL
            (SELECT m.created_at,m.id FROM turns u JOIN messages m ON m.turn_id=u.id AND m.owner_id=u.owner_id AND m.thread_id=u.thread_id
-            WHERE u.id=$2 AND u.owner_id=$1 AND ${activeThreadSql('u')} AND m.hidden_at IS NULL
+            WHERE u.id=$2 AND u.owner_id=$1 AND ${activeThreadSql('u')} AND m.hidden_at IS NULL${allowed ? ` AND ${turnChatSql('u')}=ANY($4::uuid[])` : ''}
             ORDER BY m.created_at,m.id LIMIT 1)),
          hit AS (SELECT created_at,id FROM target LIMIT 1),
          place AS (SELECT ${scoped ? messageChatSql('m') : 'NULL::uuid'} AS chat FROM messages m,hit WHERE m.id=hit.id),
@@ -79,7 +81,7 @@ export function createHistorySearch({
            UNION ALL (SELECT m.* FROM messages m,hit WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')} AND (m.created_at,m.id)>(hit.created_at,hit.id)${near} ORDER BY m.created_at,m.id LIMIT 5))
          SELECT id,role,CASE WHEN id=(SELECT id FROM hit) THEN text ELSE left(text,6000) END AS text,
            id<>(SELECT id FROM hit) AND length(text)>6000 AS shortened,turn_id,created_at${other('(SELECT chat FROM place)', '$3')} FROM nearby ORDER BY created_at,id`,
-        [ownerId, around, ...(scoped ? [chat.id] : [])],
+        [ownerId, around, ...(scoped ? [chat.id] : []), ...(allowed ? [allowed] : [])],
       );
       if (!rows.length) throw new Error('This history result is unavailable.');
       return {
@@ -122,14 +124,16 @@ export function createHistorySearch({
     ];
     const turns = await pool.query(
       `${terms} SELECT u.id,left(u.prompt,200) AS title,u.status,u.source,u.created_at,split_part(u.channel,':',1) AS channel${other(turnChatSql('u'), '$7')}
-       FROM turns u CROSS JOIN terms WHERE ${where('u', 'u.prompt')}${inChat('u', '$7')} ORDER BY ${ordered('u', 'u.prompt')} LIMIT 15`,
-      scoped ? [...values, chat.id] : values,
+       FROM turns u CROSS JOIN terms WHERE ${where('u', 'u.prompt')}${inChat('u', '$7')}${within ? ` AND ${turnChatSql('u')}=ANY($8::uuid[])` : ''} ORDER BY ${ordered('u', 'u.prompt')} LIMIT 15`,
+      scoped ? [...values, chat.id, ...(within ? [within] : [])] : values,
     );
     const matches = `SELECT corpus.* FROM corpus CROSS JOIN terms WHERE ($2::text IS NULL OR corpus.v @@ terms.q)${kept('corpus')}`;
     const docs = current
       ? `matched AS MATERIALIZED (${matches}), docs AS (SELECT matched.* FROM matched
          LEFT JOIN turns u ON u.id=matched.turn_id AND u.owner_id=matched.owner_id WHERE TRUE${inChat('u', '$8')})`
-      : `docs AS (${matches})`;
+      : within
+        ? `matched AS MATERIALIZED (${matches}), docs AS (SELECT matched.* FROM matched WHERE ${messageChatSql('matched')}=ANY($8::uuid[]))`
+        : `docs AS (${matches})`;
     const page = await pool.query<HistoryMessage & { place: string; total: number }>(
       `${terms}, corpus AS (
          SELECT m.id,m.owner_id,m.turn_id,m.role,m.text,m.created_at,to_tsvector('english',m.text) AS v
@@ -149,12 +153,12 @@ export function createHistorySearch({
        hits AS (SELECT * FROM ranked WHERE $7::uuid IS NULL OR place>(SELECT place FROM position) ORDER BY place LIMIT 21)
        SELECT hits.id,hits.role,left(hits.text,6000) AS text,length(hits.text)>6000 AS shortened,hits.created_at,hits.place,
          (SELECT count(*)::int FROM ranked) AS total FROM hits ORDER BY place`,
-      [...values, cursor ?? null, ...(current ? [chat.id] : [])],
+      [...values, cursor ?? null, ...(current ? [chat.id] : within ? [within] : [])],
     );
     if (cursor && !page.rows.length) {
       const { rows } = await pool.query(
-        `${terms} SELECT m.id FROM messages m CROSS JOIN terms WHERE ${where('m', 'm.text')} AND m.hidden_at IS NULL${kept('m')} AND m.id=$7::uuid${current ? ` AND ${messageChatSql('m')} IS NOT DISTINCT FROM $8::uuid` : ''}`,
-        [...values, cursor, ...(current ? [chat.id] : [])],
+        `${terms} SELECT m.id FROM messages m CROSS JOIN terms WHERE ${where('m', 'm.text')} AND m.hidden_at IS NULL${kept('m')} AND m.id=$7::uuid${current ? ` AND ${messageChatSql('m')} IS NOT DISTINCT FROM $8::uuid` : within ? ` AND ${messageChatSql('m')}=ANY($8::uuid[])` : ''}`,
+        [...values, cursor, ...(current ? [chat.id] : within ? [within] : [])],
       );
       if (!rows.length) throw new Error('This history cursor does not match the search.');
     }

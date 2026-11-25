@@ -12,6 +12,7 @@ import { chatsReady, messageChatSql } from './chat-scope.ts';
 import type { MemoryService } from './memory.ts';
 import type { WorkConsumers } from './work-admission.ts';
 import type { CaptureAnalytics } from './analytics.ts';
+import { routeMemory, type ReflectedDocument, type RoutedDocument } from './agent-memory.ts';
 
 const queue = 'memory-maintenance';
 const nilId = '00000000-0000-0000-0000-000000000000';
@@ -82,6 +83,7 @@ export function createMemoryLearning(options: {
   memory: MemoryService;
   curator: MemoryCurator;
   analytics?: CaptureAnalytics;
+  documents?: { shared: string; list(): Promise<ReflectedDocument[]> };
 }) {
   const report = (
     changes: ReturnType<typeof applyOps>['applied'],
@@ -102,35 +104,47 @@ export function createMemoryLearning(options: {
     return parsed.success ? parsed.data.ops : undefined;
   }
 
-  async function batch() {
-    if (!options.curator.configured || !(await options.memory.enabled())) return;
-    const tree = await options.memory.load();
+  async function batch(document?: ReflectedDocument) {
+    const memory = document?.memory ?? options.memory;
+    if (!options.curator.configured || !(await memory.enabled())) return;
+    const tree = await memory.load();
     if (!tree.enabled) return;
     if (!tree.reflected) {
       const { rows } = await options.pool.query(`SELECT ${utc('now()')} AS now`);
-      await options.memory.edit((fresh) => {
-        fresh.reflected ??= `${rows[0].now}/${nilId}`;
+      const start = document && (await options.memory.load()).reflected;
+      await memory.edit((fresh) => {
+        fresh.reflected ??= start || `${rows[0].now}/${nilId}`;
       });
       return;
     }
     const [from, after] = tree.reflected.split('/');
     const { rows } = await options.pool.query(
-      `${learnableText} AND (m.created_at,m.id)>($2::timestamptz,$3::uuid)
+      `${learnableText} ${document?.filter ?? options.documents?.shared ?? ''} AND (m.created_at,m.id)>($2::timestamptz,$3::uuid)
        ORDER BY m.created_at,m.id LIMIT ${batchSize}`,
-      [options.ownerId, from, after],
+      [options.ownerId, from, after, ...(document?.params ?? [])],
     );
     if (!rows.length) return;
     const mark = `${rows.at(-1).at}/${rows.at(-1).id}`;
     const messages: OwnerText[] = rows.filter((row) => !unsafe(row.text));
+    const routed =
+      document &&
+      routeMemory(
+        { memory: options.memory, tree: await options.memory.load() },
+        { memory, tree },
+        document.agent,
+      );
     let ops: unknown[] = [];
     if (messages.length) {
-      const proposed = await ask(reflectInstructions(tree.sensitive), {
-        today: new Date().toISOString().slice(0, 10),
-        memory: JSON.stringify(indexLayout(tree, { tentative: true })),
-        messages: numbered(messages),
-      });
+      const proposed = await ask(
+        reflectInstructions(routed?.sensitive ?? tree.sensitive) + (routed?.instructions ?? ''),
+        {
+          today: new Date().toISOString().slice(0, 10),
+          ...(routed?.input ?? { memory: JSON.stringify(indexLayout(tree, { tentative: true })) }),
+          messages: numbered(messages),
+        },
+      );
       if (!proposed) {
-        await options.memory.edit((fresh) => {
+        await memory.edit((fresh) => {
           if (fresh.reflected !== tree.reflected) return;
           fresh.retries += 1;
           if (fresh.retries >= maxRetries) {
@@ -142,8 +156,14 @@ export function createMemoryLearning(options: {
       }
       ops = proposed;
     }
-    const result = await options.memory.edit((fresh) => {
+    if (routed) {
+      const shared = await routed.share(ops, messages);
+      report(shared.applied, 'background');
+      ops = shared.own;
+    }
+    const result = await memory.edit((fresh) => {
       if (fresh.reflected !== tree.reflected) return;
+      if (routed) fresh.sensitive = routed.sensitive;
       const { applied: operations } = applyOps(fresh, ops, messages, new Date().toISOString());
       fresh.reflected = mark;
       fresh.retries = 0;
@@ -158,13 +178,16 @@ export function createMemoryLearning(options: {
     sourceMessageId: string | null,
     commit: <T>(write: () => Promise<T>) => Promise<T> = (write) => write(),
     signal?: AbortSignal,
+    agent?: RoutedDocument,
   ) {
     signal?.throwIfAborted();
     const input = rememberInput.parse(raw);
     if (!sourceMessageId) throw new Error('Only a message from the owner can save to memory.');
     if (!options.curator.configured) throw new Error('Saving to memory needs the memory model.');
     const tree = await options.memory.load();
-    if (!tree.enabled) throw new Error('Memory is turned off.');
+    const own = agent && { memory: agent.memory, tree: await agent.memory.load() };
+    if (!tree.enabled && !own?.tree.enabled) throw new Error('Memory is turned off.');
+    const routed = own && routeMemory({ memory: options.memory, tree }, own, agent);
     const named = [...new Set(input.messages ?? [])].filter((id) => id !== sourceMessageId);
     const ids = named.filter((id) => z.uuid().safeParse(id).success);
     const required = [...ids, sourceMessageId];
@@ -205,10 +228,12 @@ export function createMemoryLearning(options: {
         await options.curator.curate(
           {
             task: 'remember',
-            instructions: rememberInstructions(tree.sensitive),
+            instructions: rememberInstructions(tree.sensitive) + (routed?.instructions ?? ''),
             input: {
               today: new Date().toISOString().slice(0, 10),
-              memory: JSON.stringify(indexLayout(tree, { tentative: true })),
+              ...(routed?.input ?? {
+                memory: JSON.stringify(indexLayout(tree, { tentative: true })),
+              }),
               current: said.at(-1),
               earlier: said.slice(0, -1),
             },
@@ -222,43 +247,54 @@ export function createMemoryLearning(options: {
     signal?.throwIfAborted();
     if (!reply.success)
       throw new Error('The memory model gave no usable answer. Nothing was saved.');
-    const changes = await commit(() =>
-      options.memory.edit((fresh) => {
-        if (fresh.generation !== tree.generation)
-          throw new Error('Memory changed while this note was being prepared. Save it again.');
-        const { applied, rejected } = applyOps(
-          fresh,
-          reply.data.ops,
-          ordered,
-          new Date().toISOString(),
-          'stated',
-        );
-        if (rejected.length) throw new Error(`Nothing was saved. ${notSaved(rejected)}`);
-        return applied;
-      }),
-    );
+    const refuse = (rejected: Rejection[]): never => {
+      throw new Error(`Nothing was saved. ${notSaved(rejected)}`);
+    };
+    const changes: Array<ReturnType<typeof applyOps>['applied'][number] & { memory?: string }> =
+      await commit(() =>
+        routed
+          ? routed.save(reply.data.ops, ordered, refuse)
+          : options.memory.edit((fresh) => {
+              if (fresh.generation !== tree.generation)
+                throw new Error(
+                  'Memory changed while this note was being prepared. Save it again.',
+                );
+              const { applied, rejected } = applyOps(
+                fresh,
+                reply.data.ops,
+                ordered,
+                new Date().toISOString(),
+                'stated',
+              );
+              if (rejected.length) refuse(rejected);
+              return applied;
+            }),
+      );
     report(changes, 'agent');
     return {
-      saved: changes.flatMap(({ operation, path, text }) =>
-        operation === 'save' ? [{ path, text }] : [],
+      saved: changes.flatMap(({ operation, path, text, memory }) =>
+        operation === 'save' ? [{ path, text, ...(memory ? { memory } : {}) }] : [],
       ),
       archived: changes.flatMap(({ operation, path }) => (operation === 'archive' ? [path] : [])),
     };
   }
 
-  async function reflect() {
+  async function reflect(document?: ReflectedDocument) {
     let applied = 0;
     for (;;) {
-      const result = await batch();
+      const result = await batch(document);
       applied += result?.applied ?? 0;
       if (!result?.more) return applied;
     }
   }
 
   async function run() {
-    if (!(await options.memory.enabled())) return;
-    await options.memory.edit((tree) => repair(tree, new Date()));
-    await reflect();
+    for (const document of [undefined, ...((await options.documents?.list()) ?? [])]) {
+      const memory = document?.memory ?? options.memory;
+      if (!(await memory.enabled())) continue;
+      await memory.edit((tree) => repair(tree, new Date()));
+      await reflect(document);
+    }
   }
 
   return { reflect, remember, run };

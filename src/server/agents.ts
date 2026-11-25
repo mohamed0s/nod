@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type { Pool, PoolClient } from 'pg';
 import { z } from 'zod';
-import { agentLimits, type Agent } from '../shared/agents.ts';
+import { agentAllowlist, agentLimits, type Agent, type AgentChoices } from '../shared/agents.ts';
 import { afterCommit, transaction } from './transaction.ts';
 import type { ApprovalDescription, ApprovalPresentation } from './approvals.ts';
 import { channelText } from './channel-text.ts';
@@ -24,14 +24,19 @@ const oneLine = (max: number) =>
     .trim()
     .max(max)
     .regex(/^[^\r\n]*$/, 'Use one line.');
+const allowlist = (max: number) =>
+  z
+    .array(oneLine(200).min(1))
+    .max(max)
+    .transform((values) => [...new Set(values)]);
 const profile = z.object({
   name: oneLine(agentLimits.name).min(1),
   description: oneLine(agentLimits.description),
   instructions: z.string().trim().max(agentLimits.instructions),
+  apps: allowlist(agentLimits.apps),
+  skills: allowlist(agentLimits.skills),
 });
-const memoryMode = z
-  .enum(['shared', 'own', 'own_and_shared'])
-  .refine((value) => value === 'shared', 'Only shared memory is available for agents for now.');
+const memoryMode = z.enum(['shared', 'own', 'own_and_shared']);
 const changeInput = profile.partial().extend({ memoryMode: memoryMode.optional() }).strict();
 const approvedChange = profile
   .partial()
@@ -50,11 +55,24 @@ function conflict(error: unknown) {
     : failure('Another agent already has this name.', 409);
 }
 
+export interface AgentScope {
+  id: string;
+  name: string;
+  description: string;
+  instructions: string;
+  memoryMode: Agent['memoryMode'];
+  apps: string[];
+  skills: string[];
+  scheduled: boolean;
+}
+
 export function createAgents(options: {
   pool: Pool;
   ownerId: string;
   refresh?: () => void;
   renamed?: (taskId: string, title: string) => void;
+  choices?: () => Promise<AgentChoices>;
+  removed?: (agentId: string) => Promise<void>;
 }) {
   const { pool, ownerId } = options;
   const refresh = options.refresh ?? (() => {});
@@ -71,13 +89,22 @@ export function createAgents(options: {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS agents_chat ON agents(chat_id) WHERE chat_id IS NOT NULL;
       CREATE UNIQUE INDEX IF NOT EXISTS agents_name ON agents(owner_id,lower(name));
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS apps text[] NOT NULL DEFAULT '{}';
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS skills text[] NOT NULL DEFAULT '{}';
+      CREATE TABLE IF NOT EXISTS agent_chats (
+        owner_id text NOT NULL, agent_id uuid NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        chat_id uuid NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, PRIMARY KEY (agent_id,chat_id)
+      );
+      CREATE INDEX IF NOT EXISTS agent_chats_chat ON agent_chats(owner_id,chat_id);
+      INSERT INTO agent_chats(owner_id,agent_id,chat_id)
+        SELECT owner_id,id,chat_id FROM agents WHERE chat_id IS NOT NULL ON CONFLICT DO NOTHING;
     `);
   }
 
   async function list(threadId?: string): Promise<Agent[]> {
     return (
       await pool.query<Agent>(
-        `SELECT a.id,a.name,a.description,a.instructions,a.memory_mode AS "memoryMode",a.revision,
+        `SELECT a.id,a.name,a.description,a.instructions,a.memory_mode AS "memoryMode",a.apps,a.skills,a.revision,
            CASE WHEN u.thread_id=$2 THEN a.chat_id END AS "chatId",t.model
          FROM agents a LEFT JOIN tasks t ON t.id=a.chat_id AND t.owner_id=a.owner_id
          LEFT JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
@@ -87,15 +114,11 @@ export function createAgents(options: {
     ).rows;
   }
 
-  async function context(turnId: string) {
-    const row = (
-      await pool.query<{
-        name: string;
-        description: string;
-        instructions: string;
-        scheduled: boolean;
-      }>(
-        `SELECT a.name,a.description,a.instructions,a.chat_id IS DISTINCT FROM cur.session_id AS scheduled
+  async function scope(turnId: string): Promise<AgentScope | undefined> {
+    return (
+      await pool.query<AgentScope>(
+        `SELECT a.id,a.name,a.description,a.instructions,a.memory_mode AS "memoryMode",a.apps,a.skills,
+           a.chat_id IS DISTINCT FROM cur.session_id AS scheduled
          FROM turns cur ${workOriginSql('cur')}
          LEFT JOIN agent_schedules s ON s.owner_id=cur.owner_id AND s.schedule_id=work_schedule.id
          JOIN agents a ON a.owner_id=cur.owner_id AND (a.chat_id=cur.session_id OR a.id=s.agent_id)
@@ -104,9 +127,45 @@ export function createAgents(options: {
         [turnId, ownerId],
       )
     ).rows[0];
+  }
+
+  async function context(turnId: string) {
+    const row = await scope(turnId);
     if (!row) return undefined;
-    const { scheduled, ...agent } = row;
-    return scheduled ? { ...agent, scheduled } : agent;
+    const { name, description, instructions, scheduled, apps, skills } = row;
+    return {
+      name,
+      description,
+      instructions,
+      ...(scheduled ? { scheduled } : {}),
+      ...(apps.length ? { apps } : {}),
+      ...(skills.length ? { skills } : {}),
+    };
+  }
+
+  async function checkChoices(input: { apps?: string[]; skills?: string[] }) {
+    if (!input.apps?.length && !input.skills?.length) return;
+    if (!options.choices) throw failure('App and skill choices are unavailable.', 503);
+    const choices = await options.choices();
+    const known = {
+      apps: choices.apps.flatMap((app) => [app.slug, ...app.accounts.map(({ id }) => id)]),
+      skills: choices.skills.map(({ name }) => name),
+    };
+    for (const kind of ['apps', 'skills'] as const) {
+      const unknown = (input[kind] ?? []).filter((value) => !known[kind].includes(value));
+      if (unknown.length)
+        throw failure(
+          `Not ${kind === 'apps' ? 'a connected app or account' : 'a skill'}: ${unknown.join(', ')}. Choose from: ${known[kind].join(', ') || 'none'}.`,
+          400,
+        );
+    }
+  }
+
+  async function chatOf(client: Client, agentId: string, chatId: string) {
+    await client.query(
+      'INSERT INTO agent_chats(owner_id,agent_id,chat_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',
+      [ownerId, agentId, chatId],
+    );
   }
 
   async function title(client: Client, chatId: string | null, name: string) {
@@ -120,10 +179,11 @@ export function createAgents(options: {
 
   async function make(raw: unknown) {
     const { chatId, ...input } = profile
-      .partial({ description: true, instructions: true })
-      .extend({ chatId: z.uuid() })
+      .partial({ description: true, instructions: true, apps: true, skills: true })
+      .extend({ chatId: z.uuid(), memoryMode: memoryMode.optional() })
       .strict()
       .parse(raw);
+    await checkChoices(input);
     return transaction(async (client) => {
       const chat = await client.query(
         'SELECT 1 FROM tasks WHERE id=$1 AND owner_id=$2 AND session_id=id FOR UPDATE',
@@ -133,13 +193,24 @@ export function createAgents(options: {
       const id = randomUUID();
       await client
         .query(
-          `INSERT INTO agents(id,owner_id,name,description,instructions,chat_id)
-           VALUES($1,$2,$3,$4,$5,$6)`,
-          [id, ownerId, input.name, input.description ?? '', input.instructions ?? '', chatId],
+          `INSERT INTO agents(id,owner_id,name,description,instructions,chat_id,memory_mode,apps,skills)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [
+            id,
+            ownerId,
+            input.name,
+            input.description ?? '',
+            input.instructions ?? '',
+            chatId,
+            input.memoryMode ?? 'shared',
+            input.apps ?? [],
+            input.skills ?? [],
+          ],
         )
         .catch((error: unknown) => {
           throw conflict(error);
         });
+      await chatOf(client, id, chatId);
       await title(client, chatId, input.name);
       afterCommit(client, refresh);
       return { id };
@@ -157,6 +228,7 @@ export function createAgents(options: {
         .query<{ name: string; chat_id: string | null; renamed: boolean }>(
           `UPDATE agents a SET name=COALESCE($4,a.name),description=COALESCE($5,a.description),
              instructions=COALESCE($6,a.instructions),memory_mode=COALESCE($7,a.memory_mode),
+             apps=COALESCE($8::text[],a.apps),skills=COALESCE($9::text[],a.skills),
              revision=a.revision+1,updated_at=now()
            FROM agents before WHERE a.id=$1 AND a.owner_id=$2 AND a.revision=$3 AND before.id=a.id
            RETURNING a.name,a.chat_id,a.name IS DISTINCT FROM before.name AS renamed`,
@@ -168,6 +240,8 @@ export function createAgents(options: {
             input.description ?? null,
             input.instructions ?? null,
             input.memoryMode ?? null,
+            input.apps ?? null,
+            input.skills ?? null,
           ],
         )
         .catch((error: unknown) => {
@@ -210,6 +284,7 @@ export function createAgents(options: {
       'UPDATE agents SET chat_id=$3,updated_at=now() WHERE id=$1 AND owner_id=$2',
       [agentId, ownerId, chatId],
     );
+    await chatOf(client, agentId, chatId);
   }
 
   async function taken(client: Client, id: string, name: string | undefined) {
@@ -229,9 +304,11 @@ export function createAgents(options: {
         name: string;
         description: string;
         instructions: string;
+        apps: string[];
+        skills: string[];
         revision: number;
       }>(
-        `SELECT a.id,a.name,a.description,a.instructions,a.revision FROM turns u
+        `SELECT a.id,a.name,a.description,a.instructions,a.apps,a.skills,a.revision FROM turns u
          JOIN agents a ON a.owner_id=u.owner_id AND a.chat_id=u.session_id
          WHERE u.id=$1 AND u.owner_id=$2`,
         [turnId, ownerId],
@@ -244,15 +321,18 @@ export function createAgents(options: {
     const { id, revision, ...current } = agent;
     const changes = Object.fromEntries(
       Object.entries(input).filter(
-        ([key, value]) => current[key as keyof typeof current] !== value,
+        ([key, value]) =>
+          JSON.stringify(current[key as keyof typeof current]) !== JSON.stringify(value),
       ),
     ) as Partial<z.infer<typeof profile>>;
     if (!Object.keys(changes).length) throw new Error('Choose a detail of the agent to change.');
     for (const [key, value] of Object.entries(changes))
-      if (publicText(value) !== value || hidden.test(value))
-        throw new Error(
-          `The new ${key} has a secret, a private Nod link or invisible characters, so the owner could not read it exactly before approving. Write it without them.`,
-        );
+      for (const text of [value].flat())
+        if (publicText(text) !== text || hidden.test(text))
+          throw new Error(
+            `The new ${key} has a secret, a private Nod link or invisible characters, so the owner could not read it exactly before approving. Write it without them.`,
+          );
+    await checkChoices(changes);
     await taken(pool, id, changes.name);
     return { input: { id, revision, ...changes }, current };
   }
@@ -287,9 +367,22 @@ export function createAgents(options: {
     canDeliverLiteral: (channel: string, text: string, literal: string) => boolean,
   ): Promise<ApprovalPresentation> {
     const change = approvedChange.parse(proposal.args);
+    const accounts = new Map(
+      change.apps?.some((value) => z.uuid().safeParse(value).success)
+        ? ((await options.choices?.())?.apps ?? []).flatMap((app) =>
+            app.accounts.map(({ id, label }) => [id, `${id} (${app.name}, ${label})`] as const),
+          )
+        : [],
+    );
     const literal = [
       change.name !== undefined && `Name: ${change.name}`,
       change.description !== undefined && `What it's for: ${change.description}`,
+      change.apps !== undefined &&
+        `Apps: ${agentAllowlist(
+          change.apps.map((value) => accounts.get(value) ?? value),
+          'all connected apps',
+        )}`,
+      change.skills !== undefined && `Skills: ${agentAllowlist(change.skills, 'all skills')}`,
       change.instructions !== undefined && `Instructions:\n${change.instructions}`,
     ]
       .filter(Boolean)
@@ -374,6 +467,7 @@ export function createAgents(options: {
       const { revision, ...input } = changeInput
         .extend({ revision: z.number().int().positive() })
         .parse(request.body);
+      await checkChoices(input);
       await transaction((client) => change(client, id, revision, input), pool);
       return { ok: true };
     });
@@ -384,14 +478,20 @@ export function createAgents(options: {
         ownerId,
       ]);
       if (!removed.rowCount) throw failure('Agent not found.', 404);
+      await options.removed?.(id);
       refresh();
       return { ok: true };
+    });
+    app.get('/api/agents/choices', async () => {
+      if (!options.choices) throw failure('App and skill choices are unavailable.', 503);
+      return options.choices();
     });
   }
 
   return {
     initialize,
     list,
+    scope,
     context,
     attach,
     request,

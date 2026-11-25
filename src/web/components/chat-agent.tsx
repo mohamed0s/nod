@@ -1,10 +1,67 @@
 import { useState } from 'react';
 import type { Task } from '../../shared/contracts';
-import { agentLimits, type Agent, type AgentSchedules } from '../../shared/agents';
+import {
+  agentLimits,
+  agentMemoryModes,
+  type Agent,
+  type AgentChoices,
+  type AgentMemoryMode,
+  type AgentSchedules,
+} from '../../shared/agents';
 import { usePageData } from '../hooks/use-page-data';
 import { agentSchedulesPath } from './schedule-agent';
 import { api, errorMessage } from '../lib/api';
-import { Button, Dialog, DialogContent, DialogTitle, Field, Input, Notice } from './ui';
+import { Button, Checkbox, Dialog, DialogContent, DialogTitle, Field, Input, Notice } from './ui';
+
+function Allowlist({
+  label,
+  everything,
+  options,
+  value,
+  onChange,
+}: {
+  label: string;
+  everything: string;
+  options: Array<{ id: string; label: string; within?: string }>;
+  value: string[];
+  onChange(value: string[]): void;
+}) {
+  const known = new Set(options.map(({ id }) => id));
+  const listed: Array<{ id: string; label: string; within?: string }> = [
+    ...options,
+    ...value.filter((id) => !known.has(id)).map((id) => ({ id, label: `${id} (unavailable)` })),
+  ];
+  const toggle = (id: string, on: boolean) =>
+    onChange(on ? [...value, id] : value.filter((item) => item !== id));
+  return (
+    <details className="chat-agent-allowlist">
+      <summary>
+        {label}: {value.length ? `${value.length} chosen` : everything}
+      </summary>
+      <p className="field-hint">Choose none to allow all. Choices only narrow what it can use.</p>
+      <div className="chat-agent-choices">
+        {listed.map((option) => {
+          const covered = option.within !== undefined && value.includes(option.within);
+          return (
+            <label
+              key={option.id}
+              className={
+                option.within === undefined ? 'chat-agent-choice' : 'chat-agent-choice is-nested'
+              }
+            >
+              <Checkbox
+                checked={covered || value.includes(option.id)}
+                disabled={covered}
+                onChange={(event) => toggle(option.id, event.target.checked)}
+              />
+              {option.label}
+            </label>
+          );
+        })}
+      </div>
+    </details>
+  );
+}
 
 function AgentDialog({
   chatId,
@@ -20,9 +77,13 @@ function AgentDialog({
   const [name, setName] = useState(agent?.name ?? '');
   const [description, setDescription] = useState(agent?.description ?? '');
   const [instructions, setInstructions] = useState(agent?.instructions ?? '');
+  const [memoryMode, setMemoryMode] = useState<AgentMemoryMode>(agent?.memoryMode ?? 'shared');
+  const [apps, setApps] = useState(agent?.apps ?? []);
+  const [skills, setSkills] = useState(agent?.skills ?? []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const linked = usePageData<AgentSchedules>(agentSchedulesPath).data;
+  const choices = usePageData<AgentChoices>('/api/agents/choices').data;
   const schedules = agent ? (linked?.links ?? []).filter((link) => link.agentId === agent.id) : [];
   async function run(request: () => Promise<unknown>) {
     setBusy(true);
@@ -37,7 +98,21 @@ function AgentDialog({
       setBusy(false);
     }
   }
-  const profile = { name: name.trim(), description: description.trim(), instructions };
+  const lists = { apps, skills };
+  const profile = {
+    name: name.trim(),
+    description: description.trim(),
+    instructions,
+    memoryMode,
+    ...Object.fromEntries(
+      (['apps', 'skills'] as const).flatMap((key) =>
+        JSON.stringify(lists[key]) === JSON.stringify(agent?.[key] ?? [])
+          ? []
+          : [[key, lists[key]]],
+      ),
+    ),
+  };
+  const mode = agentMemoryModes.find(({ id }) => id === memoryMode);
   return (
     <DialogContent className="chat-agent-dialog" aria-describedby={undefined}>
       <DialogTitle>{agent ? 'Edit agent' : 'Make this chat an agent'}</DialogTitle>
@@ -84,14 +159,54 @@ function AgentDialog({
             onChange={(event) => setInstructions(event.target.value)}
           />
         </Field>
-        <p className="field-hint">
-          Memory: this agent uses your shared memory. Its model is under Model in this chat.
-        </p>
+        <Field label="Memory" hint={mode?.hint}>
+          <select
+            className="input"
+            value={memoryMode}
+            onChange={(event) => setMemoryMode(event.target.value as AgentMemoryMode)}
+          >
+            {agentMemoryModes.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Allowlist
+          label="Apps"
+          everything="All connected apps"
+          value={apps}
+          onChange={setApps}
+          options={(choices?.apps ?? []).flatMap((app) => [
+            { id: app.slug, label: app.name },
+            ...(app.accounts.length > 1 || app.accounts.some(({ id }) => apps.includes(id))
+              ? app.accounts.map((account) => ({
+                  id: account.id,
+                  label: account.label,
+                  within: app.slug,
+                }))
+              : []),
+          ])}
+        />
+        <Allowlist
+          label="Skills"
+          everything="All skills"
+          value={skills}
+          onChange={setSkills}
+          options={(choices?.skills ?? []).map((skill) => ({
+            id: skill.name,
+            label: skill.learned ? `${skill.name} (learned)` : skill.name,
+          }))}
+        />
+        <p className="field-hint">Its model is under Model in this chat.</p>
         {schedules.length > 0 && (
           <p className="field-hint">
             Schedules that run as this agent: {schedules.map(({ title }) => title).join(', ')}.
             Change them on Scheduled.
           </p>
+        )}
+        {agent && agent.memoryMode !== 'shared' && (
+          <p className="field-hint">Removing the agent also deletes its own memory.</p>
         )}
         {error && <Notice>{error}</Notice>}
         <div className="chat-agent-actions">

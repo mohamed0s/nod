@@ -86,9 +86,11 @@ export function createMemoryService(options: {
   ownerId: string;
   store: PrivateObjectStore;
   analytics?: CaptureAnalytics;
+  key?: string;
 }) {
+  const document = options.key ?? key;
   async function load() {
-    const object = await options.store.read(key, maxBytes);
+    const object = await options.store.read(document, maxBytes);
     return { tree: parse(object?.bytes), bytes: object?.bytes, version: object?.version ?? null };
   }
 
@@ -101,7 +103,7 @@ export function createMemoryService(options: {
       if (current.bytes ? Buffer.from(current.bytes).equals(bytes) : isEmpty(current.tree))
         return result;
       try {
-        await options.store.write(key, bytes, { expectedVersion: current.version });
+        await options.store.write(document, bytes, { expectedVersion: current.version });
         return result;
       } catch (error) {
         if (!(error instanceof ObjectStoreConflict) || attempt === 2) throw error;

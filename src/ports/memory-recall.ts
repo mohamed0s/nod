@@ -2,7 +2,7 @@ import type { MemoryNote } from '../shared/memory.ts';
 
 export interface MemoryBrief {
   mode: 'personalize' | 'recall' | 'aggregate';
-  facts: MemoryNote[];
+  facts: Array<MemoryNote & { scope?: 'agent' | 'shared' }>;
   messages: Array<{
     id: string;
     role: string;

@@ -76,6 +76,7 @@ export type JobMailAccess = {
     signal: AbortSignal,
   ): Promise<{ ids: string[]; more: boolean }>;
   read(connectionId: string, ids: string[], signal: AbortSignal): Promise<JobMailMessage[]>;
+  allowed?(turn: TurnRef, connectionId: string): Promise<void>;
 };
 
 export const jobMailSenders = {
@@ -990,6 +991,7 @@ export function createJobMail(options: {
         409,
       );
     if (!options.mail) throw failure('Nod can’t read Gmail for job mail on this server.', 503);
+    await options.mail.allowed?.(turn, state.account);
     const stop = AbortSignal.any([AbortSignal.timeout(readTimeout), ...(signal ? [signal] : [])]);
     const window = await search(pool);
     const accountKey = mailboxKey(
