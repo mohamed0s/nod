@@ -162,6 +162,7 @@ import { createChannels } from './channels.ts';
 import { createChatTitles } from './chat-titles.ts';
 import { chatModelArgs } from './chat-model.ts';
 import { createAgents } from './agents.ts';
+import { createAgentSchedules } from './agent-schedules.ts';
 import { createChannelSettings, managedChannelEnvironment } from './channel-settings.ts';
 import { createChannelMedia } from './channel-media.ts';
 import { createChannelSessionStore } from './channel-session.ts';
@@ -1220,6 +1221,8 @@ async function initializeApplication(
   await tasks.initialize();
   const agents = createAgents({ pool, ownerId, refresh, renamed: renameTopic });
   await agents.initialize();
+  const agentSchedules = createAgentSchedules({ pool, ownerId, refresh });
+  await agentSchedules.initialize();
   const chatTitles = createChatTitles({
     pool,
     ownerId,
@@ -1723,6 +1726,16 @@ async function initializeApplication(
         );
         return result;
       }
+      if (action === 'NOD_agent_schedule') {
+        const result = await withTurnLock(turnLock, (client) => agentSchedules.apply(args, client));
+        await ledger.action(
+          provenance.turnId,
+          action,
+          provenance.basis ?? { kind: 'approved' },
+          actionTarget(action, args, provenance.details),
+        );
+        return result;
+      }
       const lockedWrite =
         action === 'NOD_limits_update' ||
         action === 'NOD_model_select' ||
@@ -2076,6 +2089,7 @@ async function initializeApplication(
                           mailCheck,
                         );
                       })());
+      if (action === 'NOD_schedule_create') await agentSchedules.adopt(provenance.turnId, result);
       if (action.startsWith('NOD_') && action !== 'NOD_vault_allow')
         await ledger.action(
           provenance.turnId,
@@ -2087,6 +2101,8 @@ async function initializeApplication(
     },
     async (action, args, expectedRevision, client) => {
       if (action === 'NOD_agent_update') return agents.validate(args, client);
+      if (action === 'NOD_agent_schedule')
+        return void (await agentSchedules.validate(args, client));
       if (
         ['NOD_browser', 'NOD_vault_allow', 'NOD_bug_report_send', 'NOD_workspace_command'].includes(
           action,
@@ -2591,7 +2607,7 @@ async function initializeApplication(
       ...(adapters.models
         ? {
             workModel: async (turnId: string) => {
-              const origin = await workOrigin(turnId);
+              const origin = await agentSchedules.modelOrigin(turnId, await workOrigin(turnId));
               if (!origin) return undefined;
               const { selection } = adapters.models!.workModel(origin);
               const { provider, name } = adapters.models!.describe(selection);
@@ -2918,6 +2934,17 @@ async function initializeApplication(
             check: (input) => trust.check(turn, 'NOD_agent_update', input, signal),
             ask: (input, decision) =>
               approvals.request(turn, 'NOD_agent_update', input, {
+                ...provenance,
+                signal,
+                admit,
+                ...decision,
+              }),
+          });
+        if (action === 'agent_schedule')
+          return agentSchedules.request(turn.turnId, args, {
+            check: (input) => trust.check(turn, 'NOD_agent_schedule', input, signal),
+            ask: (input, decision) =>
+              approvals.request(turn, 'NOD_agent_schedule', input, {
                 ...provenance,
                 signal,
                 admit,
@@ -3640,6 +3667,7 @@ async function initializeApplication(
   onboardingProfile.registerRoutes(app);
   tasks.registerRoutes(app);
   agents.registerRoutes(app);
+  agentSchedules.registerRoutes(app);
   jobs.registerRoutes(app);
   pages.registerRoutes(app);
   triage.registerRoutes(app);

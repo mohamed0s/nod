@@ -2353,7 +2353,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     const checkTyping = Boolean(taskContext && (await dependencies.checkTyping?.(ref)));
     const tasks = await dependencies.taskLedger?.(threadId);
     const workspacePath = join(dataRoot, 'workspaces', threadId);
-    const agent = await dependencies.agentContext?.(turn.session_id);
+    const agent = await dependencies.agentContext?.(turn.id);
     await mkdir(workspacePath, { recursive: true });
     const workspaceReference = (path: string) =>
       taskContext ? `/workspace/${threadId}/${path}` : path;

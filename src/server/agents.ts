@@ -9,6 +9,7 @@ import { channelText } from './channel-text.ts';
 import { publicText } from './communication.ts';
 import type { TrustReason } from './trust.ts';
 import type { TrustBasis } from './trust-basis.ts';
+import { workOriginSql } from './turn-chain.ts';
 
 type Client = Pick<PoolClient, 'query'>;
 
@@ -86,13 +87,26 @@ export function createAgents(options: {
     ).rows;
   }
 
-  async function context(sessionId: string) {
-    return (
-      await pool.query<{ name: string; description: string; instructions: string }>(
-        'SELECT name,description,instructions FROM agents WHERE owner_id=$1 AND chat_id=$2',
-        [ownerId, sessionId],
+  async function context(turnId: string) {
+    const row = (
+      await pool.query<{
+        name: string;
+        description: string;
+        instructions: string;
+        scheduled: boolean;
+      }>(
+        `SELECT a.name,a.description,a.instructions,a.chat_id IS DISTINCT FROM cur.session_id AS scheduled
+         FROM turns cur ${workOriginSql('cur')}
+         LEFT JOIN agent_schedules s ON s.owner_id=cur.owner_id AND s.schedule_id=work_schedule.id
+         JOIN agents a ON a.owner_id=cur.owner_id AND (a.chat_id=cur.session_id OR a.id=s.agent_id)
+         WHERE cur.id=$1 AND cur.owner_id=$2
+         ORDER BY (a.chat_id IS NOT DISTINCT FROM cur.session_id) DESC LIMIT 1`,
+        [turnId, ownerId],
       )
     ).rows[0];
+    if (!row) return undefined;
+    const { scheduled, ...agent } = row;
+    return scheduled ? { ...agent, scheduled } : agent;
   }
 
   async function title(client: Client, chatId: string | null, name: string) {
