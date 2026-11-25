@@ -33,7 +33,7 @@ The chat list sits beside the conversation. **Main** is your ongoing conversatio
 
 Select a chat to open it. A task's chat shows only that task. Its card sits at the top with its status, steps, activity and **Stop**. Below it are the task's own messages, questions, approvals and results. Whatever you type there goes to that task, and the Stop control next to the message box stops only that task. Outside the desktop app, **Open the live browser** under the card opens that task's browser view in a new tab.
 
-A number next to a chat counts its unread replies, and the badge on **Chat** counts them all. Reading **Main** doesn't mark a task's replies as read; opening that task's chat does.
+A number next to a chat counts its unread replies, and the badge on **Chat** counts them all. Reading **Main** doesn't mark a task's replies as read; opening that task's chat does. A task's chat is marked read for all your devices at once, and the desktop app's Dock badge counts the same replies.
 
 **Main** shows your conversation with Nod and the start message of each task it started. A task's questions, approvals and results appear in its own chat, not in **Main**. To open a task's chat, select it in the list, select **Reply** on its card from the tasks line, or select **Open chat** on its preview.
 

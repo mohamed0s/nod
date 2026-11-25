@@ -319,6 +319,7 @@ export interface Task {
   updatedAt: string;
   closedAt: string | null;
   archivedAt?: string;
+  unread?: number;
   messageId?: string | null;
   steps?: string[];
   stepIndex?: number;
