@@ -42,6 +42,7 @@ export const jobMailTables = `
   ALTER TABLE job_profile ADD COLUMN IF NOT EXISTS mail_revision integer NOT NULL DEFAULT 0;
   ALTER TABLE job_profile ADD COLUMN IF NOT EXISTS mail_offered_at timestamptz;
   ALTER TABLE job_profile ADD COLUMN IF NOT EXISTS mail_run jsonb;
+  ALTER TABLE job_profile ADD COLUMN IF NOT EXISTS report_offered_at timestamptz;
   ALTER TABLE job_people ADD COLUMN IF NOT EXISTS follow_up text CHECK (follow_up IN ('done','dismissed'));
   ALTER TABLE job_people ADD COLUMN IF NOT EXISTS follow_up_at timestamptz;
   ALTER TABLE job_companies ADD COLUMN IF NOT EXISTS outcome text
@@ -62,6 +63,7 @@ export const mailActions = new Set([
   'mail_setup',
   'follow_up',
   'report',
+  'offer_made',
 ]);
 
 export type JobMailCheck = MailCheck;
@@ -595,16 +597,14 @@ const toolInput = z.discriminatedUnion('action', [
       action: z.literal('mail_setup'),
       account: z.string().trim().min(1).max(200).optional(),
       scheduleId: z.uuid().optional(),
-      offered: z.literal(true).optional(),
     })
     .strict()
-    .refine(
-      (value) =>
-        value.account !== undefined ||
-        value.scheduleId !== undefined ||
-        value.offered !== undefined,
-      { message: 'mail_setup needs account, scheduleId, offered or more than one of them.' },
-    ),
+    .refine((value) => value.account !== undefined || value.scheduleId !== undefined, {
+      message: 'mail_setup needs account, scheduleId or both.',
+    }),
+  z
+    .object({ action: z.literal('offer_made'), offer: z.enum(['job_mail', 'weekly_report']) })
+    .strict(),
   z
     .object({
       action: z.literal('follow_up'),
@@ -656,9 +656,10 @@ export function createJobMail(options: {
         mail_schedule_id: string | null;
         mail_revision: number;
         mail_offered_at: Date | null;
+        report_offered_at: Date | null;
         mail_run: (JobMailRun & { retryFrom?: string | null; olderThan?: number | null }) | null;
       }>(
-        'SELECT mail_account,mail_schedule_id,mail_revision,mail_offered_at,mail_run FROM job_profile WHERE owner_id=$1',
+        'SELECT mail_account,mail_schedule_id,mail_revision,mail_offered_at,report_offered_at,mail_run FROM job_profile WHERE owner_id=$1',
         [ownerId],
       )
     ).rows[0];
@@ -667,6 +668,7 @@ export function createJobMail(options: {
       scheduleId: row?.mail_schedule_id ?? null,
       revision: row?.mail_revision ?? 0,
       offeredAt: row?.mail_offered_at ?? null,
+      reportOfferedAt: row?.report_offered_at ?? null,
       run: row?.mail_run ?? null,
     };
   }
@@ -1407,22 +1409,27 @@ export function createJobMail(options: {
   async function status(client: Query) {
     const shown = await view(client);
     const state = await settings(client);
-    const invited = await client.query('SELECT 1 FROM job_people WHERE owner_id=$1 LIMIT 1', [
-      ownerId,
-    ]);
+    const people = (
+      await client.query<{ invited: boolean; asked: boolean }>(
+        `SELECT count(*)>0 AS invited,count(*) FILTER (WHERE asked_at IS NOT NULL)>0 AS asked
+         FROM job_people WHERE owner_id=$1`,
+        [ownerId],
+      )
+    ).rows[0];
     return {
       ...shown,
       offer:
         !shown.schedule &&
         !state.offeredAt &&
         shown.accounts.length > 0 &&
-        Boolean(invited.rowCount),
+        Boolean(people?.invited),
+      reportOffer: !state.reportOfferedAt && Boolean(people?.asked),
     };
   }
 
   async function setUp(
     client: Query,
-    change: { account?: string | null; scheduleId?: string; offered?: true },
+    change: { account?: string | null; scheduleId?: string },
     expected?: number,
     from?: MailRoot,
   ) {
@@ -1472,7 +1479,7 @@ export function createJobMail(options: {
         ownerId,
         change.account ?? null,
         change.scheduleId ?? null,
-        Boolean(change.offered || change.scheduleId),
+        Boolean(change.scheduleId),
         change.account !== undefined,
       ],
     );
@@ -1697,6 +1704,27 @@ export function createJobMail(options: {
             signal,
           );
           options.changed();
+          return status(pool);
+        case 'offer_made':
+          await options.turnWrite(
+            turn,
+            async (client) => {
+              if ((await root(client, turn)).lineage === 'other')
+                throw failure(
+                  'Only work started by an owner message, or a schedule, can record an offer.',
+                  403,
+                );
+              await client.query(
+                `INSERT INTO job_profile(owner_id,mail_offered_at,report_offered_at)
+                 VALUES($1,CASE WHEN $2 THEN now() END,CASE WHEN $2 THEN NULL ELSE now() END)
+                 ON CONFLICT (owner_id) DO UPDATE SET
+                   mail_offered_at=CASE WHEN $2 THEN COALESCE(job_profile.mail_offered_at,now()) ELSE job_profile.mail_offered_at END,
+                   report_offered_at=CASE WHEN $2 THEN job_profile.report_offered_at ELSE COALESCE(job_profile.report_offered_at,now()) END`,
+                [ownerId, request.offer === 'job_mail'],
+              );
+            },
+            signal,
+          );
           return status(pool);
         case 'follow_up':
           await options.turnWrite(
