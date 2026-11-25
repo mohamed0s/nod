@@ -9,6 +9,7 @@ import {
   Ellipsis,
   FileArchive,
   Import,
+  Merge,
   MessageCircle,
   PenLine,
   Plus,
@@ -46,6 +47,7 @@ import {
   Switch,
 } from '../components/ui';
 import { usePageData } from '../hooks/use-page-data';
+import { useMemoryDocument } from '../components/memory-documents';
 import { api, errorMessage } from '../lib/api';
 import { downloadExport } from '../lib/download';
 import { Tooltip } from '../components/tooltip';
@@ -298,6 +300,7 @@ function NoteDetail({
   onChange,
   onArchive,
   onForget,
+  onShare,
   onBack,
   onDirtyChange,
   onOpenSource,
@@ -308,6 +311,7 @@ function NoteDetail({
   onChange(body: { text?: string; expires?: string | null; confirm?: true }): Promise<void>;
   onArchive(): Promise<void>;
   onForget(): Promise<void>;
+  onShare?: () => Promise<void>;
   onBack?: () => void;
   onDirtyChange?(dirty: boolean): void;
   onOpenSource(messageId: string): void;
@@ -454,6 +458,17 @@ function NoteDetail({
                   >
                     <Check size={16} aria-hidden="true" />
                     Confirm note
+                  </ActionMenuItem>
+                )}
+                {onShare && (
+                  <ActionMenuItem
+                    onClick={() => {
+                      close();
+                      void run(onShare);
+                    }}
+                  >
+                    <Merge size={16} aria-hidden="true" />
+                    Move to shared
                   </ActionMenuItem>
                 )}
                 <div className="memory-menu-separator" role="separator" />
@@ -1208,7 +1223,12 @@ export function Memory({
   onOpenSource?(messageId: string, view: MemoryNavigationState): void;
   initialView?: MemoryNavigationState;
 }) {
-  const { data: view, error: loadError, loading, update } = usePageData<MemoryView>('/api/memory');
+  const memoryDocument = useMemoryDocument(() => {
+    setStage(null);
+    setChosen(undefined);
+  });
+  const base = memoryDocument.base;
+  const { data: view, error: loadError, loading, update } = usePageData<MemoryView>(base);
   const format = useDateFormat();
   const [compact, panelRef, panel] = useCompact();
   const [restoredView] = useState(initialView);
@@ -1275,7 +1295,7 @@ export function Memory({
   }
   async function setting(body: { saving?: boolean; sensitive?: boolean }) {
     setSettingError('');
-    await send('/api/memory', 'PATCH', body).catch((cause) => setSettingError(errorMessage(cause)));
+    await send(base, 'PATCH', body).catch((cause) => setSettingError(errorMessage(cause)));
   }
   function filter(next: Stage | null) {
     setStage(next);
@@ -1460,18 +1480,27 @@ export function Memory({
       )}
       onBack={back}
       onChange={async (body) => {
-        await send(`/api/memory/notes/${note.path}`, 'PATCH', body);
+        await send(`${base}/notes/${note.path}`, 'PATCH', body);
       }}
       onArchive={async () => {
-        await send(`/api/memory/notes/${note.path}/archive`, 'POST');
+        await send(`${base}/notes/${note.path}/archive`, 'POST');
         setChosen(undefined);
         focusList();
       }}
       onForget={async () => {
-        await send(`/api/memory/notes/${note.path}`, 'DELETE');
+        await send(`${base}/notes/${note.path}`, 'DELETE');
         setChosen(undefined);
         focusList();
       }}
+      onShare={
+        memoryDocument.agent
+          ? async () => {
+              await send(`${base}/notes/${note.path}/share`, 'POST');
+              setChosen(undefined);
+              focusList();
+            }
+          : undefined
+      }
     />
   ) : archived ? (
     <ArchivedDetail
@@ -1486,7 +1515,7 @@ export function Memory({
       )}
       onBack={back}
       onRestore={async () => {
-        const next = await send('/api/memory/archive/restore', 'POST', {
+        const next = await send(`${base}/archive/restore`, 'POST', {
           path: archived.path,
           archived: archived.archived,
         });
@@ -1495,7 +1524,7 @@ export function Memory({
         focusList();
       }}
       onForget={async () => {
-        await send('/api/memory/archive/forget', 'POST', {
+        await send(`${base}/archive/forget`, 'POST', {
           path: archived.path,
           archived: archived.archived,
         });
@@ -1523,6 +1552,7 @@ export function Memory({
 
   return (
     <div className="memory-panel" ref={panelRef} data-analytics-private>
+      {memoryDocument.picker(locked)}
       {view && (
         <div className="memory-settings">
           <label className="memory-setting">
@@ -1585,7 +1615,7 @@ export function Memory({
               onClick={() => {
                 setExporting(true);
                 setSettingError('');
-                downloadExport('/api/memory/export', 'nod-memory.md')
+                downloadExport(`${base}/export`, 'nod-memory.md')
                   .catch((cause) => setSettingError(errorMessage(cause)))
                   .finally(() => setExporting(false));
               }}
@@ -1610,7 +1640,7 @@ export function Memory({
         <AddNote
           onClose={() => setAdding(false)}
           onAdd={async (body) => {
-            const next = await send('/api/memory/notes', 'POST', body);
+            const next = await send(`${base}/notes`, 'POST', body);
             setStage(null);
             setQuery('');
             setChosen(next.path ? { note: next.path } : undefined);
@@ -1628,7 +1658,7 @@ export function Memory({
             onDone();
           }}
           onImport={async (notes) => {
-            const next = await send('/api/memory/import', 'POST', { notes });
+            const next = await send(`${base}/import`, 'POST', { notes });
             setStage(null);
             setQuery('');
             setChosen(undefined);

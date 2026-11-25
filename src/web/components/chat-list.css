@@ -174,6 +174,36 @@
   min-height: 160px;
   resize: vertical;
 }
+.memory-document {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  font-size: var(--text-control);
+}
+.memory-document > .input {
+  width: auto;
+  min-width: 160px;
+}
+.chat-agent-allowlist > summary {
+  cursor: pointer;
+  font-size: var(--text-control);
+}
+.chat-agent-choices {
+  display: flex;
+  flex-direction: column;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.chat-agent-choice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+}
+.chat-agent-choice.is-nested {
+  padding-inline-start: 24px;
+}
 .chat-agent-actions {
   display: flex;
   flex-wrap: wrap;
