@@ -862,6 +862,33 @@ test(
           await spoken.close();
         }
       });
+      await t.test('a code in Main never completes a task chat’s code request', async () => {
+        await reset();
+        const asked = await seed();
+        const task = randomUUID();
+        await db.pool.query('UPDATE turns SET session_id=$1 WHERE id=$2', [task, asked.turnId]);
+        await db.pool.query(
+          "INSERT INTO tasks(id,owner_id,turn_id,session_id,title,done_when,now_text) VALUES($1,$2,$3,$1,'Synthetic sign-in chat','Signed in','Signing in')",
+          [task, ownerId, asked.turnId],
+        );
+        try {
+          for (const extra of [{}, { verificationRequestId: asked.requestId }]) {
+            const refused = await send('482913', extra);
+            assert.equal(refused.statusCode, 409, refused.body);
+            assert.ok(!refused.body.includes('482913'));
+          }
+          assert.deepEqual(injected, []);
+          assert.deepEqual(ordinary, []);
+          const answered = await send('482913', { replyToMessageId: asked.messageId });
+          assert.equal(answered.statusCode, 200, answered.body);
+          assert.deepEqual(
+            injected.map(({ requestId }) => requestId),
+            [asked.requestId],
+          );
+        } finally {
+          await db.pool.query('DELETE FROM tasks WHERE id=$1', [task]);
+        }
+      });
       await t.test(
         'an unavailable fingerprint key never routes pending codes or replays receipts',
         async () => {

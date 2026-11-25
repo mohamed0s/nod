@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import type { SpeechService } from './speech.ts';
 import {
+  codeChat,
   messageInput,
   newChatOnly,
   registerAudioMessages,
@@ -632,6 +633,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
         : await dependencies.verification?.accept(input.text, {
             ...input,
             clientMessageId,
+            chat: codeChat(input),
             channel: 'web',
             signal,
           });
