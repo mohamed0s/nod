@@ -1,5 +1,5 @@
 import type { Pool } from 'pg';
-import { withdrawnSql } from './turn-chain.ts';
+import { chatTaskSql, withdrawnSql } from './turn-chain.ts';
 import { isMessageReaction } from '../shared/emoji.ts';
 import { presentationSchema, presentationText } from '../shared/presentation.ts';
 import type { TrustWords } from './trust-basis.ts';
@@ -248,8 +248,7 @@ export async function recentOwnerWords(
            AND (a.created_at,a.id)<(m.created_at,m.id) AND a.created_at>m.created_at-interval '24 hours'
            AND a.created_at>=CASE WHEN m.created_at>=cleared.at THEN cleared.at ELSE '-infinity'::timestamptz END
            AND t.channel IS NOT DISTINCT FROM u.channel
-           AND (u.task_id IS NULL OR u.session_id<>u.task_id OR t.session_id=u.session_id)
-           AND (u.channel<>'web' OR u.session_id=u.task_id OR t.task_id IS NULL OR t.session_id<>t.task_id)
+           AND (u.channel<>'web' OR ${chatTaskSql('t')} IS NOT DISTINCT FROM ${chatTaskSql('u')})
          ORDER BY a.created_at DESC,a.id DESC LIMIT 1) implicit ON TRUE
      CROSS JOIN LATERAL (SELECT COALESCE(explicit.id,implicit.id) AS id,COALESCE(explicit.text,implicit.text) AS text,
          CASE WHEN explicit.id IS NOT NULL THEN explicit.presentation ELSE implicit.presentation END AS presentation,

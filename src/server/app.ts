@@ -44,7 +44,7 @@ import {
   stopThread,
   submitUserMessage,
 } from './thread.ts';
-import { reactionReplySql } from './turn-chain.ts';
+import { chatTaskSql, reactionReplySql } from './turn-chain.ts';
 import { isMessageReaction } from '../shared/emoji.ts';
 import { accessKey, registerLocalAccess } from './access.ts';
 import { logFailure, withFailureLog, type FailureLogSink } from './failure-log.ts';
@@ -67,10 +67,7 @@ import { registerAnalyticsRoutes, snapshotAnalytics, type CaptureAnalytics } fro
 import { messagePreview } from './message-preview.ts';
 import { validateRequestText } from './request-text.ts';
 
-const messageTaskSql = `(SELECT CASE WHEN w.session_id<>w.thread_id THEN COALESCE(
-    (SELECT k.id FROM tasks k WHERE k.id=w.task_id AND k.owner_id=w.owner_id),
-    (SELECT k.id FROM tasks k WHERE k.id=w.session_id AND k.session_id=k.id AND k.owner_id=w.owner_id)) END
-  FROM turns w WHERE w.id=m.turn_id AND w.owner_id=m.owner_id)`;
+const messageTaskSql = `(SELECT ${chatTaskSql('w')} FROM turns w WHERE w.id=m.turn_id AND w.owner_id=m.owner_id)`;
 const messageFields = `m.id,m.role,m.text,${messageTaskSql} AS "taskId",CASE WHEN m.role='user' THEN m.display_text END AS "displayText",m.audio_caption AS "audioCaption",m.turn_id AS "turnId",m.created_at AS "createdAt",m.attachments,m.stream_id AS "streamId",m.reaction,m.assistant_reaction AS "assistantReaction",m.reply_to_message_id AS "replyToMessageId",m.suggestions,m.presentation,m.answer_choices AS "answerChoices",(${pendingAnswerChoicesSql}) AS "answerChoicesPending",
  (m.role='user' AND (m.approval_answer IS NOT NULL OR (m.question_answer IS NOT NULL AND m.text<>'' AND jsonb_array_length(m.attachments)=0))) AS "cardAnswer",
  CASE WHEN m.role='assistant' AND m.answer_choices IS NOT NULL THEN (SELECT json_build_object('answer',a.question_answer,'text',a.text) FROM messages a

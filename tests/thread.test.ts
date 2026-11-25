@@ -2653,7 +2653,8 @@ test(
         async (t) => {
           const { recentOwnerWords } = await import('../src/server/owner-instructions.ts');
           const current = (await thread.activeThread(db.pool)).id;
-          const [askTurn, pairTask, pairTurn, yesTurn, freshTask, freshTurn] = [
+          const [askTurn, pairTask, pairTurn, resumeTurn, yesTurn, freshTask, freshTurn] = [
+            randomUUID(),
             randomUUID(),
             randomUUID(),
             randomUUID(),
@@ -2661,7 +2662,7 @@ test(
             randomUUID(),
             randomUUID(),
           ];
-          const turns = [askTurn, pairTurn, yesTurn, freshTurn];
+          const turns = [askTurn, pairTurn, resumeTurn, yesTurn, freshTurn];
           t.after(async () => {
             await db.pool.query('UPDATE turns SET task_id=NULL WHERE id=ANY($1::uuid[])', [turns]);
             await db.pool.query('DELETE FROM tasks WHERE id=ANY($1::uuid[])', [
@@ -2704,6 +2705,8 @@ test(
           await addMessage(askTurn, 'assistant', 'Shall I archive the synthetic receipts?');
           await addChat(pairTask, pairTurn, 'Synthetic pairing chat');
           await addMessage(pairTurn, 'assistant', 'Shall I sell the synthetic bicycle?');
+          await addTurn(resumeTurn, pairTask);
+          await addMessage(resumeTurn, 'assistant', 'Shall I ship the synthetic bicycle?');
           await addTurn(yesTurn, current);
           const yes = await addMessage(yesTurn, 'user', 'yes');
           assert.deepEqual(await checked(yes, null), [
