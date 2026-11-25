@@ -35,7 +35,7 @@ When your message and the instructions differ, your message wins.
 
 ## Change an agent from chat
 
-In the agent's chat, you can also tell Nod, for example "make your replies more formal". Nod writes out the exact new text and changes the profile. This is a change to Nod's own settings, so it goes through the action check: Nod asks you first unless your own message in that chat covers the whole change. A rule or anything else never covers new instructions. When Nod asks, the question ends with the exact new text. If a chat app can't show all of it, the question says to open the chat in the Nod app to read it first. Nod changes instructions only this way, never on its own.
+In the agent's chat, you can also tell Nod, for example "make your replies more formal". Nod writes out the exact new text and changes the profile. This is a change to Nod's own settings, so it goes through the action check: Nod asks you first unless your own message in that chat covers the whole change. A rule or anything else never covers a change to an agent. In the Nod app, the question's card shows the exact new name, purpose and instructions. In Telegram or WhatsApp, the question ends with the exact new text only when the app can show it unchanged; otherwise it says to open the chat in the Nod app and read it there first. Nod changes instructions only this way, never on its own.
 
 ## After a reset
 
