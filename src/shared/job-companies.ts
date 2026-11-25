@@ -15,6 +15,7 @@ export const jobCompanyFilters = [
   'waiting',
   'to_ask',
   'asked',
+  'replied',
   'next_wave',
   'no_luck',
 ] as const;
@@ -37,6 +38,13 @@ export type JobNoLuck = {
   since: string | null;
   choice: JobNoLuckChoice;
 };
+
+export const jobOutcomeLabels = ['interview', 'rejection', 'other'] as const;
+export type JobOutcomeLabel = (typeof jobOutcomeLabels)[number];
+export type JobOutcome = { label: JobOutcomeLabel; at: string };
+
+export const jobFollowUpStates = ['waiting', 'due', 'done', 'dismissed'] as const;
+export type JobFollowUp = { state: (typeof jobFollowUpStates)[number]; at: string };
 
 export const jobWaveStates = ['open', 'waiting', 'next', 'stopped', 'done'] as const;
 export type JobWaveState = (typeof jobWaveStates)[number];
@@ -109,6 +117,8 @@ export type JobCompany = {
   waves: JobWaves;
   revision: number;
   lastActivityAt: string | null;
+  outcome: JobOutcome | null;
+  followUps: number;
 };
 
 export type JobCompaniesView = {
@@ -136,6 +146,7 @@ export type JobPerson = {
   draftInfo: JobDraft | null;
   revision: number;
   updatedAt: string;
+  followUp: JobFollowUp | null;
 };
 
 export type JobCompanyView = JobCompany & {

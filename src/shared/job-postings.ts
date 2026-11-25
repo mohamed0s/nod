@@ -77,7 +77,8 @@ export type JobChannel = {
 
 export type JobSourcesView = {
   channels: JobChannel[];
-  switches: Array<{ key: JobSwitch; enabled: boolean; revision: number }>;
+  switches: Array<{ key: JobSwitch; enabled: boolean; revision: number; lastRunAt: string | null }>;
+  sweepDue: boolean;
   boards: string[];
   companies: number;
 };

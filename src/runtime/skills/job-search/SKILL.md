@@ -1,6 +1,6 @@
 ---
 name: job-search
-description: Run the owner's own job search pipeline in Nod. Use whenever the owner sends or mentions their own CV or resume, even with just "this is my CV", to add it to their CV library before anything else, and for their CVs, job profile, message templates, finding jobs (career-ops scans, Telegram job channels, job-alert emails, the Job radar), the postings list, scoring jobs, CV PDFs, the companies and the people the owner invited on LinkedIn, referral messages for the people who accepted, waves of invites, companies with no luck, and applying for the owner's jobs on a company's own site. Use hiring-and-career for other people's CVs and any other career or hiring task.
+description: Run the owner's own job search pipeline in Nod. Use whenever the owner sends or mentions their own CV or resume, even with just "this is my CV", to add it to their CV library before anything else, and for their CVs, job profile, message templates, finding jobs (career-ops scans, Telegram job channels, job-alert emails, the Job radar), the postings list, scoring jobs, CV PDFs, the companies and the people the owner invited on LinkedIn, referral messages for the people who accepted, waves of invites, companies with no luck, applying for the owner's jobs on a company's own site, job mail (LinkedIn accepts and replies, employer replies, the Job mail schedule), follow-ups and the weekly job report. Use hiring-and-career for other people's CVs and any other career or hiring task.
 ---
 
 # Job search
@@ -27,6 +27,7 @@ The owner's job search lives in Nod. Postgres holds the records, and the `jobs` 
 - `jobs sync` before any `career-ops` command, so the cache matches the records. If it skips `cv.md`, stop and tell the owner the CV isn't ready yet. Use `force: true` when a file is missing.
 - Run commands from the workspace, for example `career-ops doctor`. `career-ops help` lists them. Keep files you pass to `career-ops pdf` inside `shared/career-ops/`.
 - `jobs cv_main {label}` when the owner asks to switch their main CV. `jobs cv_file` puts the main CV's PDF in the workspace; send it with `share_file`.
+- `jobs mail_status`, `jobs mail_setup` and `jobs match_mail` read and apply job mail; `jobs follow_up` marks a follow-up done or dismissed; `jobs report` reads the job search report. Never reply to job mail, message anyone or change the calendar because of it.
 - A change to `inviteLimits`, `noLuck` or `waves` goes to the owner for approval unless their words ask for exactly that change.
 - `jobs import`, `jobs telegram` and `jobs list` bring in and read postings, and `jobs posting_update` saves checks, scores and statuses. `jobs sources` and `jobs source_update` read and change the Telegram channels and which scanners are on; change them only when the owner asks or accepts.
 - `jobs companies` and `jobs company` read the companies, their people and their postings. `jobs person_update` saves the people the owner tells you they invited or talked to. `jobs draft_prepare` and `jobs draft_save` make and change referral messages.
@@ -41,3 +42,5 @@ The owner's job search lives in Nod. Postgres holds the records, and the `jobs` 
 - People the owner invited or talked to, the companies list or no luck: read [references/companies.md](references/companies.md).
 - A chat that starts "Apply for the company I marked no luck" or "Apply for a company that counts as no luck", or applying for a job on a company's own site: read [references/apply.md](references/apply.md).
 - A referral message, its language, or how many people to invite at a company: read [references/referral.md](references/referral.md).
+- Job mail, accepts or replies by email, the Job mail schedule, the mailbox linked to LinkedIn, or follow-ups: read [references/mail.md](references/mail.md).
+- The weekly job report or what leads to replies: read [references/weekly.md](references/weekly.md).

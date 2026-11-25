@@ -1251,6 +1251,22 @@ async function initializeApplication(
       withTurnLock(signal ? { turnId, signal } : turnId, operation),
     telegram: createTelegramChannels(),
     curator,
+    mailboxes: async () =>
+      (await integrations.list(ownerId, { refresh: false })).flatMap((entry) =>
+        entry.slug === 'gmail' && entry.connectionId && entry.status === 'connected'
+          ? [
+              {
+                id: entry.connectionId,
+                address: entry.accountEmail ?? entry.accountName ?? 'Gmail',
+              },
+            ]
+          : [],
+      ),
+    mail: {
+      list: (...args) => integrations.jobMail.list(...args),
+      read: (...args) => integrations.jobMail.read(...args),
+    },
+    mailCheck,
     notify: async (client, notice) => (channels ? channels.notice(client, notice) : false),
     timeZone: async () => (await getPreferences()).timeZone,
     continueChat: async (text, sessionId) => {

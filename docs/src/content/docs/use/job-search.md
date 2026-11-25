@@ -79,7 +79,7 @@ When a posting's link is on a site your rules tell Nod to avoid, Nod doesn't ope
 
 ## The Job radar
 
-When Nod drafts your profile, it offers the **Job radar** once: every morning at 07:30 in your time zone it looks in every source that is on, gives each new posting a short check, fully scores the five best, and sends you one short message with the new jobs worth a look, each with its score, company, title and link. When nothing new is worth a look, it sends nothing. It's a normal schedule, so you can change or pause it on the **Scheduled** page.
+When Nod drafts your profile, it offers the **Job radar** once: every morning at 07:30 in your time zone it looks in every source that is on, gives each new posting a short check, fully scores the five best, and sends you one short message with the new jobs worth a look, each with its score, company, title and link, then the accepts waiting for your message, the [follow-ups](#follow-ups) due, the replies since yesterday and the companies whose next wave opened. It sends the message when any of these has something, even on a day with no new jobs, and nothing only when all of them are empty. The radar is also where Nod makes the [Job mail](#the-job-mail-schedule) and [weekly report](#the-weekly-report) offers, once each, if you haven't had them in chat. The weekly sweep runs only when its last run was 7 or more days ago; the **Sources** tab shows when that was. It's a normal schedule, so you can change or pause it on the **Scheduled** page.
 
 Nod also suggests a few public Telegram job channels for your regions and roles. It saves only the ones you accept.
 
@@ -91,11 +91,11 @@ Select **Shortlist** or **Skip**, or **Back to new**. Select **I applied** when 
 
 ## Sources
 
-The **Sources** tab lists your Telegram channels, with when Nod last read each one and why a read failed, and which scanners are on. Add a channel by its name, `@name` or `t.me` link, turn one off, or remove it. Scanner switches take effect from Nod's next run: the Job radar and other scheduled work never import from a source that is off.
+The **Sources** tab lists your Telegram channels, with when Nod last read each one and why a read failed, and which scanners are on. Add a channel by its name, `@name` or `t.me` link, turn one off, or remove it. Scanner switches take effect from Nod's next run: the Job radar and other scheduled work never import from a source that is off. The tab also has [Job mail](#job-mail): the Gmail account linked to your LinkedIn, the Job mail schedule and what its last run found.
 
 ## Companies and people
 
-The **Companies** tab lists each company with open postings or people, with its best score and how many people you invited, how many accepted, how many you asked for a referral and how many replied. Every posting joins its company by name, so "Example Co" and "Example Co, Inc." are one company. A posting whose company is hidden, such as "Confidential" or "N/A", joins no company.
+The **Companies** tab lists each company with open postings or people, with its best score and how many people you invited, how many accepted, how many you asked for a referral and how many replied, with a badge for the last email the company sent you (**Interview**, **Rejected** or **Email reply**) and one for [follow-ups](#follow-ups) due. Every posting joins its company by name, so "Example Co" and "Example Co, Inc." are one company. A posting whose company is hidden, such as "Confidential" or "N/A", joins no company.
 
 Filter the list:
 
@@ -104,6 +104,7 @@ Filter the list:
 | Waiting for an accept   | someone you invited hasn't accepted yet                         |
 | Accepted, not asked yet | someone accepted and you haven't asked them yet                 |
 | Asked, no reply         | someone you asked hasn't replied yet                            |
+| Replied                 | someone replied, or the company answered you by email           |
 | Next wave               | its next [wave](#waves-and-limits) of invites can start         |
 | No luck                 | you ticked **No luck, apply here**, or Nod counts it as no luck |
 
@@ -214,7 +215,7 @@ A browser helper is a companion you install separately; it isn't part of Nod or 
 - log people you invited, under their company;
 - add the LinkedIn member ID of someone you invited who has none yet, so **Message** can open a chat;
 - mark people you invited as accepted, from a list of their profile links;
-- show a company's people, and the invites you sent in the last day and the last 7 days against the invite limits on the **Profile** tab;
+- show a company's people, and the invites you sent today and this week (today and the six days before it, in your time zone) against the invite limits on the **Profile** tab;
 - show who accepted and is waiting for your message, with the prepared message, its language, what Nod changed and why, and the company's wave;
 - switch the language of a person's message, which makes it again, unless you edited it;
 - make the message for someone who accepted before Nod prepared messages;
@@ -237,6 +238,56 @@ A helper works only with a Nod that listens only on this computer, and reaches i
 Nod treats everything a helper sends as data, never as your words. Names and headlines are saved as plain text, profile links must be `https://www.linkedin.com/in/…`, and anything too long or shaped differently is refused. Someone Nod already has keeps their status and company. A helper never replaces a member ID Nod already has or joins two people into one; Nod refuses it and keeps both as they are. A list of profile links marks only people you invited as accepted; nobody else is saved.
 
 Each paired helper can start at most 5 apply chats and add at most 30 new companies in a day. Past that, Nod answers with the time until the limit frees up. To save an invite at a new company sooner, or to start another apply chat, use the **Companies** tab or tell Nod in chat.
+
+## Job mail
+
+Nod can read the job mail in your Gmail and keep the **Companies** tab current for you: who accepted your invite, who replied on LinkedIn, and which companies answered your application. It reads three kinds of email:
+
+- LinkedIn's "accepted your invitation" emails;
+- LinkedIn's emails about a new message;
+- emails from a company you applied to or asked someone at, from its own domain or from a hiring system it uses, such as Greenhouse, Lever, Ashby or Workday.
+
+It reads no other email for this, and it never replies to one, messages anyone, or changes your calendar because of one. It only records what happened and tells you.
+
+### The mailbox
+
+Nod reads job mail only in the Gmail account you linked to LinkedIn. Choose it once on the **Sources** tab, under **Job mail**, or tell Nod in chat. Nod never guesses it, even when you have one Gmail account connected.
+
+### The Job mail schedule
+
+Once your Gmail is connected and you invited someone, Nod offers the **Job mail** schedule once, in chat or in a Job radar message: every 30 minutes from 08:00 to 22:30 in your time zone, it checks that account for job mail since the last run, and up to 14 days back after a pause. It watches the account, so when no new mail arrived, the run is skipped without a model call. Pausing automatic preparation doesn't stop it: the watch checks the account itself. Like any schedule, you change or pause it on the **Scheduled** page.
+
+Each run asks Nod's server to read the job mail. The server searches the account itself, through your Gmail connection, and matches the emails without a model, so their text never passes through the conversation and the model can't supply emails of its own. Nod messages you only about an accept or reply it couldn't match, or a problem.
+
+Only that schedule's runs, and work that started from your message, can apply job mail to your records. That includes a task the run starts, the follow-up after you answer one of its questions, and a run that resumes. Another schedule, an email or app event, Nod's background preparation and helper agents can't. Nod accepts as the Job mail schedule only a schedule made from your message in the chat where you said yes, and stops when that message is no longer available.
+
+### How Nod matches
+
+- **An accept** counts only when it comes from LinkedIn's own address and Gmail's sender check (the first `Authentication-Results` header) shows DMARC passing for linkedin.com and LinkedIn's signature passing. An email that fails the check is counted on the **Sources** tab and never applied. Nod finds the person by the profile link or member ID in the email, when the name in the email agrees, and otherwise by their exact name among the people you invited. A match becomes **Accepted**, and you get the [referral message](#referral-messages) as with any accept. When nobody matches, more than one person has that name, or the matching person has no name saved, Nod changes nothing and asks you who it is.
+- **A reply on LinkedIn** moves the person who wrote to **Replied**. A message from someone who isn't in your job search is left alone.
+- **A reply from a company** is matched by the sender's domain to the company's careers site, when the email also names the company, one of its jobs or links to its posting, or, from a hiring system, by a link to your application or the company's name. Gmail's sender check must show a passing signature from the sender's own domain. Sign-in emails are skipped. Nod's small model labels it **interview**, **rejection**, **other** or **unrelated**: an unrelated email, such as a calendar notice, is dropped without a message to you, and any other answer counts as other. The label shows on the company, and on the posting when Nod can tell which one.
+
+Nod applies only emails whose single **To** header names the linked account and is covered by the sender's checked signature, so a copy someone else received and forwarded to you doesn't count, even with your address added to it. A copy where you were only in **Cc** doesn't count either. Mail that reaches that account only through forwarding from another address is skipped too; the **Sources** tab counts it as sent to another address.
+
+Each email is read once. An email Nod's safety check couldn't clear, or that the small model couldn't label, isn't counted as read, so the next run reads it again. Each run checks and labels at most 20 emails from companies; the rest wait for the next run. An email Gmail returns that Nod can't read, such as one too large, is skipped and counted on the **Sources** tab.
+
+### Replies and pings
+
+On Telegram or WhatsApp, in the chat where you last wrote to Nod, you get one message for each accept (with your referral message), each reply on LinkedIn, and each email from a company, saying what it was. You open and answer the email or the LinkedIn message yourself.
+
+## Follow-ups
+
+When someone you asked for a referral hasn't replied after 3 days (change **Follow up after days without a reply** on the **Profile** tab), **Follow-up due** shows on them, on their company and in the Job radar. It comes due once per person. After you follow up on LinkedIn, select **Followed up**, or **Dismiss** if you won't. Nod has no follow-up template: write it yourself, or ask Nod in chat for a draft based on your referral message.
+
+## The weekly report
+
+Once you asked someone for a referral, Nod offers the **Weekly job report** once, in chat or in a Job radar message: every Sunday evening it updates a page in [Pages](/use/pages/), **Job search weekly**, and sends you a short summary. The page shows:
+
+- this week's invites, accepts, requests, replies, referrals, applications and replies from companies;
+- interviews, applications with their outcome, and follow-ups due;
+- what leads to replies: everyone you invited so far, by how far they got, with each step's rate, overall and by template version, message language and company.
+
+Nod makes the page from your records, so its numbers are counted, not estimated.
 
 ## Who can change job records
 
@@ -264,6 +315,8 @@ These records are your own private data, so most changes skip the [trust check](
 - Your postings, channels and switches are saved in Nod's database too. Nod's server reads Telegram channels and parses alert emails itself; the links in alerts are saved, never opened to import them.
 - People you invited are saved in Nod's database with their name, headline, company, status and profile link. Their profile and message links are only shown for you to open; nothing Nod runs opens or fetches them, or contacts LinkedIn.
 - To tailor a referral message, Nod sends your small model your filled-in message, your language-by-country rule when you haven't chosen the person's language, and the person's name, headline and company, and nothing else. The message Nod sends you about an accept goes only to you.
+- Job mail is read only in the Gmail account you chose, and only LinkedIn's accept and message emails and emails from companies you applied to or contacted. Nod's server reads them through your Gmail connection; the conversation gets only who matched, their status and the names it couldn't match. To label a company's email, Nod sends your small model the company's name, the sender's name and domain, the subject and up to 4,000 characters of the email's text, as data, and keeps only the label.
+- The weekly report page is private to you, in **Pages**.
 - A paired browser helper's key works only for its own requests to Nod on this computer, never for the rest of Nod.
 - A tailored CV and its answer sheet stay in Nod's database and workspace. Nod enters them only on a site you approved for that company, when it first asked **Apply at** _company_ **on** _site_**?**, or sends them to you when you finish in your own browser. Uploading the CV also goes through the trust check like any other upload. career-ops builds the answer sheet's form fields from your profile in the workspace, without opening a page or sending anything.
 - The job search doesn't need LinkedIn: jobs come from scans, Telegram channels, alert emails, links you share and company career pages. To make sure Nod never opens a website, add a rule in chat, such as "Never open linkedin.com, in the browser or with workspace scripts."

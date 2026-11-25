@@ -433,6 +433,7 @@ type ProfileForm = Record<
   | 'weekly'
   | 'noAcceptDays'
   | 'noReplyDays'
+  | 'followUpDays'
   | 'waveSize'
   | 'waveMax'
   | 'applyDaily'
@@ -463,6 +464,7 @@ function toForm(profile: JobProfile): ProfileForm {
     weekly: String(profile.inviteLimits.weekly),
     noAcceptDays: String(profile.noLuck.noAcceptDays),
     noReplyDays: String(profile.noLuck.noReplyDays),
+    followUpDays: String(profile.followUpDays),
     waveSize: String(profile.waves.size),
     waveMax: String(profile.waves.max),
     applyDaily: String(profile.applyLimits.daily),
@@ -512,6 +514,7 @@ function fromForm(form: ProfileForm): JobProfile {
     }),
     inviteLimits: { daily: Number(form.daily), weekly: Number(form.weekly) },
     noLuck: { noAcceptDays: Number(form.noAcceptDays), noReplyDays: Number(form.noReplyDays) },
+    followUpDays: Number(form.followUpDays),
     waves: { size: Number(form.waveSize), max: Number(form.waveMax) },
     applyLimits: { daily: Number(form.applyDaily), perCompany: Number(form.applyPerCompany) },
   };
@@ -637,6 +640,7 @@ function Profile() {
         {field('weekly', 'Invites a week', { type: 'number' })}
         {field('noAcceptDays', 'No luck after days without an accept', { type: 'number' })}
         {field('noReplyDays', 'No luck after days without a reply', { type: 'number' })}
+        {field('followUpDays', 'Follow up after days without a reply', { type: 'number' })}
         {field('waveSize', 'People in a wave', { type: 'number' })}
         {field('waveMax', 'People a company, at most', { type: 'number' })}
       </div>

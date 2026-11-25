@@ -38,7 +38,7 @@ import {
 import { untrustedBlock } from '../shared/untrusted.ts';
 import { withoutSchemaPatterns } from '../shared/json-schema.ts';
 import type { Turn } from './turn.ts';
-import { jobsToolDescription, jobsToolParameters, runJobsTool } from './jobs-tool.ts';
+import { jobsToolHelp, jobsToolParameters, runJobsTool } from './jobs-tool.ts';
 import { pagesToolDescription, pagesToolParameters, runPagesTool } from './pages-tool.ts';
 import type { FlightOption, FlightSearch } from '../ports/flights.ts';
 
@@ -706,7 +706,7 @@ export const toolDefinitions = {
       ),
     ]),
   ),
-  jobs: defineTool('jobs', jobsToolDescription, jobsToolParameters),
+  jobs: defineTool('jobs', jobsToolHelp, jobsToolParameters),
   pages: defineTool('pages', pagesToolDescription, pagesToolParameters),
   share_file: defineTool(
     'share_file',

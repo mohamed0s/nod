@@ -20,6 +20,7 @@ import type { JobPosting } from '../shared/job-postings.ts';
 import { languageTag, type JobProfile } from '../shared/jobs.ts';
 import { untrustedBlock } from '../shared/untrusted.ts';
 import { tailoringRules, type JobDrafts } from './job-drafts.ts';
+import { companyReplies, followUpOf } from './job-mail.ts';
 import { companyKey, linkedInMessageUrl, linkedInProfileUrl } from './job-urls.ts';
 import { clean } from './jobs-parsers.ts';
 import {
@@ -498,11 +499,13 @@ type PersonRow = {
   draft_inputs: Record<string, string>;
   draft_at: Date | null;
   draft_edited_by: 'owner' | 'nod' | null;
+  follow_up: 'done' | 'dismissed' | null;
+  follow_up_at: Date | null;
   revision: number;
   created_at: Date;
   updated_at: Date;
 } & Record<`${JobPersonStatus}_at`, Date | null>;
-type Show = Awaited<ReturnType<JobDrafts['viewer']>>;
+type Show = { draft: Awaited<ReturnType<JobDrafts['viewer']>>; followUpDays: number };
 type Summary = { company: JobCompany; filters: Set<JobCompanyFilter>; active: number };
 
 function noLuckOf(row: CompanyRow, rule: Date | null): JobNoLuck {
@@ -525,7 +528,7 @@ function personView(row: PersonRow, show: Show): JobPerson {
       return at ? [[status, at.toISOString()]] : [];
     }),
   ) as JobPerson['times'];
-  const draftInfo = show(row);
+  const draftInfo = show.draft(row);
   return {
     id: row.id,
     companyId: row.company_id,
@@ -543,6 +546,7 @@ function personView(row: PersonRow, show: Show): JobPerson {
     draftInfo,
     revision: row.revision,
     updatedAt: row.updated_at.toISOString(),
+    followUp: followUpOf(row, show.followUpDays),
   };
 }
 
@@ -559,6 +563,7 @@ export function createJobCompanies(options: {
   ownerId: string;
   settings: (client: Query) => Promise<CompanySettings>;
   timeZone: () => Promise<string>;
+  followUpDays: (client: Query) => Promise<number>;
   drafts: JobDrafts;
   postings: (client: Query, companyId: string) => Promise<JobPosting[]>;
   startChat?: (text: string, attachments: [], sessionId: string) => Promise<unknown>;
@@ -572,6 +577,10 @@ export function createJobCompanies(options: {
   changed: () => void;
 }) {
   const { pool, ownerId } = options;
+  const viewer = async (client: Query): Promise<Show> => ({
+    draft: await options.drafts.viewer(client),
+    followUpDays: await options.followUpDays(client),
+  });
 
   async function inviteCounts(client: Query) {
     const zone = await options.timeZone();
@@ -605,7 +614,14 @@ export function createJobCompanies(options: {
       [ownerId, filter.id ?? null, search, search ? companyKey(search) : ''],
     );
     const now = Date.now();
+    const replies = await companyReplies(
+      client,
+      ownerId,
+      rows.map((row) => row.id),
+      await options.followUpDays(client),
+    );
     const list = rows.map((row): Summary => {
+      const reply = replies.get(row.id);
       const rule = row.status === 'auto' ? automaticNoLuck(row.people, settings, now) : null;
       const noLuck = noLuckOf(row, rule);
       const waves = companyWaves(row.people, settings, invites, now);
@@ -619,6 +635,7 @@ export function createJobCompanies(options: {
         if (statuses.has('asked')) filters.add('asked');
         if (waves.state === 'next') filters.add('next_wave');
       }
+      if (statuses.has('replied') || reply?.outcome) filters.add('replied').add('all');
       const count = (from: number) =>
         row.people.filter((person) => stage[person.status] >= from).length;
       const active = Math.max(
@@ -655,6 +672,8 @@ export function createJobCompanies(options: {
           waves,
           revision: row.revision,
           lastActivityAt: active ? new Date(active).toISOString() : null,
+          outcome: reply?.outcome ?? null,
+          followUps: reply?.followUps ?? 0,
         },
       };
     });
@@ -703,7 +722,7 @@ export function createJobCompanies(options: {
     const { list, limits } = await summaries(client, { id: parse(z.uuid(), id, 'The company id') });
     const found = list[0];
     if (!found) throw failure('Company not found.', 404);
-    const show = await options.drafts.viewer(client);
+    const show = await viewer(client);
     return {
       ...found.company,
       people: (await personRows(client, found.company.id)).map((row) => personView(row, show)),
@@ -1009,7 +1028,7 @@ export function createJobCompanies(options: {
             )
           ).rows[0]?.name;
           saved.push({
-            ...toolPerson(personView(row, await options.drafts.viewer(client))),
+            ...toolPerson(personView(row, await viewer(client))),
             company: name ?? '',
             created,
           });
@@ -1039,7 +1058,7 @@ export function createJobCompanies(options: {
 
   async function draftResult(client: Query, id: string, extra: Record<string, unknown>) {
     const row = await onePerson(client, id);
-    const view = personView(row, await options.drafts.viewer(client));
+    const view = personView(row, await viewer(client));
     const waves = (await summaries(client, { id: row.company_id })).list[0]?.company.waves;
     const draft = view.draftInfo;
     return {
@@ -1283,7 +1302,7 @@ export function createJobCompanies(options: {
         );
       const changed = await change(client, current, next, 'The person', how.replaceEdits);
       if (how.make && !changed.draft) await options.drafts.make(client, changed.id);
-      return personView(await onePerson(client, id), await options.drafts.viewer(client));
+      return personView(await onePerson(client, id), await viewer(client));
     });
   }
 
@@ -1398,7 +1417,7 @@ export function createJobCompanies(options: {
       [ownerId],
     );
     if (!rows.length) return [];
-    const show = await options.drafts.viewer(client);
+    const show = await viewer(client);
     const waves = new Map(
       (await summaries(client)).list.map((entry) => [entry.company.id, entry.company.waves]),
     );
@@ -1571,10 +1590,7 @@ export function createJobCompanies(options: {
           );
         const made = await options.drafts.make(client, current.id, { replace: true });
         return {
-          person: personView(
-            await onePerson(client, current.id),
-            await options.drafts.viewer(client),
-          ),
+          person: personView(await onePerson(client, current.id), await viewer(client)),
           missing: made.missing,
         };
       });
@@ -1592,7 +1608,7 @@ export function createJobCompanies(options: {
           revision: draftRevision,
           actor: 'owner',
         });
-        return personView(await onePerson(client, current.id), await options.drafts.viewer(client));
+        return personView(await onePerson(client, current.id), await viewer(client));
       });
     });
   }
@@ -1614,6 +1630,13 @@ export function createJobCompanies(options: {
       profileTracked,
       pairProfile,
       markAccepted,
+      setStatus: async (client: Query, id: string, status: JobPersonStatus, at?: string) =>
+        change(
+          client,
+          await onePerson(client, id),
+          { status, ...(at ? { at } : {}) },
+          'The person',
+        ),
     },
   };
 }

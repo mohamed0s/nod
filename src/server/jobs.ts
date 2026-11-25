@@ -35,6 +35,7 @@ import { createJobApply, entryStep, jobApplyTables, type Automatic } from './job
 import { createJobCompanies, jobCompanyTables, linkPostings } from './job-companies.ts';
 import { createJobDrafts, jobDraftTables, validZone, type DraftNotice } from './job-drafts.ts';
 import { createJobHelper, jobHelperTables } from './job-helper.ts';
+import { createJobMail, jobMailTables, type JobMailAccess, type JobMailCheck } from './job-mail.ts';
 import { createJobPostings, jobPostingTables } from './job-postings.ts';
 import { careerOpsFiles, scanConfig, scanSummary } from './jobs-files.ts';
 import { failure, parse, rootedIn as lineage, type Query, type TurnRef } from './jobs-shared.ts';
@@ -74,6 +75,7 @@ export const jobTables = `
   ${jobPostingTables}
   ${jobCompanyTables}
   ${jobDraftTables}
+  ${jobMailTables}
   ${jobHelperTables}
   ${jobApplyTables}
 `;
@@ -337,6 +339,9 @@ export function createJobs(options: {
   ) => Promise<T>;
   telegram?: TelegramChannels;
   curator?: MemoryCurator;
+  mailboxes?: () => Promise<Array<{ id: string; address: string }>>;
+  mail?: JobMailAccess;
+  mailCheck?: JobMailCheck;
   notify?: (client: Query, notice: DraftNotice) => Promise<boolean>;
   timeZone?: () => Promise<string | null | undefined>;
   automatic?: Automatic;
@@ -374,6 +379,7 @@ export function createJobs(options: {
       signal,
     );
   };
+  const followUpDays = async (client: Query) => (await profileState(client)).profile.followUpDays;
   const postings = createJobPostings({
     pool,
     ownerId,
@@ -409,6 +415,7 @@ export function createJobs(options: {
     ownerId,
     settings: async (client) => liveLimits((await profileState(client)).profile),
     timeZone,
+    followUpDays,
     drafts,
     postings: postings.ofCompany,
     ...(options.startChat ? { startChat: options.startChat } : {}),
@@ -438,6 +445,22 @@ export function createJobs(options: {
     inviteLimits: async (client) => (await profileState(client)).profile.inviteLimits,
     mainCv,
     owned,
+  });
+  const mail = createJobMail({
+    pool,
+    ownerId,
+    companies: companies.helper,
+    followUpDays,
+    timeZone,
+    ...(options.mailboxes ? { mailboxes: options.mailboxes } : {}),
+    ...(options.mail ? { mail: options.mail } : {}),
+    ...(options.mailCheck ? { mailCheck: options.mailCheck } : {}),
+    ...(options.curator ? { curator: options.curator } : {}),
+    ...(options.notify ? { notify: options.notify } : {}),
+    ...(options.workspace ? { workspace: options.workspace } : {}),
+    turnWrite,
+    owned,
+    changed,
   });
 
   async function cvs(client: Query, filter: { id?: string; archived?: boolean } = {}) {
@@ -1024,6 +1047,7 @@ export function createJobs(options: {
       reviewLimits?: (input: JobLimits, current: JobLimitValues) => Promise<unknown>;
     } = {},
   ) {
+    if (mail.handles(raw)) return mail.execute(turn, raw, context.signal);
     if (postings.handles(raw)) return postings.execute(turn, raw, context.signal);
     if (companies.handles(raw)) return companies.execute(turn, raw, context.signal);
     if (apply.handles(raw)) return apply.execute(turn, raw, context.signal);
@@ -1149,6 +1173,7 @@ export function createJobs(options: {
     postings.registerRoutes(app);
     companies.registerRoutes(app);
     helper.registerRoutes(app);
+    mail.registerRoutes(app);
     const body = <T extends z.ZodType>(schema: T, value: unknown, what: string) =>
       parse(schema, value, what);
     app.get('/api/jobs/setup', () => setup(pool));
