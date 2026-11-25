@@ -91,11 +91,11 @@ The progress indicator shows the task title above its current step. Both wrap so
 
 ## Reply or stop one task
 
-In the web app, open the task's chat and type to continue that task, even after it finishes or stops. Each message there replies to the chat's latest message from Nod, so a "yes" answers that task's own question or approval. In Telegram and WhatsApp, use their reply controls on the task's first message, a question or a result.
+In the web and desktop apps, open the task's chat and type to continue that task, even after it finishes or stops. Each message there replies to the chat's latest message from Nod, so a "yes" answers that task's own question or approval. In Telegram and WhatsApp, use their reply controls on the task's first message, a question or a result.
 
 A message in **Main**, or without a reply target in a chat app, goes to the main chat. Nod can send that message to one or more open tasks when your intent is clear.
 
-Say "Try again" just after Nod reports the result of a task you requested. In the web app, say it in that task's chat. In a chat app, the result must be in that chat. Nod continues the task with your original request and checks whether an action already happened before repeating it. If the target is unclear, Nod asks.
+Say "Try again" just after Nod reports the result of a task you requested. In the web and desktop apps, say it in that task's chat. In a chat app, the result must be in that chat. Nod continues the task with your original request and checks whether an action already happened before repeating it. If the target is unclear, Nod asks.
 
 When a task waits for you in its browser, its card in chat and its preview on **Scheduled** show **Open browser**, which takes you to the live page. See [Take over the browser](/use/browser/#take-over-the-browser).
 
@@ -188,7 +188,7 @@ stateDiagram-v2
 
 A question stays **Needs you** until you reply to it or continue its session. An unrelated chat message does not answer it. Select a failed task's title to open its details and controls. A task that stops without a plan or a result shows **Needs you** with a note to reply to continue. A task that fails, including one Nod started on its own, says so in chat with the task's name and what stopped it. When a task reaches its spending check-in, it shows **Needs you** with the check-in question. A stopped task shows **Stopped**. Reply to the task to continue the same saved session. While a task works on your reply, the chat shows that Nod is working. In the web and desktop apps, the bottom of the chat shows the task's title and current step until it posts a message, finishes or needs you.
 
-In the web app, a message in **Main** never answers a question or approval that a task's chat is waiting on; answer it in that task's chat. In Telegram and WhatsApp, if you ask a question in the main chat after a task's yes/no approval without replying directly, Nod closes that approval without running its action. The task remains open with a message that says its current work stopped. Reply to that message to continue what is unfinished.
+In the web and desktop apps, a message in **Main** never answers a question or approval that a task's chat is waiting on; answer it in that task's chat. In Telegram and WhatsApp, if you ask a question in the main chat after a task's yes/no approval without replying directly, Nod closes that approval without running its action. The task remains open with a message that says its current work stopped. Reply to that message to continue what is unfinished.
 
 If you pause or delete a schedule directly while a task is waiting for approval to change that schedule, the old confirmation expires. The task stays open and shows a new message you can reply to if it has more work to do.
 

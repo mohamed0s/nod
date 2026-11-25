@@ -27,7 +27,7 @@ A turn is one run of the agent. Each turn is a row in the `turns` table with a `
 | `event`    | A source batch or observer task                                                                                        | The observer or the task                     |
 | `resume`   | A completed secure form, payment approval, app connection, or your reply or reaction confirming or declining an action | The session that asked                       |
 
-A message sent with **New chat** in the web app starts a `user` turn in a new task session. See [Start a task with New chat](/how-it-works/task-sessions/#start-a-task-with-new-chat).
+A message sent with **New chat** in the web or desktop app starts a `user` turn in a new task session. See [Start a task with New chat](/how-it-works/task-sessions/#start-a-task-with-new-chat).
 
 A recurring schedule skips a firing while an earlier run is queued, running or still needs your answer. An earlier waiting turn no longer holds a firing after a later turn starts in that run's session. A schedule run can't create schedules.
 
