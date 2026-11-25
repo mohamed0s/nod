@@ -165,8 +165,12 @@ const toolInput = z.discriminatedUnion('action', [
       action: z.literal('import'),
       workspaceFile: z.string().trim().min(1).max(4096),
       source: z.enum(['career-ops', 'email', 'web']),
+      sweep: z.literal(true).optional(),
     })
-    .strict(),
+    .strict()
+    .refine((value) => !value.sweep || value.source === 'career-ops', {
+      message: 'sweep goes only with source career-ops, for the weekly scan:full import.',
+    }),
   z
     .object({
       action: z.literal('posting_update'),
@@ -536,7 +540,7 @@ export function createJobPostings(options: {
 
   async function importFile(
     turn: TurnRef,
-    request: { workspaceFile: string; source: 'career-ops' | 'email' | 'web' },
+    request: { workspaceFile: string; source: 'career-ops' | 'email' | 'web'; sweep?: true },
     signal?: AbortSignal,
   ) {
     if (!options.read) throw failure('The workspace is unavailable.', 503);
@@ -566,6 +570,12 @@ export function createJobPostings(options: {
       turn,
       async (client) => {
         await writer(client, turn, 'import job postings');
+        if (request.sweep)
+          await client.query(
+            `INSERT INTO job_sources(id,owner_id,kind,name,enabled,last_read_at) VALUES($1,$2,'switch','scan:full',$3,now())
+             ON CONFLICT (owner_id,kind,lower(name)) DO UPDATE SET last_read_at=now()`,
+            [randomUUID(), ownerId, jobSwitchDefaults['scan:full']],
+          );
         return report(await importRows(client, request.source, rows), extra);
       },
       signal,
@@ -666,12 +676,22 @@ export function createJobPostings(options: {
     const switches = jobSwitches.map((key) => {
       const row = rows.find((entry) => entry.kind === 'switch' && entry.name === key);
       return row
-        ? { key, enabled: row.enabled, revision: row.revision }
-        : { key, enabled: jobSwitchDefaults[key], revision: 0 };
+        ? {
+            key,
+            enabled: row.enabled,
+            revision: row.revision,
+            lastRunAt: row.last_read_at?.toISOString() ?? null,
+          }
+        : { key, enabled: jobSwitchDefaults[key], revision: 0, lastRunAt: null };
     });
+    const sweep = switches.find((entry) => entry.key === 'scan:full');
     return {
       channels: rows.filter((row) => row.kind === 'telegram').map(channelView),
       switches,
+      sweepDue: Boolean(
+        sweep?.enabled &&
+        (!sweep.lastRunAt || Date.parse(sweep.lastRunAt) <= Date.now() - 7 * 86_400_000),
+      ),
       ...(await options.scanSummary(client)),
     };
   }

@@ -396,6 +396,9 @@ export function Sources() {
                     (view.boards.length || view.companies
                       ? ` Boards: ${view.boards.join(', ') || 'none'}. Companies you follow: ${view.companies}.`
                       : ' It starts once your profile has target roles.')}
+                  {entry.key === 'scan:full' &&
+                    entry.lastRunAt &&
+                    ` Last sweep: ${formatDateTime(entry.lastRunAt, format)}.`}
                 </span>
               </div>
               <Switch
