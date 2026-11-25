@@ -4,6 +4,8 @@ import { z } from 'zod';
 import type { AgentSchedules } from '../shared/agents.ts';
 import type { ModelSelection, WorkKind } from '../shared/models.ts';
 import { afterCommit, transaction } from './transaction.ts';
+import type { ApprovalDescription, ApprovalPresentation } from './approvals.ts';
+import { channelText } from './channel-text.ts';
 import type { TrustReason } from './trust.ts';
 import type { TrustBasis } from './trust-basis.ts';
 import { workOriginSql } from './turn-chain.ts';
@@ -42,6 +44,7 @@ export function createAgentSchedules(options: {
 }) {
   const { pool, ownerId } = options;
   const refresh = options.refresh ?? (() => {});
+  let ready = false;
 
   async function initialize() {
     await pool.query(`
@@ -54,6 +57,22 @@ export function createAgentSchedules(options: {
       );
       CREATE INDEX IF NOT EXISTS agent_schedules_agent ON agent_schedules(agent_id);
     `);
+    ready = true;
+  }
+
+  async function agentModel(scheduleId: string) {
+    if (!ready) return null;
+    return (
+      (
+        await pool.query<{ model: ModelSelection | null }>(
+          `SELECT chat.model FROM agent_schedules s
+           JOIN agents a ON a.id=s.agent_id AND a.owner_id=s.owner_id
+           JOIN tasks chat ON chat.id=a.chat_id AND chat.owner_id=a.owner_id
+           WHERE s.schedule_id=$1 AND s.owner_id=$2 AND s.use_agent_model`,
+          [scheduleId, ownerId],
+        )
+      ).rows[0]?.model ?? null
+    );
   }
 
   async function view(): Promise<AgentSchedules> {
@@ -100,11 +119,15 @@ export function createAgentSchedules(options: {
     afterCommit(client, refresh);
   }
 
-  async function modelOrigin(turnId: string, origin: Origin | undefined) {
+  async function modelOrigin(
+    turnId: string,
+    origin: Origin | undefined,
+    usable: (choice: ModelSelection) => boolean,
+  ) {
     if (!origin || origin.kind !== 'schedule' || origin.task || origin.schedule) return origin;
-    const model = (
-      await pool.query<{ model: ModelSelection | null }>(
-        `SELECT chat.model FROM turns cur ${workOriginSql('cur')}
+    const agent = (
+      await pool.query<{ model: ModelSelection | null; name: string }>(
+        `SELECT chat.model,a.name FROM turns cur ${workOriginSql('cur')}
          JOIN agent_schedules s ON s.owner_id=cur.owner_id AND s.schedule_id=work_schedule.id
            AND s.use_agent_model
          JOIN agents a ON a.id=s.agent_id AND a.owner_id=s.owner_id
@@ -112,8 +135,13 @@ export function createAgentSchedules(options: {
          WHERE cur.id=$1 AND cur.owner_id=$2`,
         [turnId, ownerId],
       )
-    ).rows[0]?.model;
-    return model ? { ...origin, schedule: model } : origin;
+    ).rows[0];
+    if (!agent?.model) return origin;
+    if (!usable(agent.model))
+      throw new Error(
+        `The model of the agent ${JSON.stringify(agent.name)}, which this schedule uses, is unavailable. Choose another model in the agent's chat, or turn off Use the agent's model for the schedule on Scheduled.`,
+      );
+    return { ...origin, schedule: agent.model };
   }
 
   async function request(
@@ -205,10 +233,16 @@ export function createAgentSchedules(options: {
     return { schedule: input.schedule, agent: input.agent, useAgentModel: input.useAgentModel };
   }
 
-  async function adopt(turnId: string, created: unknown) {
+  async function adopted<T>(turnId: string, action: string, client: Client, created: T) {
     const schedule = created as { id?: unknown; existing?: unknown } | null;
-    if (!schedule || typeof schedule.id !== 'string' || schedule.existing) return;
-    const adopted = await pool.query(
+    if (
+      action !== 'NOD_schedule_create' ||
+      !schedule ||
+      typeof schedule.id !== 'string' ||
+      schedule.existing
+    )
+      return created;
+    const linked = await client.query(
       `INSERT INTO agent_schedules(schedule_id,owner_id,agent_id)
        SELECT x.id,x.owner_id,a.id FROM turns u
        JOIN agents a ON a.owner_id=u.owner_id AND a.chat_id=u.session_id
@@ -216,7 +250,78 @@ export function createAgentSchedules(options: {
        WHERE u.id=$1 AND u.owner_id=$2 ON CONFLICT(schedule_id) DO NOTHING`,
       [turnId, ownerId, schedule.id],
     );
-    if (adopted.rowCount) refresh();
+    if (linked.rowCount) afterCommit(client, refresh);
+    return created;
+  }
+
+  async function chatAgent(turnId: string) {
+    return (
+      await pool.query<{ id: string; name: string }>(
+        `SELECT a.id,a.name FROM turns u JOIN agents a ON a.owner_id=u.owner_id AND a.chat_id=u.session_id
+         WHERE u.id=$1 AND u.owner_id=$2`,
+        [turnId, ownerId],
+      )
+    ).rows[0];
+  }
+
+  async function note(proposal: ApprovalDescription) {
+    const args = proposal.args;
+    if (proposal.action === 'NOD_schedule_create') {
+      const agent = await chatAgent(proposal.turn.turnId);
+      return agent && `Runs as: ${agent.name}`;
+    }
+    if (proposal.action === 'NOD_agent_schedule')
+      return [
+        `Schedule: ${String(args.schedule)}`,
+        `Runs as: ${typeof args.agent === 'string' ? args.agent : 'No agent'}`,
+        `Uses the agent's model: ${args.useAgentModel === true ? 'Yes' : 'No'}`,
+      ].join('\n');
+    if (proposal.action !== 'NOD_model_select' || args.scope !== 'task') return undefined;
+    const linked = (
+      await pool.query<{ title: string }>(
+        `SELECT x.title FROM agents a
+         JOIN agent_schedules s ON s.agent_id=a.id AND s.owner_id=a.owner_id AND s.use_agent_model
+         JOIN schedules x ON x.id=s.schedule_id AND x.owner_id=s.owner_id
+         WHERE a.owner_id=$1 AND a.chat_id=$2 ORDER BY lower(x.title)`,
+        [ownerId, String(args.id)],
+      )
+    ).rows.map(({ title }) => title);
+    return linked.length
+      ? `This also changes the model of the schedules that run as this agent and use its model: ${linked.join(', ')}.`
+      : undefined;
+  }
+
+  async function describe(
+    proposal: ApprovalDescription,
+    signal: AbortSignal | undefined,
+    base: (proposal: ApprovalDescription, signal?: AbortSignal) => Promise<ApprovalPresentation>,
+    canDeliverLiteral: (channel: string, text: string, literal: string) => boolean,
+  ): Promise<ApprovalPresentation> {
+    const presentation = await base(proposal, signal);
+    const extra = ready ? await note(proposal) : undefined;
+    if (!extra) return presentation;
+    const question = `${presentation.question}\n\n${extra}`;
+    const literal = /^(`{3,})\n([\s\S]*?)\n\1$/m.exec(presentation.question)?.[2];
+    if (literal !== undefined) {
+      const channel =
+        proposal.channel ??
+        (
+          await pool.query<{ channel: string | null }>(
+            'SELECT channel FROM turns WHERE id=$1 AND owner_id=$2',
+            [proposal.turn.turnId, ownerId],
+          )
+        ).rows[0]?.channel;
+      if (
+        channel &&
+        channel !== 'web' &&
+        (channelText(question).text !== question.trim() ||
+          !canDeliverLiteral(channel, question, literal))
+      )
+        throw new Error(
+          'Nod cannot show the complete schedule confirmation in this channel. Open Nod and ask again.',
+        );
+    }
+    return { ...presentation, question };
   }
 
   function registerRoutes(app: FastifyInstance) {
@@ -232,5 +337,15 @@ export function createAgentSchedules(options: {
     });
   }
 
-  return { initialize, modelOrigin, request, validate, apply, adopt, registerRoutes };
+  return {
+    initialize,
+    agentModel,
+    modelOrigin,
+    request,
+    validate,
+    apply,
+    adopted,
+    describe,
+    registerRoutes,
+  };
 }

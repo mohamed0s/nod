@@ -115,14 +115,17 @@ export interface ScheduleDependencies {
   sessionCosts?(sessionIds: string[]): Promise<Record<string, number | null>>;
   watchable?(connectionIds: string[], client?: PoolClient): Promise<boolean>;
   watchState?(connectionIds: string[]): Promise<string | null>;
-  modelPaused?(model: ModelSelection | null): boolean;
+  modelPaused?(model: ModelSelection | null, id?: string): boolean | Promise<boolean>;
   recentTurnUsage?(
     turnId?: string,
     projectAtApiRates?: boolean,
   ): Promise<Array<WorkUsage & { recordedUsd: number; work?: boolean }>>;
   validateModel?(choice: ModelSelection): ModelSelection;
   sessionUsage?(sessionIds: string[]): Promise<Record<string, WorkUsage & { unpriced: boolean }>>;
-  workPricing?(own: ModelSelection | null): WorkPrice | undefined;
+  workPricing?(
+    own: ModelSelection | null,
+    id?: string,
+  ): WorkPrice | undefined | Promise<WorkPrice | undefined>;
 }
 
 type WorkPrice = {
@@ -575,7 +578,7 @@ export function createSchedules(dependencies: ScheduleDependencies) {
         );
       }
       if (busy) return true;
-      if (row.kind === 'recurring' && dependencies.modelPaused?.(row.model)) {
+      if (row.kind === 'recurring' && (await dependencies.modelPaused?.(row.model, row.id))) {
         await client.query(
           `UPDATE schedules SET skipped=(CASE WHEN jsonb_array_length(skipped)>=$4 THEN skipped-0 ELSE skipped END)
              ||jsonb_build_array(jsonb_build_object('at',$3::text,'reason','paused'))
@@ -878,7 +881,7 @@ export function createSchedules(dependencies: ScheduleDependencies) {
     const from = now();
     const month = 30 * 86_400_000;
     for (const row of recurring) {
-      const target = dependencies.workPricing?.(row.model);
+      const target = await dependencies.workPricing?.(row.model, row.id);
       if (target?.plan || (dependencies.workPricing && !target)) continue;
       const own = pricedRuns(target, (run) => run.schedule_id === row.id);
       const recent = pricedRuns(target, (run) => run.latest);

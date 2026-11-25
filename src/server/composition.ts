@@ -1132,6 +1132,7 @@ async function initializeApplication(
   let retireScheduleConfirmations:
     | ((client: import('pg').PoolClient, id: string, waitForSend: boolean) => Promise<void>)
     | undefined;
+  const agentSchedules = createAgentSchedules({ pool, ownerId, refresh });
   const personal = createPersonalService({
     analytics: captureAnalytics,
     pool,
@@ -1194,9 +1195,16 @@ async function initializeApplication(
     ...(adapters.models
       ? {
           validateModel: (choice: ModelSelection) => adapters.models!.validateChoice(choice),
-          workPricing: (own: ModelSelection | null) => adapters.models!.pricing('schedule', own),
-          modelPaused: (model: ModelSelection | null) =>
-            adapters.models!.paused({ kind: 'schedule', schedule: model }),
+          workPricing: async (own: ModelSelection | null, id?: string) =>
+            adapters.models!.pricing(
+              'schedule',
+              own ?? (id ? await agentSchedules.agentModel(id) : null),
+            ),
+          modelPaused: async (model: ModelSelection | null, id?: string) =>
+            adapters.models!.paused({
+              kind: 'schedule',
+              schedule: model ?? (id ? await agentSchedules.agentModel(id) : null),
+            }),
         }
       : {}),
     watchable: (connectionIds, client) => integrations.watchable(connectionIds, client),
@@ -1221,7 +1229,6 @@ async function initializeApplication(
   await tasks.initialize();
   const agents = createAgents({ pool, ownerId, refresh, renamed: renameTopic });
   await agents.initialize();
-  const agentSchedules = createAgentSchedules({ pool, ownerId, refresh });
   await agentSchedules.initialize();
   const chatTitles = createChatTitles({
     pool,
@@ -1778,10 +1785,15 @@ async function initializeApplication(
                         );
                       return withTurnLock(
                         turnLock,
-                        (locked) =>
-                          personal.manage(action.slice('NOD_'.length), args, provenance, {
-                            client: locked,
-                          }),
+                        async (locked) =>
+                          agentSchedules.adopted(
+                            provenance.turnId,
+                            action,
+                            locked,
+                            await personal.manage(action.slice('NOD_'.length), args, provenance, {
+                              client: locked,
+                            }),
+                          ),
                         client,
                       );
                     },
@@ -2089,7 +2101,6 @@ async function initializeApplication(
                           mailCheck,
                         );
                       })());
-      if (action === 'NOD_schedule_create') await agentSchedules.adopt(provenance.turnId, result);
       if (action.startsWith('NOD_') && action !== 'NOD_vault_allow')
         await ledger.action(
           provenance.turnId,
@@ -2132,7 +2143,13 @@ async function initializeApplication(
           ? agents.describe(proposal, signal, communication.describe, (channel, text, literal) =>
               Boolean(channels?.canDeliverLiteral(channel, text, literal)),
             )
-          : communication.describe(proposal, signal),
+          : agentSchedules.describe(
+              proposal,
+              signal,
+              communication.describe,
+              (channel, text, literal) =>
+                Boolean(channels?.canDeliverLiteral(channel, text, literal)),
+            ),
     captureAnalytics,
     createErrorRedactor(secrets),
     (input, signal) => ledger.forOwner(() => trust.classifyRepeatedAction(input, signal)),
@@ -2607,7 +2624,18 @@ async function initializeApplication(
       ...(adapters.models
         ? {
             workModel: async (turnId: string) => {
-              const origin = await agentSchedules.modelOrigin(turnId, await workOrigin(turnId));
+              const origin = await agentSchedules.modelOrigin(
+                turnId,
+                await workOrigin(turnId),
+                (choice) => {
+                  try {
+                    adapters.models!.validateChoice(choice);
+                    return true;
+                  } catch {
+                    return false;
+                  }
+                },
+              );
               if (!origin) return undefined;
               const { selection } = adapters.models!.workModel(origin);
               const { provider, name } = adapters.models!.describe(selection);
