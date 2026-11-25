@@ -36,6 +36,8 @@ import { transaction } from '../src/server/transaction.ts';
 import { createChannels } from '../src/server/channels.ts';
 import type { AppState, Message, Task } from '../src/shared/contracts.ts';
 import { createAgents } from '../src/server/agents.ts';
+import { agentTopicName } from '../src/server/agent-pictures.ts';
+import { agentColors, agentDefaultEmoji } from '../src/shared/agents.ts';
 import { modelPricingSignature, type WorkUsageResponse } from '../src/shared/models.ts';
 import { mergeMessages } from '../src/web/lib/chat-messages.ts';
 import { ApprovalCard, ApprovalChoiceCard } from '../src/web/components/action-card.tsx';
@@ -3881,6 +3883,185 @@ export const approvalCases = inParts(
           await pool.query('DELETE FROM agents WHERE id=$1', [foreignAgent]);
           await pool.query('DELETE FROM tasks WHERE id=$1', [foreignChat]);
           assert.equal((await request('DELETE', `/api/agents/${agentId}`)).statusCode, 200);
+        },
+      );
+
+      await inPart(
+        'a bot made with only a name starts its chat, and its picture stays the owner’s and checked',
+        async () => {
+          const upload = async (name: string, type: string, bytes: Buffer) => {
+            const form = new FormData();
+            form.append('file', new File([new Uint8Array(bytes)], name, { type }));
+            const body = new Request('http://localhost/api/uploads', {
+              method: 'POST',
+              body: form,
+            });
+            const sent = await application.app.inject({
+              method: 'POST',
+              url: '/api/uploads',
+              headers: { ...headers, 'content-type': body.headers.get('content-type')! },
+              payload: Buffer.from(await body.arrayBuffer()),
+            });
+            assert.equal(sent.statusCode, 200, sent.body);
+            return sent.json<{ id: string }>().id;
+          };
+          const png = Buffer.concat([
+            Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+            Buffer.alloc(64),
+          ]);
+          const made = await request('POST', '/api/agents', { name: 'Synthetic helper' });
+          assert.equal(made.statusCode, 200, made.body);
+          const id = made.json().id as string;
+          const listed = (await request('GET', '/api/state'))
+            .json<AppState>()
+            .agents?.find((agent) => agent.id === id);
+          assert.equal(listed?.chatId, null);
+          assert.equal(listed?.imageId, null);
+          assert.ok(agentDefaultEmoji.includes(listed!.emoji));
+          assert.ok(agentColors.includes(listed!.color));
+          const first = await request('POST', '/api/messages', {
+            clientMessageId: randomUUID(),
+            text: 'Synthetic first words to the helper',
+            newChat: true,
+            chatAgent: id,
+          });
+          assert.equal(first.statusCode, 200, first.body);
+          await waitFor(first.json().turnId, 'succeeded');
+          const chat = (
+            await pool.query('SELECT task_id FROM turns WHERE id=$1', [first.json().turnId])
+          ).rows[0].task_id as string;
+          assert.equal(
+            (await pool.query('SELECT chat_id FROM agents WHERE id=$1', [id])).rows[0].chat_id,
+            chat,
+          );
+          assert.equal(
+            (await pool.query('SELECT title FROM tasks WHERE id=$1', [chat])).rows[0].title,
+            'Synthetic helper',
+          );
+
+          const revision = async () =>
+            (await pool.query('SELECT revision FROM agents WHERE id=$1', [id])).rows[0]
+              .revision as number;
+          const picture = await upload('helper.png', 'image/png', png);
+          const set = await request('PATCH', `/api/agents/${id}`, {
+            revision: await revision(),
+            emoji: '🦉',
+            color: 'ink',
+            imageId: picture,
+          });
+          assert.equal(set.statusCode, 200, set.body);
+          assert.deepEqual(
+            (await pool.query('SELECT emoji,color,image_id FROM agents WHERE id=$1', [id])).rows[0],
+            { emoji: '🦉', color: 'ink', image_id: picture },
+          );
+          assert.equal(
+            (await pool.query('SELECT expires_at FROM artifacts WHERE id=$1', [picture])).rows[0]
+              .expires_at,
+            null,
+          );
+          assert.equal(
+            (
+              await pool.query(
+                `SELECT ${agentTopicName('$1', '$2::uuid', "'Synthetic helper'::text")} AS name`,
+                [ownerId, chat],
+              )
+            ).rows[0].name,
+            '🦉 Synthetic helper',
+          );
+
+          const refused = async (change: Record<string, unknown>, status = 400) => {
+            const before = await revision();
+            const response = await request('PATCH', `/api/agents/${id}`, {
+              revision: before,
+              ...change,
+            });
+            assert.equal(response.statusCode, status, response.body);
+            assert.equal(await revision(), before);
+            return response.json<{ error: string }>().error;
+          };
+          const script = Buffer.from(
+            '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
+          );
+          assert.match(
+            await refused({ imageId: await upload('helper.svg', 'image/svg+xml', script) }),
+            /PNG, JPEG, WebP or GIF image, not image\/svg\+xml/,
+          );
+          assert.match(
+            await refused({ imageId: await upload('helper.png', 'image/png', script) }),
+            /content doesn't match its type, image\/png/,
+          );
+          assert.match(
+            await refused({
+              imageId: await upload(
+                'large.png',
+                'image/png',
+                Buffer.concat([png, Buffer.alloc(2 * 1024 * 1024)]),
+              ),
+            }),
+            /at most 2 MB/,
+          );
+          await refused({ emoji: 'ab' });
+          await refused({ emoji: '🦉🦉' });
+          await refused({ color: 'chartreuse' });
+          const foreignPicture = randomUUID();
+          const foreignBot = randomUUID();
+          await pool.query(
+            `INSERT INTO artifacts(id,owner_id,name,mime_type,size,storage_path)
+             VALUES($1,$2,'foreign.png','image/png',72,'/synthetic/foreign.png')`,
+            [foreignPicture, `${ownerId}-other`],
+          );
+          await pool.query(
+            "INSERT INTO agents(id,owner_id,name,emoji) VALUES($1,$2,'Synthetic foreign bot','🌱')",
+            [foreignBot, `${ownerId}-other`],
+          );
+          assert.equal(
+            await refused({ imageId: foreignPicture }, 404),
+            'The picture is unavailable. Upload it again.',
+          );
+          for (const change of [{ emoji: '🦉' }, { imageId: picture }])
+            assert.equal(
+              (await request('PATCH', `/api/agents/${foreignBot}`, { revision: 1, ...change }))
+                .statusCode,
+              404,
+            );
+          assert.deepEqual(
+            (await pool.query('SELECT emoji,image_id FROM agents WHERE id=$1', [foreignBot]))
+              .rows[0],
+            { emoji: '🌱', image_id: null },
+          );
+
+          const cleared = await request('PATCH', `/api/agents/${id}`, {
+            revision: await revision(),
+            imageId: null,
+          });
+          assert.equal(cleared.statusCode, 200, cleared.body);
+          assert.ok(
+            (await pool.query('SELECT expires_at FROM artifacts WHERE id=$1', [picture])).rows[0]
+              .expires_at <= new Date(),
+          );
+
+          const plain = randomUUID();
+          await pool.query("INSERT INTO agents(id,owner_id,name) VALUES($1,$2,'Synthetic plain')", [
+            plain,
+            ownerId,
+          ]);
+          const migrated = createAgents({ pool, ownerId });
+          await migrated.initialize();
+          await migrated.initialize();
+          const row = (
+            await pool.query('SELECT emoji,color,image_id FROM agents WHERE id=$1', [plain])
+          ).rows[0];
+          assert.ok(agentDefaultEmoji.includes(row.emoji));
+          assert.ok(agentColors.includes(row.color));
+          assert.equal(row.image_id, null);
+          assert.deepEqual(
+            (await pool.query('SELECT emoji,color FROM agents WHERE id=$1', [id])).rows[0],
+            { emoji: '🦉', color: 'ink' },
+          );
+
+          await pool.query('DELETE FROM agents WHERE id=ANY($1::uuid[])', [[plain, foreignBot]]);
+          await pool.query('DELETE FROM artifacts WHERE id=$1', [foreignPicture]);
+          assert.equal((await request('DELETE', `/api/agents/${id}`)).statusCode, 200);
         },
       );
 

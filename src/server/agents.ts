@@ -10,6 +10,12 @@ import {
   type AgentChoices,
 } from '../shared/agents.ts';
 import { afterCommit, transaction } from './transaction.ts';
+import {
+  agentPictureColumns,
+  agentPictureInput,
+  createAgentPictures,
+  defaultAgentPicture,
+} from './agent-pictures.ts';
 import type { ApprovalDescription, ApprovalPresentation } from './approvals.ts';
 import { channelText } from './channel-text.ts';
 import { publicText } from './communication.ts';
@@ -43,7 +49,10 @@ const profile = z.object({
   skills: allowlist(agentLimits.skills),
 });
 const memoryMode = z.enum(['shared', 'own', 'own_and_shared']);
-const changeInput = profile.partial().extend({ memoryMode: memoryMode.optional() }).strict();
+const changeInput = profile
+  .partial()
+  .extend({ memoryMode: memoryMode.optional(), ...agentPictureInput })
+  .strict();
 const approvedChange = profile
   .partial()
   .extend({ id: z.uuid(), revision: z.number().int().positive() })
@@ -103,9 +112,11 @@ export function createAgents(options: {
   renamed?: (taskId: string, title: string) => void;
   choices?: () => Promise<AgentChoices>;
   removed?: (agentId: string) => Promise<void>;
+  readArtifact?: (id: string) => Promise<Buffer>;
 }) {
   const { pool, ownerId } = options;
   const refresh = options.refresh ?? (() => {});
+  const pictures = createAgentPictures({ ownerId, read: options.readArtifact });
 
   async function initialize() {
     await pool.query(`
@@ -129,20 +140,26 @@ export function createAgents(options: {
       CREATE INDEX IF NOT EXISTS agent_chats_chat ON agent_chats(owner_id,chat_id);
       INSERT INTO agent_chats(owner_id,agent_id,chat_id)
         SELECT owner_id,id,chat_id FROM agents WHERE chat_id IS NOT NULL ON CONFLICT DO NOTHING;
+      ${agentPictureColumns}
     `);
   }
 
   async function list(threadId?: string): Promise<Agent[]> {
     return (
-      await pool.query<Agent>(
+      await pool.query<Omit<Agent, 'lastActiveAt'> & { lastActiveAt: Date | null }>(
         `SELECT a.id,a.name,a.description,a.instructions,a.memory_mode AS "memoryMode",a.apps,a.skills,a.revision,
-           CASE WHEN u.thread_id=$2 THEN a.chat_id END AS "chatId",t.model
+           CASE WHEN u.thread_id=$2 THEN a.chat_id END AS "chatId",t.model,a.emoji,a.color,a.image_id AS "imageId",
+           (SELECT max(c.updated_at) FROM agent_chats ac JOIN tasks c ON c.id=ac.chat_id AND c.owner_id=ac.owner_id
+             WHERE ac.owner_id=a.owner_id AND ac.agent_id=a.id) AS "lastActiveAt"
          FROM agents a LEFT JOIN tasks t ON t.id=a.chat_id AND t.owner_id=a.owner_id
          LEFT JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
          WHERE a.owner_id=$1 ORDER BY lower(a.name),a.id`,
         [ownerId, threadId ?? null],
       )
-    ).rows;
+    ).rows.map(({ lastActiveAt, ...agent }) => ({
+      ...agent,
+      lastActiveAt: lastActiveAt?.toISOString() ?? null,
+    }));
   }
 
   async function scope(turnId: string): Promise<AgentScope | undefined> {
@@ -211,40 +228,53 @@ export function createAgents(options: {
   }
 
   async function make(raw: unknown) {
-    const { chatId, ...input } = profile
+    const { chatId, imageId, ...input } = profile
       .partial({ description: true, instructions: true, apps: true, skills: true })
-      .extend({ chatId: z.uuid(), memoryMode: memoryMode.optional() })
+      .extend({
+        chatId: z.uuid().optional(),
+        memoryMode: memoryMode.optional(),
+        ...agentPictureInput,
+      })
       .strict()
       .parse(raw);
     await checkChoices(input);
+    const picture = defaultAgentPicture();
     return transaction(async (client) => {
-      const chat = await client.query(
-        'SELECT 1 FROM tasks WHERE id=$1 AND owner_id=$2 AND session_id=id FOR UPDATE',
-        [chatId, ownerId],
-      );
-      if (!chat.rowCount) throw failure('Chat not found.', 404);
+      if (chatId) {
+        const chat = await client.query(
+          'SELECT 1 FROM tasks WHERE id=$1 AND owner_id=$2 AND session_id=id FOR UPDATE',
+          [chatId, ownerId],
+        );
+        if (!chat.rowCount) throw failure('Chat not found.', 404);
+      }
+      if (imageId) await pictures.keep(client, imageId);
       const id = randomUUID();
       await client
         .query(
-          `INSERT INTO agents(id,owner_id,name,description,instructions,chat_id,memory_mode,apps,skills)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          `INSERT INTO agents(id,owner_id,name,description,instructions,chat_id,memory_mode,apps,skills,emoji,color,image_id)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
           [
             id,
             ownerId,
             input.name,
             input.description ?? '',
             input.instructions ?? '',
-            chatId,
+            chatId ?? null,
             input.memoryMode ?? 'shared',
             input.apps ?? [],
             input.skills ?? [],
+            input.emoji ?? picture.emoji,
+            input.color ?? picture.color,
+            imageId ?? null,
           ],
         )
         .catch((error: unknown) => {
           throw conflict(error);
         });
-      await chatOf(client, id, chatId);
-      await title(client, chatId, input.name);
+      if (chatId) {
+        await chatOf(client, id, chatId);
+        await title(client, chatId, input.name);
+      }
       afterCommit(client, refresh);
       return { id };
     }, pool);
@@ -256,15 +286,25 @@ export function createAgents(options: {
     revision: number,
     input: z.infer<typeof changeInput>,
   ) {
+    if (input.imageId) await pictures.keep(client, input.imageId);
     const updated = (
       await client
-        .query<{ name: string; chat_id: string | null; renamed: boolean }>(
+        .query<{
+          name: string;
+          chat_id: string | null;
+          renamed: boolean;
+          repictured: boolean;
+          previous_image: string | null;
+        }>(
           `UPDATE agents a SET name=COALESCE($4,a.name),description=COALESCE($5,a.description),
              instructions=COALESCE($6,a.instructions),memory_mode=COALESCE($7,a.memory_mode),
              apps=COALESCE($8::text[],a.apps),skills=COALESCE($9::text[],a.skills),
+             emoji=COALESCE($10,a.emoji),color=COALESCE($11,a.color),
+             image_id=CASE WHEN $12::boolean THEN $13::uuid ELSE a.image_id END,
              revision=a.revision+1,updated_at=now()
            FROM agents before WHERE a.id=$1 AND a.owner_id=$2 AND a.revision=$3 AND before.id=a.id
-           RETURNING a.name,a.chat_id,a.name IS DISTINCT FROM before.name AS renamed`,
+           RETURNING a.name,a.chat_id,a.name IS DISTINCT FROM before.name AS renamed,
+             a.emoji IS DISTINCT FROM before.emoji AS repictured,before.image_id AS previous_image`,
           [
             id,
             ownerId,
@@ -275,6 +315,10 @@ export function createAgents(options: {
             input.memoryMode ?? null,
             input.apps ?? null,
             input.skills ?? null,
+            input.emoji ?? null,
+            input.color ?? null,
+            input.imageId !== undefined,
+            input.imageId ?? null,
           ],
         )
         .catch((error: unknown) => {
@@ -290,7 +334,12 @@ export function createAgents(options: {
         ? failure('This agent changed. Review it before saving again.', 409)
         : failure('Agent not found.', 404);
     }
-    if (updated.renamed) await title(client, updated.chat_id, updated.name);
+    const chatId = updated.chat_id;
+    if (updated.renamed) await title(client, chatId, updated.name);
+    else if (updated.repictured && chatId)
+      afterCommit(client, () => options.renamed?.(chatId, updated.name));
+    if (input.imageId !== undefined && updated.previous_image !== input.imageId)
+      await pictures.release(client, updated.previous_image);
     afterCommit(client, refresh);
     return updated.name;
   }
@@ -550,11 +599,12 @@ export function createAgents(options: {
     });
     app.delete<{ Params: { id: string } }>('/api/agents/:id', async (request) => {
       const id = z.uuid().parse(request.params.id);
-      const removed = await pool.query('DELETE FROM agents WHERE id=$1 AND owner_id=$2', [
-        id,
-        ownerId,
-      ]);
+      const removed = await pool.query<{ image_id: string | null }>(
+        'DELETE FROM agents WHERE id=$1 AND owner_id=$2 RETURNING image_id',
+        [id, ownerId],
+      );
       if (!removed.rowCount) throw failure('Agent not found.', 404);
+      await pictures.release(pool, removed.rows[0]!.image_id);
       await options.removed?.(id);
       refresh();
       return { ok: true };

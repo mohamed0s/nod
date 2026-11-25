@@ -162,6 +162,7 @@ import { createChannels } from './channels.ts';
 import { createChatTitles } from './chat-titles.ts';
 import { chatModelArgs } from './chat-model.ts';
 import { createAgents } from './agents.ts';
+import { agentTopicName } from './agent-pictures.ts';
 import { createChiefOfStaff } from './chief-of-staff.ts';
 import { createRooms, roomMirrorSql } from './rooms.ts';
 import { createAgentMemory, sharedReflection } from './agent-memory.ts';
@@ -1247,6 +1248,7 @@ async function initializeApplication(
     renamed: renameTopic,
     choices: () => agentTools.choices(),
     removed: (id) => agentMemory.remove(id),
+    readArtifact: (id) => artifacts.readArtifact(id),
   });
   await agents.initialize();
   const rooms = createRooms({
@@ -3970,6 +3972,7 @@ async function initializeApplication(
           })
         ).turnId,
       topicAgent: agents.forTopic,
+      topicName: agentTopicName,
       answerRefusal: agents.answerRefusal,
       speaker: rooms.speaker,
       mirrored: roomMirrorSql,

@@ -108,6 +108,7 @@ interface ChannelOptions {
     chatAgent?: string,
   ) => Promise<string>;
   topicAgent?: (topic: InboxRow) => Promise<string | undefined>;
+  topicName?: (owner: string, task: string, title: string) => string;
   answerRefusal?: (approvalId: string) => Promise<string | undefined>;
   speaker?: (messageId: string) => Promise<string | undefined>;
   mirrored?: (turn: string) => string;
@@ -311,6 +312,7 @@ export async function channelReply(
 
 export async function createChannels(pool: Pool, options: ChannelOptions) {
   const { ownerId } = options;
+  const topicName = options.topicName ?? ((_owner: string, _task: string, title: string) => title);
   let sendFencePool: Pool | undefined;
   const fencePool = () => {
     if (!sendFencePool) {
@@ -2055,7 +2057,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     if (!row.turn_id) return wanted ?? undefined;
     const task = wanted
       ? await pool.query<{ title: string; topic_id: string | null; name: string | null }>(
-          `SELECT t.title,c.topic_id,c.name FROM tasks t LEFT JOIN channel_topics c ON c.task_id=t.id AND c.owner_id=t.owner_id
+          `SELECT ${topicName('t.owner_id', 't.id', 't.title')} AS title,c.topic_id,c.name FROM tasks t LEFT JOIN channel_topics c ON c.task_id=t.id AND c.owner_id=t.owner_id
              AND c.provider=$3 AND c.account_id=$4 AND c.sender_id=$5
            WHERE t.id=$1 AND t.owner_id=$2 AND t.session_id=t.id`,
           [wanted, ownerId, row.provider, row.account_id, row.sender_id],
@@ -2164,11 +2166,14 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
 
   async function renameTopic(taskId: string, title: string) {
     if (closed || replacing || !transport.renameTopic) return;
-    const topics = await pool.query<ChannelIdentity & { topic_id: string; thread_id: string }>(
-      `SELECT c.provider,c.account_id,c.sender_id,c.topic_id,i.thread_id FROM channel_topics c
+    const name = topicName('c.owner_id', 'c.task_id', '$3::text');
+    const topics = await pool.query<
+      ChannelIdentity & { topic_id: string; thread_id: string; title: string }
+    >(
+      `SELECT c.provider,c.account_id,c.sender_id,c.topic_id,i.thread_id,${name} AS title FROM channel_topics c
        CROSS JOIN LATERAL (SELECT i.thread_id FROM channel_inbox i WHERE i.owner_id=c.owner_id AND i.provider=c.provider
          AND i.account_id=c.account_id AND i.sender_id=c.sender_id ORDER BY i.received_at DESC LIMIT 1) i
-       WHERE c.owner_id=$1 AND c.task_id=$2 AND c.name IS DISTINCT FROM $3`,
+       WHERE c.owner_id=$1 AND c.task_id=$2 AND c.name IS DISTINCT FROM ${name}`,
       [ownerId, taskId, title],
     );
     for (const row of topics.rows)
@@ -2176,7 +2181,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
         await nameTopic(
           row,
           row.topic_id,
-          title,
+          row.title,
           false,
           AbortSignal.any([receiving.signal, AbortSignal.timeout(30_000)]),
         );
