@@ -1249,7 +1249,13 @@ async function initializeApplication(
     removed: (id) => agentMemory.remove(id),
   });
   await agents.initialize();
-  const rooms = createRooms({ pool, ownerId, refresh, limits: () => ledger.limits() });
+  const rooms = createRooms({
+    pool,
+    ownerId,
+    refresh,
+    limits: () => ledger.limits(),
+    clearBrowser: (id) => adapters.computer.clear(id),
+  });
   await rooms.initialize();
   const chiefOfStaff = createChiefOfStaff({
     pool,

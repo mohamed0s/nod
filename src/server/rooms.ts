@@ -6,7 +6,7 @@ import type { RuntimeContext } from '../ports/agent.ts';
 import type { ModelSelection, WorkKind } from '../shared/models.ts';
 import { roomLimits, type Room } from '../shared/rooms.ts';
 import type { ApprovalDescription, ApprovalPresentation } from './approvals.ts';
-import { abortTurns, enqueueTurn, lockThread, withTurnLock } from './thread.ts';
+import { cancelTurns, enqueueTurn, lockThread, withTurnLock } from './thread.ts';
 import { afterCommit, transaction } from './transaction.ts';
 import type { TrustReason } from './trust.ts';
 import type { TrustBasis } from './trust-basis.ts';
@@ -119,6 +119,7 @@ export function createRooms(options: {
   ownerId: string;
   refresh?: () => void;
   limits?: () => Promise<{ taskUsd: number | null }>;
+  clearBrowser?: (id: string) => Promise<void>;
 }) {
   const { pool, ownerId } = options;
   const refresh = options.refresh ?? (() => {});
@@ -219,7 +220,7 @@ export function createRooms(options: {
     return added.rows[0].name as string;
   }
 
-  async function leave(client: Client, roomId: string, agentId: string) {
+  async function leave(client: Client, roomId: string, threadId: string, agentId: string) {
     const removed = await client.query<{ session_id: string; name: string }>(
       `UPDATE room_members SET removed_at=now() WHERE owner_id=$1 AND room_id=$2 AND agent_id=$3 AND removed_at IS NULL
        RETURNING session_id,name`,
@@ -232,14 +233,25 @@ export function createRooms(options: {
       agentId,
       roomId,
     ]);
-    const stopped = (
-      await client.query<{ id: string }>(
-        `UPDATE turns SET status='cancelled',finished_at=now()
-         WHERE owner_id=$1 AND session_id=$2 AND status IN ('queued','running','waiting') RETURNING id`,
-        [ownerId, row.session_id],
-      )
-    ).rows.map(({ id }) => id);
-    afterCommit(client, () => abortTurns(stopped));
+    const open = await client.query(
+      "SELECT 1 FROM tasks WHERE id=$1 AND owner_id=$2 AND state='open'",
+      [roomId, ownerId],
+    );
+    const stopped = await cancelTurns(
+      client as PoolClient,
+      threadId,
+      { sessionId: row.session_id },
+      undefined,
+      'agent',
+    );
+    if (open.rowCount)
+      await client.query(
+        "UPDATE tasks SET state='open',closed_at=NULL WHERE id=$1 AND owner_id=$2 AND state='cancelled'",
+        [roomId, ownerId],
+      );
+    afterCommit(client, () => {
+      void Promise.allSettled(stopped.browsers.map((id) => options.clearBrowser?.(id)));
+    });
     return row.name;
   }
 
@@ -275,7 +287,7 @@ export function createRooms(options: {
     const added: string[] = [];
     const removed: string[] = [];
     for (const agentId of change.remove) {
-      const name = await leave(client, roomId, agentId);
+      const name = await leave(client, roomId, room.thread_id, agentId);
       if (name) removed.push(name);
     }
     for (const agentId of change.add) {
