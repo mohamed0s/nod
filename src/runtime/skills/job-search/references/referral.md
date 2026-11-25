@@ -26,7 +26,7 @@ Save the change with `jobs draft_save {personId, text, changes, revision}`: star
 
 ## After the owner sends it
 
-The owner pastes the message on LinkedIn and attaches their main CV, unchanged. When they say they sent it, save `status: "asked"` with `jobs person_update`. If they get no reply, a follow-up comes due after `followUpDays`; see [mail.md](mail.md). After the first request is saved, offer the weekly job report once, as [weekly.md](weekly.md) describes.
+The owner pastes the message on LinkedIn and attaches their main CV, unchanged. When they say they sent it, save `status: "asked"` with `jobs person_update`. If they get no reply, a follow-up comes due after `followUpDays`; see [mail.md](mail.md). After the first request is saved, read `jobs mail_status` and offer the weekly job report when `reportOffer` is true, as [weekly.md](weekly.md) describes.
 
 ## Waves of invites
 

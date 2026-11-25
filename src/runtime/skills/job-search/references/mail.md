@@ -8,12 +8,12 @@ The owner may have several Gmail accounts connected. Job mail reads only the one
 
 ## Offer the Job mail schedule
 
-`jobs mail_status` returns `offer: true` once the owner has Gmail connected and someone invited, until the offer is made. Offer it only in a chat with the owner, once, in one short message: every 30 minutes from 08:00 to 23:00 in their time zone, Nod checks the linked Gmail account for accepts and replies, and skips the check when no new mail arrived. Then call `jobs mail_setup {offered: true}`, whatever they answer.
+`jobs mail_status` returns `offer: true` once the owner has Gmail connected and someone invited, until the offer is made. Offer it once, in a chat with the owner or in the Job radar's message, in one short message: every 30 minutes from 08:00 to 22:30 in their time zone, Nod checks the linked Gmail account for accepts and replies, and skips the check when no new mail arrived. Then call `jobs offer_made {offer: "job_mail"}`, whatever they answer.
 
-When the owner says yes, in that same chat:
+When the owner says yes, in the chat where they said it:
 
 1. Choose the account with them, as above.
-2. Create the schedule with `nod schedule_create` as the schedules guide describes: title "Job mail", recurring, cron `*/30 8-22 * * *` in the owner's time zone, `watch` with the account's connectionId, delivered to this chat, on the light model as [evaluate.md](evaluate.md) suggests. Its prompt: "Run Job mail as the job-search guide's mail reference describes. Message me only about accepts or replies Nod couldn't match, or a problem."
+2. Create the schedule with `nod schedule_create` as the schedules guide describes: title "Job mail", recurring, cron `*/30 8-22 * * *` (08:00 to 22:30) in the owner's time zone, `watch` with the account's connectionId, delivered to this chat, on the light model as [evaluate.md](evaluate.md) suggests. Its prompt: "Run Job mail as the job-search guide's mail reference describes. Message me only about accepts or replies Nod couldn't match, or a problem."
 3. Save both with `jobs mail_setup {account, scheduleId}`. Nod accepts only a schedule made from the owner's message in this chat. Only that schedule's runs, and work the owner starts, can apply job mail to the records.
 
 ## Each run

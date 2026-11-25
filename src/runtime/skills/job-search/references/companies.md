@@ -11,7 +11,7 @@ When the owner says they invited, heard from or asked someone, save it with `job
 - `status`: `invited` (the owner sent a connection request), `accepted`, `asked` (the owner sent the referral request), `replied`, `referred` or `declined`. Set `at` only when the owner says it happened earlier, such as "I invited her on Monday".
 - Send several people in one call when the owner lists them.
 
-After saving someone in a chat with the owner, read `jobs mail_status`; when its `offer` is true, offer the Job mail schedule as [mail.md](mail.md) describes.
+After saving someone in a chat with the owner, read `jobs mail_status`; when its `offer` is true, offer the Job mail schedule as [mail.md](mail.md) describes, and when `reportOffer` is true, the Weekly job report as [weekly.md](weekly.md) describes.
 
 Save only what the owner gave you. Never look for people, profiles or companies on LinkedIn, and never open, fetch or follow a LinkedIn link: the owner opens profiles and messages from the Jobs page.
 

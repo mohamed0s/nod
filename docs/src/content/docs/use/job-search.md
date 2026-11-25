@@ -79,7 +79,7 @@ When a posting's link is on a site your rules tell Nod to avoid, Nod doesn't ope
 
 ## The Job radar
 
-When Nod drafts your profile, it offers the **Job radar** once: every morning at 07:30 in your time zone it looks in every source that is on, gives each new posting a short check, fully scores the five best, and sends you one short message with the new jobs worth a look, each with its score, company, title and link, then the accepts waiting for your message, the [follow-ups](#follow-ups) due, the replies since yesterday and the companies whose next wave opened. When nothing new is worth a look, it sends nothing. It's a normal schedule, so you can change or pause it on the **Scheduled** page.
+When Nod drafts your profile, it offers the **Job radar** once: every morning at 07:30 in your time zone it looks in every source that is on, gives each new posting a short check, fully scores the five best, and sends you one short message with the new jobs worth a look, each with its score, company, title and link, then the accepts waiting for your message, the [follow-ups](#follow-ups) due, the replies since yesterday and the companies whose next wave opened. It sends the message when any of these has something, even on a day with no new jobs, and nothing only when all of them are empty. The radar is also where Nod makes the [Job mail](#the-job-mail-schedule) and [weekly report](#the-weekly-report) offers, once each, if you haven't had them in chat. The weekly sweep runs only when its last run was 7 or more days ago; the **Sources** tab shows when that was. It's a normal schedule, so you can change or pause it on the **Scheduled** page.
 
 Nod also suggests a few public Telegram job channels for your regions and roles. It saves only the ones you accept.
 
@@ -162,7 +162,7 @@ A browser helper is a companion you install separately; it isn't part of Nod or 
 - log people you invited, under their company;
 - add the LinkedIn member ID of someone you invited who has none yet, so **Message** can open a chat;
 - mark people you invited as accepted, from a list of their profile links;
-- show a company's people, and the invites you sent in the last day and the last 7 days against the invite limits on the **Profile** tab;
+- show a company's people, and the invites you sent today and this week (today and the six days before it, in your time zone) against the invite limits on the **Profile** tab;
 - show who accepted and is waiting for your message, with the prepared message, its language, what Nod changed and why, and the company's wave;
 - switch the language of a person's message, which makes it again, unless you edited it;
 - make the message for someone who accepted before Nod prepared messages;
@@ -202,7 +202,7 @@ Nod reads job mail only in the Gmail account you linked to LinkedIn. Choose it o
 
 ### The Job mail schedule
 
-Once your Gmail is connected and you invited someone, Nod offers the **Job mail** schedule once: every 30 minutes from 08:00 to 23:00 in your time zone, it checks that account for job mail since the last run, and up to 14 days back after a pause. It watches the account, so when no new mail arrived, the run is skipped without a model call. Pausing automatic preparation doesn't stop it: the watch checks the account itself. Like any schedule, you change or pause it on the **Scheduled** page.
+Once your Gmail is connected and you invited someone, Nod offers the **Job mail** schedule once, in chat or in a Job radar message: every 30 minutes from 08:00 to 22:30 in your time zone, it checks that account for job mail since the last run, and up to 14 days back after a pause. It watches the account, so when no new mail arrived, the run is skipped without a model call. Pausing automatic preparation doesn't stop it: the watch checks the account itself. Like any schedule, you change or pause it on the **Scheduled** page.
 
 Each run asks Nod's server to read the job mail. The server searches the account itself, through your Gmail connection, and matches the emails without a model, so their text never passes through the conversation and the model can't supply emails of its own. Nod messages you only about an accept or reply it couldn't match, or a problem.
 
@@ -228,7 +228,7 @@ When someone you asked for a referral hasn't replied after 3 days (change **Foll
 
 ## The weekly report
 
-Once you asked someone for a referral, Nod offers the **Weekly job report** once: every Sunday evening it updates a page in [Pages](/use/pages/), **Job search weekly**, and sends you a short summary. The page shows:
+Once you asked someone for a referral, Nod offers the **Weekly job report** once, in chat or in a Job radar message: every Sunday evening it updates a page in [Pages](/use/pages/), **Job search weekly**, and sends you a short summary. The page shows:
 
 - this week's invites, accepts, requests, replies, referrals, applications and replies from companies;
 - interviews, applications with their outcome, and follow-ups due;

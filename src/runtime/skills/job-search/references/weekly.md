@@ -10,9 +10,9 @@ The numbers come from the records. Never add to them or estimate one that isn't 
 
 ## Offer the weekly report
 
-Offer it once, in a chat with the owner, after their first referral request is saved (someone `asked`) when `nod schedule_list` has no "Weekly job report" and they haven't said no: every Sunday evening Nod updates a page with the week's numbers and sends a short summary.
+`jobs mail_status` returns `reportOffer: true` once someone was asked for a referral, until the offer is made. Offer it once, in a chat with the owner or in the Job radar's message, unless `nod schedule_list` already has a "Weekly job report": every Sunday evening Nod updates a page with the week's numbers and sends a short summary. Then call `jobs offer_made {offer: "weekly_report"}`, whatever they answer.
 
-When the owner says yes, create the schedule with `nod schedule_create`: title "Weekly job report", cron `0 19 * * 0` in the owner's time zone, delivered to this chat, on the light model. Its prompt: "Make the weekly job report as the job-search guide's weekly reference describes."
+When the owner says yes, in the chat where they said it, create the schedule with `nod schedule_create`: title "Weekly job report", cron `0 19 * * 0` in the owner's time zone, delivered to this chat, on the light model. Its prompt: "Make the weekly job report as the job-search guide's weekly reference describes."
 
 ## Each run
 

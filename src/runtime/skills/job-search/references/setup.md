@@ -26,13 +26,13 @@ Ask at most one short question in that chat, and only for something that matters
 
 ## Offer the Job radar
 
-Once the profile is drafted, and only once per owner, offer the Job radar in the same message as the summary: every morning at 07:30 Nod looks for new jobs on the sources that are on, checks and scores them, and messages only when something is worth a look. Read `nod schedule_list` first; don't offer it when a Job radar exists or the owner already said no.
+Once the profile is drafted, and only once per owner, offer the Job radar in the same message as the summary: every morning at 07:30 Nod looks for new jobs on the sources that are on, checks and scores them, and sends one short message with what needs the owner: new jobs worth a look, accepts waiting for their message, follow-ups due, replies and next waves. It sends nothing on a day when all of those are empty. Read `nod schedule_list` first; don't offer it when a Job radar exists or the owner already said no.
 
 Also propose a short starter list of public Telegram job channels for the profile's regions and target roles: find three to six with `web_search`, check each has a public preview at `https://t.me/s/<name>` with `fetch_content`, and give each one line. Follow the owner's rules about websites to avoid while you look.
 
 When the owner says yes:
 
-- Create the schedule with `nod schedule_create` as the schedules guide describes: title "Job radar", daily at 07:30 in the owner's time zone, delivered to this chat. Its prompt: "Run the Job radar as the job-search guide's scan reference describes: read the job sources, sync, run each source that is on, import the results, give every new posting a short check, fully score the five best, then send one short message with the new postings worth a look, each with its score, company, title and link. Send nothing when nothing new is worth a look." Suggest the light model as [evaluate.md](evaluate.md) says.
+- Create the schedule with `nod schedule_create` as the schedules guide describes: title "Job radar", daily at 07:30 in the owner's time zone, delivered to this chat. Its prompt: "Run the Job radar as the job-search guide's scan reference describes: read the job sources, sync, run each source that is on, import the results, give every new posting a short check, fully score the five best, then send one short message with every part the scan reference lists that has something in it. Send nothing only when every part is empty." Suggest the light model as [evaluate.md](evaluate.md) says.
 - Save only the channels they accept, with `jobs source_update {telegram: {add: [...]}}`.
 
 Never create the schedule or save a channel without their yes.
