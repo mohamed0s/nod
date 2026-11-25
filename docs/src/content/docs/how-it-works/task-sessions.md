@@ -25,7 +25,7 @@ flowchart TD
 
 The conversation is the owner's view of the work. The coordinator assigns work and routes ordinary follow-ups. A task session does the work, asks its own questions and delivers its own results. The coordinator does not rewrite each result through another model call.
 
-Explicit replies go to the selected task before the coordinator runs. The task's message identifies which work the owner is answering. The web app also lets the owner start a task directly with **New chat**, without the coordinator.
+Explicit replies go to the selected task before the coordinator runs. The task's message identifies which work the owner is answering. The web and desktop apps also let the owner start a task directly with **New chat**, without the coordinator.
 
 ## Three separate concepts
 
@@ -72,7 +72,7 @@ A schedule or other event session can also create a task record for its work. It
 
 ## Start a task with New chat
 
-**New chat** in the web app starts a task without the coordinator:
+**New chat** in the web and desktop apps starts a task without the coordinator:
 
 1. The owner's message is saved as a `user` turn in a new session. The server marks it as background work for that session.
 2. The same transaction saves a task whose ID is that session ID. Its title starts as the message's first line, its brief is the message, and its source owner message is that message. It has no completion condition, no first task message and no steps until the task writes them.
