@@ -2936,7 +2936,8 @@ test(
           });
           assert.ok(seen(afterNote.turnId).includes(note));
           assert.ok(!seen(afterNote.turnId).some((text) => /lanterns|canoes/.test(text)));
-          const [askTurn, pairTask, pairTurn, yesTurn] = [
+          const [askTurn, pairTask, pairTurn, resumeTurn, yesTurn] = [
+            randomUUID(),
             randomUUID(),
             randomUUID(),
             randomUUID(),
@@ -2946,10 +2947,10 @@ test(
             await db.pool.query('UPDATE turns SET task_id=NULL WHERE id=$1', [pairTurn]);
             await db.pool.query('DELETE FROM tasks WHERE id=$1', [pairTask]);
             await db.pool.query('DELETE FROM messages WHERE turn_id=ANY($1::uuid[])', [
-              [askTurn, pairTurn, yesTurn],
+              [askTurn, pairTurn, resumeTurn, yesTurn],
             ]);
             await db.pool.query('DELETE FROM turns WHERE id=ANY($1::uuid[])', [
-              [askTurn, pairTurn, yesTurn],
+              [askTurn, pairTurn, resumeTurn, yesTurn],
             ]);
           });
           const addTurn = (id: string, session: string) =>
@@ -2975,6 +2976,8 @@ test(
           );
           await db.pool.query('UPDATE turns SET task_id=$1 WHERE id=$2', [pairTask, pairTurn]);
           await addMessage(pairTurn, 'assistant', 'Shall I sell the synthetic bicycle?');
+          await addTurn(resumeTurn, pairTask);
+          await addMessage(resumeTurn, 'assistant', 'Shall I ship the synthetic bicycle?');
           await addTurn(yesTurn, current);
           const yes = await addMessage(yesTurn, 'user', 'yes');
           assert.deepEqual((await checked(yes, null)).slice(-2), [
