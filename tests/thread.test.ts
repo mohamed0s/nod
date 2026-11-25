@@ -816,8 +816,13 @@ test(
         )
       ).rows[0].count,
     });
-    const deltas: Array<{ turnId?: string; threadId?: string }> = [];
-    const onEvent = (event: { type: string; turnId?: string; threadId?: string }) => {
+    const deltas: Array<{ turnId?: string; threadId?: string; taskId?: string }> = [];
+    const onEvent = (event: {
+      type: string;
+      turnId?: string;
+      threadId?: string;
+      taskId?: string;
+    }) => {
       if (event.type === 'delta') deltas.push(event);
     };
     events.on('event', onEvent);
@@ -2539,6 +2544,21 @@ test(
             'confirmed',
           );
           await waitFor(settled(topicAnswered.turnId));
+          const streamedChat = randomUUID();
+          const streamed = await chatMessages.submit('Fresh conversation', [], {
+            sessionId: streamedChat,
+          });
+          await waitFor(settled(streamed.turnId));
+          assert.deepEqual(
+            [
+              ...new Set(
+                deltas
+                  .filter(({ turnId }) => turnId === streamed.turnId)
+                  .map(({ taskId }) => taskId),
+              ),
+            ],
+            [streamedChat],
+          );
         },
       );
 

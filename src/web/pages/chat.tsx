@@ -348,7 +348,7 @@ export function Chat({
 }: {
   ownerId: string;
   state: AppState;
-  streams: Record<string, string>;
+  streams: Record<string, { text: string; taskId?: string }>;
   connected?: boolean;
   refresh(): Promise<void>;
   initialFocusMessageId?: string;
@@ -956,8 +956,10 @@ export function Chat({
       .finally(() => setWelcoming(false));
   }, []);
   const persistedStreams = new Set(allMessages.map((message) => message.streamId).filter(Boolean));
-  const streamEntries = Object.entries(chatId || startsChat ? {} : streams).filter(
-    ([id, value]) => value && !persistedStreams.has(id),
+  const streamEntries = Object.entries(startsChat ? {} : streams).flatMap(([id, stream]) =>
+    stream.text && stream.taskId === chatId && !persistedStreams.has(id)
+      ? [[id, stream.text] as const]
+      : [],
   );
   const streamIds = new Set(streamEntries.map(([id]) => id));
   const arrivals = useRef({ threadId, keys: new Set<string>() });

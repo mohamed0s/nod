@@ -2083,6 +2083,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
   const timeZone: string | undefined = preference?.time_zone || undefined;
   return {
     sourceMessageId,
+    chatId: chat?.id ?? undefined,
     ...source,
     history: history.rows,
     context: {
@@ -2601,8 +2602,17 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
         shared.splice(0, pending.length);
       },
       delta: (text, streamId, done) => {
-        if (!signal.aborted && !turn.background && turn.channel === 'web')
-          delta({ ownerId, channel: turn.channel, threadId, turnId, text, streamId, done });
+        if (!signal.aborted && (!turn.background || loaded.chatId) && turn.channel === 'web')
+          delta({
+            ownerId,
+            channel: turn.channel,
+            threadId,
+            turnId,
+            text,
+            streamId,
+            done,
+            ...(loaded.chatId ? { taskId: loaded.chatId } : {}),
+          });
       },
       reactToMessage:
         reactToMessage &&
