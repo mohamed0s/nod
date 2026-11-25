@@ -32,8 +32,10 @@ export const agentPictureInput = {
 };
 
 export const agentTopicName = (owner: string, task: string, title: string) =>
-  `COALESCE((SELECT a.emoji||' '||${title} FROM agent_chats c JOIN agents a ON a.id=c.agent_id AND a.owner_id=c.owner_id
-    WHERE c.owner_id=${owner} AND c.chat_id=${task} LIMIT 1),${title})`;
+  `COALESCE((SELECT topic_agent.emoji||' '||${title} FROM agent_chats topic_chat
+    JOIN agents topic_agent ON topic_agent.id=topic_chat.agent_id AND topic_agent.owner_id=topic_chat.owner_id
+    WHERE topic_chat.owner_id=${owner} AND topic_chat.chat_id=${task}
+    ORDER BY (topic_agent.chat_id=${task}) DESC LIMIT 1),${title})`;
 
 const signatures: Record<string, (bytes: Buffer) => boolean> = {
   'image/png': (bytes) =>

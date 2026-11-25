@@ -10,6 +10,7 @@ import Fastify from 'fastify';
 import pg from 'pg';
 import { markdownToPlainText } from 'chat';
 import { channelReply, createChannels } from '../src/server/channels.ts';
+import { agentTopicName } from '../src/server/agent-pictures.ts';
 import { createRooms, roomMirrorSql } from '../src/server/rooms.ts';
 import { createAgentReactionService } from '../src/server/agent-reactions.ts';
 import { createChatVerification } from '../src/server/chat-verification.ts';
@@ -6395,7 +6396,9 @@ test(
     const ownerId = 'fixture-topic-owner';
     const threadId = await createFixtureTables(pool, ownerId);
     await pool.query(`ALTER TABLE turns ADD COLUMN task_id uuid;
-      CREATE TABLE tasks(id uuid PRIMARY KEY,owner_id text NOT NULL,turn_id uuid,session_id uuid,message_id uuid,title text NOT NULL,title_by text)`);
+      CREATE TABLE tasks(id uuid PRIMARY KEY,owner_id text NOT NULL,turn_id uuid,session_id uuid,message_id uuid,title text NOT NULL,title_by text);
+      CREATE TABLE agents(id uuid PRIMARY KEY,owner_id text NOT NULL,emoji text NOT NULL,chat_id uuid);
+      CREATE TABLE agent_chats(owner_id text NOT NULL,agent_id uuid NOT NULL,chat_id uuid NOT NULL)`);
     let topics = false;
     let refuse = false;
     let refuseRename = false;
@@ -6517,6 +6520,7 @@ test(
         return { threadId, replies: [{ text: 'Synthetic task status' }] };
       },
       topicAgent: async (topic) => (topic.topic_id === '900' ? topicAgentId : undefined),
+      topicName: agentTopicName,
       submit: async (text, sourceId, client, channel, ...rest) => {
         const [, , replyToMessageId, , , , sessionId, chatAgent] = rest;
         if (text === failText) throw new Error('Synthetic turn queue failure.');
@@ -6703,6 +6707,23 @@ test(
     await say(taskTurn, 'Update after an unchanged topic name');
     await service.drain();
     assert.equal(renamed.length, 3);
+    const botId = randomUUID();
+    await pool.query("INSERT INTO agents(id,owner_id,emoji,chat_id) VALUES($1,$2,'🦉',$3)", [
+      botId,
+      ownerId,
+      taskId,
+    ]);
+    await pool.query('INSERT INTO agent_chats(owner_id,agent_id,chat_id) VALUES($1,$2,$3)', [
+      ownerId,
+      botId,
+      taskId,
+    ]);
+    await service.renameTopic(taskId, 'Synthetic report again');
+    assert.deepEqual(renamed.at(-1), {
+      chat_id: '123456',
+      message_thread_id: 701,
+      name: '🦉 Synthetic report again',
+    });
     const mainReply = await say(await turn(main.channel), 'Main chat reply');
     await service.drain();
     assert.equal(delivery('Main chat reply').message_thread_id, undefined);
