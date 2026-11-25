@@ -44,6 +44,7 @@ import { untrustedBlock } from '../src/shared/untrusted.ts';
 import { fakeComputer, fakeWorkspace } from './runtime-fixtures.ts';
 import { BrowserActionError } from '../src/ports/computer.ts';
 import { createMailCheck } from '../src/server/mail-check.ts';
+import { spendingLimitReached } from '../src/server/ledger.ts';
 import type { MemoryCurator } from '../src/ports/memory-curator.ts';
 import { createMemoryRecall } from '../src/server/memory-recall.ts';
 import { createMemoryService } from '../src/server/memory.ts';
@@ -1207,6 +1208,7 @@ test('a rate-limited mail check starts no further checks and keeps every uncheck
           return Promise.reject(
             Object.assign(new Error('Synthetic rate limit 482913.'), { providerStatus: 429 }),
           );
+        if (email.subject === 'Notice 2') return Promise.reject(new Error(spendingLimitReached));
         return new Promise((resolve, reject) => {
           const answer = setTimeout(() => resolve({ access: false }), 1_000);
           signal?.addEventListener(
@@ -1231,7 +1233,9 @@ test('a rate-limited mail check starts no further checks and keeps every uncheck
     emails.map((_, index) =>
       index === 1
         ? 'the check model request failed (HTTP 429)'
-        : 'the check model hit its rate limit (HTTP 429)',
+        : index === 2
+          ? spendingLimitReached
+          : 'the check model hit its rate limit (HTTP 429)',
     ),
   );
   assert.equal(started.length, 6);
