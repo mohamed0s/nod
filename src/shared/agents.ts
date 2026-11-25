@@ -14,3 +14,16 @@ export interface Agent {
   chatId: string | null;
   model: ModelSelection | null;
 }
+
+export function agentApprovalContent(args: unknown) {
+  const input = args && typeof args === 'object' ? (args as Record<string, unknown>) : {};
+  const value = (key: string) => (typeof input[key] === 'string' ? input[key] : undefined);
+  const fields = (
+    [
+      ['Name', value('name')],
+      ["What it's for", value('description')],
+    ] as const
+  ).flatMap(([label, text]) => (text === undefined ? [] : [{ label, value: text || '(empty)' }]));
+  const instructions = value('instructions');
+  return { fields, ...(instructions === undefined ? {} : { body: instructions || '(none)' }) };
+}

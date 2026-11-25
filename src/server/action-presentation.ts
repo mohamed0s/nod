@@ -1,6 +1,7 @@
 import { parseFragment, type DefaultTreeAdapterMap } from 'parse5';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { agentApprovalContent } from '../shared/agents.ts';
 
 const apps: Record<string, string> = {
   GMAIL: 'Gmail',
@@ -359,6 +360,7 @@ export function approvalContent(
   action: string,
   args: unknown,
 ): { fields?: Array<{ label: string; value: string }>; body?: string; bodyCut?: true } {
+  if (action === 'NOD_agent_update') return agentApprovalContent(args);
   if (
     /^(NOD_|CONNECTED_|mcp__)/.test(action) ||
     !args ||

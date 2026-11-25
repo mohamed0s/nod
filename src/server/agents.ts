@@ -283,14 +283,26 @@ export function createAgents(options: {
     );
     const presentation = await base(proposal, signal);
     const text = `${presentation.question}\n\nThe exact new text:\n\n${fence}\n${literal}\n${fence}`;
-    const channel = proposal.channel;
-    const shown =
-      !channel ||
-      channel === 'web' ||
-      (channelText(text).text === text.trim() && canDeliverLiteral(channel, text, literal));
+    const channel =
+      proposal.channel ??
+      (
+        await pool.query<{ channel: string | null }>(
+          'SELECT channel FROM turns WHERE id=$1 AND owner_id=$2',
+          [proposal.turn.turnId, ownerId],
+        )
+      ).rows[0]?.channel;
+    const safe = channelText(text);
+    const verbatim =
+      Boolean(channel) &&
+      channel !== 'web' &&
+      safe.text === text.trim() &&
+      !safe.secureAction &&
+      !safe.artifact &&
+      canDeliverLiteral(channel!, text, literal);
     return {
       ...presentation,
-      question: shown
+      cardQuestion: presentation.cardQuestion ?? presentation.question,
+      question: verbatim
         ? text
         : `${presentation.question}\n\nOpen this chat in the Nod app to read the exact new text before you answer.`,
     };
