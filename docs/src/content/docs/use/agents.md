@@ -100,7 +100,7 @@ An agent's chat can run for weeks, so its action check works as in Main: it sees
 
 ### What Main can't do
 
-- **Answer for you.** An agent's question or approval is answered only in that agent's chat or topic. A "yes" in Main never answers it, and Main can't send a plain yes or no to an agent.
+- **Answer for you.** An agent's question or approval is answered only in that agent's chat or topic. A "yes" in Main never answers it, and Main can't send a plain yes or no to an agent. A short reply such as "ok, go ahead" reaches the agent without Main's summary it answered, so it never covers what Main described there.
 - **Give permission.** Main's notes, the agent's instructions and anything an agent reports never count as your words.
 - **Send work from a schedule, an app event or the observer.** Only Main, answering your message, sends work to an agent.
 
