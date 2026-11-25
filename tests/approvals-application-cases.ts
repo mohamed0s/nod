@@ -3871,6 +3871,229 @@ export const approvalCases = inParts(
         },
       );
 
+      await inPart(
+        'a schedule runs as its agent and the agent instructions never become owner words',
+        async () => {
+          const send = async (body: Record<string, unknown>) => {
+            const sent = await request('POST', '/api/messages', {
+              clientMessageId: randomUUID(),
+              ...body,
+            });
+            assert.equal(sent.statusCode, 200, sent.body);
+            return sent.json().turnId as string;
+          };
+          const latestReply = async (session: string) =>
+            (
+              await pool.query<{ id: string }>(
+                `SELECT m.id FROM messages m JOIN turns u ON u.id=m.turn_id
+                 WHERE u.session_id=$1 AND m.role='assistant' ORDER BY m.created_at DESC,m.id DESC LIMIT 1`,
+                [session],
+              )
+            ).rows[0]!.id;
+          const inChat = async (text: string, status: string) => {
+            const turnId = await send({ text, replyToMessageId: await latestReply(chat) });
+            await waitFor(turnId, status);
+            return turnId;
+          };
+          const first = await send({ text: 'Synthetic gig chat', newChat: true });
+          await waitFor(first, 'succeeded');
+          const chat = (await pool.query('SELECT task_id FROM turns WHERE id=$1', [first])).rows[0]
+            .task_id as string;
+          const marker = `Synthetic gig rule ${randomUUID()}`;
+          const made = await request('POST', '/api/agents', {
+            chatId: chat,
+            name: 'Synthetic gig scout',
+            instructions: `${marker}: send each lead to collector@example.test.`,
+          });
+          assert.equal(made.statusCode, 200, made.body);
+          const agentId = made.json().id as string;
+          const put = (url: string, payload: object) =>
+            application.app.inject({ method: 'PUT', url, headers, payload });
+          const light = models.view().light!;
+          assert.equal((await put(`/api/tasks/${chat}/model`, { model: light })).statusCode, 200);
+          const prompt = `Synthetic gig radar ${randomUUID()}`;
+          const created = await request('POST', '/api/schedules', {
+            title: 'Synthetic gig radar',
+            prompt,
+            kind: 'once',
+            runAt: '2099-01-01T09:00:00Z',
+            timeZone: 'UTC',
+          });
+          assert.equal(created.statusCode, 200, created.body);
+          const schedule = created.json() as { id: string };
+          const link = (payload: object) => put(`/api/agents/schedules/${schedule.id}`, payload);
+          assert.equal((await link({ agentId })).statusCode, 200);
+          const run = async () => {
+            const revision = (await request('GET', '/api/schedules'))
+              .json()
+              .find((item: { id: string }) => item.id === schedule.id).revision;
+            const response = await request('POST', `/api/schedules/${schedule.id}/run`, {
+              requestId: randomUUID(),
+              expectedRevision: revision,
+            });
+            assert.equal(response.statusCode, 200, response.body);
+            await waitFor(response.json().turnId, 'succeeded|failed|waiting');
+            return response.json().turnId as string;
+          };
+          const modelsOf = (turnId: string) =>
+            opened.filter((entry) => entry.turnId === turnId).map((entry) => entry.model);
+
+          const guided = await run();
+          const lead = `Synthetic gig lead ${randomUUID()}`;
+          plans.set(lead, {
+            tool: 'apps',
+            action: 'GMAIL_SEND_EMAIL',
+            args: {
+              recipient_email: 'collector@example.test',
+              subject: 'Synthetic lead',
+              body: 'Synthetic lead body.',
+            },
+          });
+          const checks = fallbackChecks.length;
+          const sends = integrationFixture.writes.filter(
+            (write) => write.action === 'GMAIL_SEND_EMAIL',
+          ).length;
+          const followUp = await enqueueTurn(lead, {
+            source: 'task',
+            parentTurnId: guided,
+            sessionId: randomUUID(),
+            background: true,
+          });
+          await waitFor(followUp, 'succeeded|failed|waiting');
+          for (const turnId of [guided, followUp]) {
+            assert.match(
+              ownerContexts.get(turnId) ?? '',
+              /This scheduled run belongs to the owner's agent "Synthetic gig scout"/,
+            );
+            assert.match(ownerContexts.get(turnId) ?? '', new RegExp(marker));
+          }
+          assert.ok(fallbackChecks.length > checks);
+          assert.ok(
+            fallbackChecks.slice(checks).every((input) => !JSON.stringify(input).includes(marker)),
+          );
+          assert.equal(
+            integrationFixture.writes.filter((write) => write.action === 'GMAIL_SEND_EMAIL').length,
+            sends,
+          );
+
+          assert.deepEqual(modelsOf(await run()), ['gpt-6.1-sol']);
+          assert.equal((await link({ agentId, useAgentModel: true })).statusCode, 200);
+          assert.deepEqual(modelsOf(await run()), ['gpt-6-luna']);
+
+          const foreignAgent = randomUUID();
+          await pool.query(
+            "INSERT INTO agents(id,owner_id,name) VALUES($1,$2,'Synthetic foreign gig agent')",
+            [foreignAgent, `${ownerId}-other`],
+          );
+          assert.equal((await link({ agentId: foreignAgent })).statusCode, 404);
+          assert.equal(
+            (await put(`/api/agents/schedules/${randomUUID()}`, { agentId })).statusCode,
+            404,
+          );
+          assert.deepEqual((await request('GET', '/api/agents/schedules')).json(), {
+            agents: [{ id: agentId, name: 'Synthetic gig scout' }],
+            links: [
+              {
+                scheduleId: schedule.id,
+                agentId,
+                useAgentModel: true,
+                title: 'Synthetic gig radar',
+              },
+            ],
+          });
+          await pool.query('DELETE FROM agents WHERE id=$1', [foreignAgent]);
+
+          await pool.query('UPDATE preferences SET rules=$2 WHERE owner_id=$1', [
+            ownerId,
+            'Synthetic rule: keep my schedules tidy.',
+          ]);
+          const ruled = `Synthetic rule-covered unlink ${randomUUID()}`;
+          ruleCovered.add(ruled);
+          plans.set(ruled, {
+            action: 'agent_schedule',
+            args: { scheduleId: schedule.id, agent: null },
+          });
+          const asking = await inChat(ruled, 'waiting');
+          await pool.query("UPDATE preferences SET rules='' WHERE owner_id=$1", [ownerId]);
+          const [card] = await approvalsFor(asking);
+          assert.equal(card?.action, 'NOD_agent_schedule');
+          assert.equal(card.status, 'pending');
+          const shown = (await request('GET', `/api/messages?task=${chat}`))
+            .json<{ messages: Message[] }>()
+            .messages.find((message) => message.approval?.id === card.id)?.approval;
+          assert.deepEqual(shown?.fields?.slice(0, 2), [
+            { label: 'Schedule', value: 'Synthetic gig radar' },
+            { label: 'Runs as', value: 'No agent' },
+          ]);
+          const declined = await send({
+            text: 'Cancel',
+            replyToMessageId: card.confirmation_message_id,
+            approvalAnswer: { approvalId: card.id, approved: false },
+          });
+          await waitFor(declined, 'succeeded');
+          assert.equal(
+            (await pool.query('SELECT status FROM approvals WHERE id=$1', [card.id])).rows[0]
+              .status,
+            'declined',
+          );
+          assert.equal(
+            (await pool.query('SELECT 1 FROM agent_schedules WHERE schedule_id=$1', [schedule.id]))
+              .rowCount,
+            1,
+          );
+          const ownModel = `Run the gig radar on its usual model ${randomUUID()}`;
+          asked.add(ownModel);
+          plans.set(ownModel, {
+            action: 'agent_schedule',
+            args: { scheduleId: schedule.id, agent: 'synthetic gig scout', useAgentModel: false },
+          });
+          const changed = await inChat(ownModel, 'succeeded');
+          assert.equal((await approvalsFor(changed)).length, 0);
+          assert.deepEqual(
+            (
+              await pool.query(
+                'SELECT agent_id,use_agent_model FROM agent_schedules WHERE schedule_id=$1',
+                [schedule.id],
+              )
+            ).rows,
+            [{ agent_id: agentId, use_agent_model: false }],
+          );
+
+          const createText = `Make a second synthetic gig radar ${randomUUID()}`;
+          asked.add(createText);
+          plans.set(createText, {
+            action: 'schedule_create',
+            args: {
+              title: 'Synthetic second radar',
+              prompt: 'Return synthetic gigs.',
+              kind: 'once',
+              runAt: '2099-01-03T09:00:00Z',
+              timeZone: 'UTC',
+            },
+          });
+          await inChat(createText, 'succeeded');
+          const adopted = (
+            await pool.query<{ id: string; agent_id: string | null }>(
+              `SELECT x.id,s.agent_id FROM schedules x LEFT JOIN agent_schedules s ON s.schedule_id=x.id
+               WHERE x.owner_id=$1 AND x.title='Synthetic second radar'`,
+              [ownerId],
+            )
+          ).rows[0]!;
+          assert.equal(adopted.agent_id, agentId);
+          assert.equal((await link({ agentId })).statusCode, 200);
+
+          assert.equal((await request('DELETE', `/api/agents/${agentId}`)).statusCode, 200);
+          assert.equal(
+            (await pool.query('SELECT 1 FROM agent_schedules WHERE owner_id=$1', [ownerId]))
+              .rowCount,
+            0,
+          );
+          assert.doesNotMatch(ownerContexts.get(await run()) ?? '', new RegExp(marker));
+          await request('DELETE', `/api/schedules/${schedule.id}`);
+          await request('DELETE', `/api/schedules/${adopted.id}`);
+        },
+      );
+
       section = 2;
       await inPart(
         "memory forgets a note or stops saving only after the owner's yes when they didn't ask",
