@@ -10,6 +10,9 @@ import { Credentials, Payment } from './pages/credentials';
 import { Scheduled } from './pages/tasks';
 import { Jobs } from './pages/jobs';
 import { Pages } from './pages/pages';
+import { Bots } from './pages/bots';
+import { BotPictures } from './components/bot-picture';
+import type { ModelSelection } from '../shared/models';
 import { PreparedWork } from './pages/prepared';
 import { useAppState } from './hooks/use-app-state';
 import { useChatUnread } from './hooks/use-chat-unread';
@@ -128,11 +131,17 @@ function Workspace({
     media?.addEventListener('change', update);
     return () => media?.removeEventListener('change', update);
   }, []);
-  const [chat, setChat] = useState<{ id?: string; fresh?: true; focus?: string; agent?: string }>(
-    () => ({
-      focus: initialFocusMessageId,
-    }),
-  );
+  const [chat, setChat] = useState<{
+    id?: string;
+    fresh?: true;
+    focus?: string;
+    agent?: string;
+    model?: ModelSelection;
+  }>(() => ({
+    focus: initialFocusMessageId,
+  }));
+  const startChat = (agent?: string, model?: ModelSelection | null) =>
+    setChat({ fresh: true, ...(agent ? { agent } : {}), ...(model ? { model } : {}) });
   const mainChat = !chat.id && !chat.fresh;
   const { markTaskRead } = unread;
   const readTask = useMemo(
@@ -252,54 +261,59 @@ function Workspace({
           <main id="workspace" className="main-workspace" tabIndex={-1}>
             <div className="chat-route" hidden={path !== '/'}>
               {state ? (
-                <div className="chat-split">
-                  <ChatList
-                    tasks={state.tasks ?? []}
-                    agents={state.agents ?? []}
-                    rooms={state.rooms ?? []}
-                    chat={chat.id}
-                    fresh={Boolean(chat.fresh) && !chat.agent}
-                    freshAgent={chat.fresh ? chat.agent : undefined}
-                    unread={unread.taskCounts}
-                    onChat={(id) => setChat({ id })}
-                    onNewChat={(agent) => setChat({ fresh: true, ...(agent ? { agent } : {}) })}
-                    refresh={refresh}
-                  />
-                  <div className="chat-main">
-                    <Chat
-                      key={chat.fresh ? `new-${chat.agent ?? ''}` : (chat.id ?? 'main')}
-                      ownerId={session.user!.id}
-                      state={state}
-                      streams={streams}
-                      connected={connected}
+                <BotPictures agents={state.agents ?? []}>
+                  <div className="chat-split">
+                    <ChatList
+                      tasks={state.tasks ?? []}
+                      agents={state.agents ?? []}
+                      rooms={state.rooms ?? []}
+                      chat={chat.id}
+                      fresh={Boolean(chat.fresh) && !chat.agent}
+                      freshAgent={chat.fresh ? chat.agent : undefined}
+                      unread={unread.taskCounts}
+                      onChat={(id) => setChat({ id })}
+                      onNewChat={startChat}
                       refresh={refresh}
-                      initialFocusMessageId={chat.focus}
-                      onReturnToMemory={onReturnToMemory}
-                      toolbarActions={
-                        path === '/'
-                          ? !desktopSettingsAvailable() && mobileHeader
-                            ? mobileActions
-                            : toolbarActions
-                          : null
-                      }
-                      visible={path === '/'}
-                      readCursor={mainChat ? unread.cursor : undefined}
-                      readUnavailable={mainChat && unread.unavailable}
-                      onReadLatest={readTask ?? (mainChat ? unread.markRead : undefined)}
-                      onFeedback={onFeedback}
-                      onDismissFeedbackDiscovery={onDismissFeedbackDiscovery}
-                      requestedMessage={mainChat ? chatRequests[0] : undefined}
-                      onRequestHandled={(id) =>
-                        setChatRequests((current) => current.filter((request) => request.id !== id))
-                      }
-                      chatId={chat.id}
-                      startsChat={Boolean(chat.fresh)}
-                      chatAgent={chat.fresh ? chat.agent : undefined}
-                      browserLink={session.capabilities.developer}
-                      onOpenChat={(id, focus) => setChat({ id, focus })}
                     />
+                    <div className="chat-main">
+                      <Chat
+                        key={chat.fresh ? `new-${chat.agent ?? ''}` : (chat.id ?? 'main')}
+                        ownerId={session.user!.id}
+                        state={state}
+                        streams={streams}
+                        connected={connected}
+                        refresh={refresh}
+                        initialFocusMessageId={chat.focus}
+                        onReturnToMemory={onReturnToMemory}
+                        toolbarActions={
+                          path === '/'
+                            ? !desktopSettingsAvailable() && mobileHeader
+                              ? mobileActions
+                              : toolbarActions
+                            : null
+                        }
+                        visible={path === '/'}
+                        readCursor={mainChat ? unread.cursor : undefined}
+                        readUnavailable={mainChat && unread.unavailable}
+                        onReadLatest={readTask ?? (mainChat ? unread.markRead : undefined)}
+                        onFeedback={onFeedback}
+                        onDismissFeedbackDiscovery={onDismissFeedbackDiscovery}
+                        requestedMessage={mainChat ? chatRequests[0] : undefined}
+                        onRequestHandled={(id) =>
+                          setChatRequests((current) =>
+                            current.filter((request) => request.id !== id),
+                          )
+                        }
+                        chatId={chat.id}
+                        startsChat={Boolean(chat.fresh)}
+                        chatAgent={chat.fresh ? chat.agent : undefined}
+                        chatModel={chat.fresh ? chat.model : undefined}
+                        browserLink={session.capabilities.developer}
+                        onOpenChat={(id, focus) => setChat({ id, focus })}
+                      />
+                    </div>
                   </div>
-                </div>
+                </BotPictures>
               ) : error ? (
                 <div className="initial-loading">
                   <Notice>{error}</Notice>
@@ -326,6 +340,21 @@ function Workspace({
             )}
             {path === '/jobs' && <Jobs />}
             {path === '/pages' && <Pages />}
+            {path === '/bots' && (
+              <Bots
+                agents={state?.agents}
+                rooms={state?.rooms}
+                refresh={refresh}
+                onOpen={(id) => {
+                  setChat({ id });
+                  navigate('/');
+                }}
+                onStart={(agent, model) => {
+                  startChat(agent, model);
+                  navigate('/');
+                }}
+              />
+            )}
             {preparedWorkId(path) && <PreparedWork key={path} id={preparedWorkId(path)!} />}
             {settings}
             {!settingsPage(path) &&

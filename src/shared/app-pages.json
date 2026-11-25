@@ -7,6 +7,7 @@
   "/vault": "Vault",
   "/jobs": "Jobs",
   "/pages": "Pages",
+  "/bots": "Bots",
   "/settings": "Settings",
   "/settings/notifications": "Settings > Notifications",
   "/settings/models": "Settings > Models",
