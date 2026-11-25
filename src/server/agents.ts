@@ -255,8 +255,7 @@ export function createAgents(options: {
   ) {
     const { input, current } = await proposed(turnId, args);
     const verdict = await review.check({ ...input, currentAgent: current });
-    const allowed =
-      !verdict.confirm && (!('instructions' in input) || verdict.basis.kind === 'message');
+    const allowed = !verdict.confirm && verdict.basis.kind === 'message';
     return review.ask(input, {
       allowed,
       ...(!verdict.confirm && allowed ? { basis: verdict.basis } : {}),
