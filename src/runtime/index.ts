@@ -44,6 +44,7 @@ import {
   steeredInstruction,
   systemPrompt,
 } from './prompt.ts';
+import { agentScope, agentSkills } from './agent-context.ts';
 import { untrustedBlock } from '../shared/untrusted.ts';
 import { repeatsTaskStart } from '../shared/task-ack.ts';
 import { currentUserTime, localResultTimes } from './time-context.ts';
@@ -248,7 +249,11 @@ export function createAgentRuntime(dependencies: {
     threadIdentity(input.threadId);
     if (activeTurns.has(input.turnId)) throw new Error('This turn is already active.');
     const lifecycle = new AbortController();
-    const context = { ...input, signal: AbortSignal.any([input.signal, lifecycle.signal]) };
+    const context = {
+      ...agentScope(input),
+      signal: AbortSignal.any([input.signal, lifecycle.signal]),
+    };
+    const library = agentSkills(skills, context.agent);
     const { signal, threadId } = context;
     const sessionId = threadIdentity(context.sessionId);
     const browserId = sessionId;
@@ -817,7 +822,7 @@ export function createAgentRuntime(dependencies: {
         };
       const bind = (turn: Turn, take: () => Promise<unknown>): AgentTool[] =>
         [
-          ...nodTools(turn, skills, dependencies.documentation, dependencies.flights),
+          ...nodTools(turn, library, dependencies.documentation, dependencies.flights),
           ...(context.proactivity ? [] : connectedTools(turn)),
         ]
           .filter(
@@ -900,17 +905,11 @@ export function createAgentRuntime(dependencies: {
           });
       const system =
         context.proactivity?.instructions ??
-        systemPrompt(workspace, dependencies.skills, context.taskContext, context.background);
+        systemPrompt(workspace, library, context.taskContext, context.background);
       const compactInstructions = {
         systemPrompt:
           context.proactivity?.instructions ??
-          systemPrompt(
-            workspace,
-            dependencies.skills,
-            context.taskContext,
-            context.background,
-            true,
-          ),
+          systemPrompt(workspace, library, context.taskContext, context.background, true),
         ownerContext: compactOwnerContext(context),
       };
       const shared = {

@@ -162,6 +162,8 @@ import { createChannels } from './channels.ts';
 import { createChatTitles } from './chat-titles.ts';
 import { chatModelArgs } from './chat-model.ts';
 import { createAgents } from './agents.ts';
+import { createAgentMemory, sharedReflection } from './agent-memory.ts';
+import { createAgentTools } from './agent-tools.ts';
 import { createAgentSchedules } from './agent-schedules.ts';
 import { createChannelSettings, managedChannelEnvironment } from './channel-settings.ts';
 import { createChannelMedia } from './channel-media.ts';
@@ -1096,6 +1098,7 @@ async function initializeApplication(
     ownerId,
     memory,
     curator: adapters.recallCurator ? ledger.curator(adapters.recallCurator) : curator,
+    documents: (turnId) => agentMemory.readable(turnId),
   });
   const writingStyle = createWritingStyleLearning({ memory, curator });
   let channels: Awaited<ReturnType<typeof createChannels>> | undefined;
@@ -1121,6 +1124,7 @@ async function initializeApplication(
     memory,
     curator,
     analytics: captureAnalytics,
+    documents: { shared: sharedReflection, list: () => agentMemory.reflected() },
   });
   const learnedSkills = createLearnedSkills({
     memory,
@@ -1145,6 +1149,7 @@ async function initializeApplication(
       return retireScheduleConfirmations(client, id, waitForSend);
     },
     memory,
+    agentMemory: (id) => agentMemory.service(id),
     learnedSkills,
     models: adapters.models,
     localFilesAvailable: Boolean(adapters.trash),
@@ -1227,8 +1232,30 @@ async function initializeApplication(
     renamed: renameTopic,
   });
   await tasks.initialize();
-  const agents = createAgents({ pool, ownerId, refresh, renamed: renameTopic });
+  const agents = createAgents({
+    pool,
+    ownerId,
+    refresh,
+    renamed: renameTopic,
+    choices: () => agentTools.choices(),
+    removed: (id) => agentMemory.remove(id),
+  });
   await agents.initialize();
+  const agentMemory = createAgentMemory({
+    pool,
+    ownerId,
+    store: memoryStore,
+    shared: memory,
+    scope: agents.scope,
+    analytics: captureAnalytics,
+    refresh,
+  });
+  const agentTools = createAgentTools({
+    scope: agents.scope,
+    apps: () => integrations.connectedApps(),
+    catalog: skillLibrary.catalog,
+    learned: learnedSkills.index,
+  });
   await agentSchedules.initialize();
   const chatTitles = createChatTitles({
     pool,
@@ -2146,7 +2173,7 @@ async function initializeApplication(
           : agentSchedules.describe(
               proposal,
               signal,
-              communication.describe,
+              (next, nextSignal) => agentMemory.describe(next, nextSignal, communication.describe),
               (channel, text, literal) =>
                 Boolean(channels?.canDeliverLiteral(channel, text, literal)),
             ),
@@ -2738,7 +2765,7 @@ async function initializeApplication(
       accountProfile,
       connectedApps: integrations.connectedApps,
       mcpServers: discovered.servers,
-      memoryContext: memory.context,
+      memoryContext: agentMemory.context,
       recall: personal.recall,
       learnedSkills: learnedSkills.index,
       taskContext: tasks.context,
@@ -2788,7 +2815,11 @@ async function initializeApplication(
         await tasks.inherit(turn);
       },
       connections: async (...args) => {
-        const result = await integrations.manageConnections(...args);
+        const result = await agentTools.listed(
+          args[2]?.turnId,
+          args[0],
+          await integrations.manageConnections(...args),
+        );
         if (!('url' in result) || !('name' in result) || typeof result.name !== 'string')
           return result;
         const turn = args[2];
@@ -3140,6 +3171,7 @@ async function initializeApplication(
         }
         if (action === 'memory_forget' || action === 'memory_control') {
           const origin = await turnOrigin(turn.turnId);
+          args = await agentMemory.target(turn.turnId, action, args);
           const input = await personal.reviewMemory(action, args, {
             ...provenance,
             turnId: turn.turnId,
@@ -3155,6 +3187,8 @@ async function initializeApplication(
             details: verdict.confirm ? { reason: verdict.reason } : {},
           });
         }
+        if (action.startsWith('skill_'))
+          await agentTools.assertSkill(turn.turnId, String(args.name));
         if (action === 'skill_read') return learnedSkills.read(String(args.name));
         if (action === 'skill_save' || action === 'skill_patch') {
           const origin = await turnOrigin(turn.turnId);
@@ -3180,8 +3214,11 @@ async function initializeApplication(
             provenance.sourceMessageId,
             (write) => withTurnLock({ turnId: turn.turnId, signal }, write),
             signal,
+            await agentMemory.learner(turn.turnId),
           );
         }
+        if (action === 'memory_find' || action === 'memory_read')
+          return agentMemory.read(turn.turnId, action, args);
         if (action === 'usage_get')
           return untrustedBlock(
             'usage',
@@ -3349,8 +3386,9 @@ async function initializeApplication(
             undefined,
             readWork,
           );
-          return result;
+          return agentTools.search(turn.turnId, result);
         }
+        await agentTools.assertApp(turn.turnId, action, args);
         if (isLocalFilesAction(action) && localFiles.available && !(await localFiles.enabled())) {
           await localFiles.assertStartedByOwner(turn);
           const input = { localFilesEnabled: true };
@@ -3695,6 +3733,7 @@ async function initializeApplication(
   onboardingProfile.registerRoutes(app);
   tasks.registerRoutes(app);
   agents.registerRoutes(app);
+  agentMemory.registerRoutes(app);
   agentSchedules.registerRoutes(app);
   jobs.registerRoutes(app);
   pages.registerRoutes(app);

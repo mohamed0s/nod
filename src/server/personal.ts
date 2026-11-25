@@ -21,6 +21,7 @@ type ModelScope = 'chat' | 'schedules' | 'background' | 'schedule' | 'task';
 
 type PersonalDependencies = ScheduleDependencies & {
   memory?: MemoryService;
+  agentMemory?: (agentId: string) => MemoryService;
   learnedSkills?: LearnedSkills;
   models?: ReturnType<typeof createModelService>;
   localFilesAvailable?: boolean;
@@ -54,6 +55,12 @@ export function createPersonalService(dependencies: PersonalDependencies) {
   const memory = dependencies.memory;
   const searchHistory = createHistorySearch({ pool, ownerId });
   const learnedSkills = dependencies.learnedSkills;
+  const memoryFor = ({ agent, ...args }: Record<string, unknown>) => {
+    if (agent === undefined) return { memory, args, agent: {} };
+    if (!dependencies.agentMemory) throw new Error('Agent memory is unavailable.');
+    const id = z.uuid().parse(agent);
+    return { memory: dependencies.agentMemory(id), args, agent: { agent: id } };
+  };
   const remembered = (
     operation: MemoryChange['operation'],
     actor: MemoryChange['actor'],
@@ -131,14 +138,18 @@ export function createPersonalService(dependencies: PersonalDependencies) {
       return input;
     }
     if (action === 'memory_forget') {
-      const input = forgetReview.parse(args);
-      if ((await memory?.note(input.path)) !== input.note)
+      const scoped = memoryFor(args);
+      const input = forgetReview.parse(scoped.args);
+      if ((await scoped.memory?.note(input.path)) !== input.note)
         throw Object.assign(new Error('The note changed. Review it before asking again.'), {
           statusCode: 409,
         });
-      return input;
+      return { ...input, ...scoped.agent };
     }
-    if (action === 'memory_control') return controlInput.parse(args);
+    if (action === 'memory_control') {
+      const scoped = memoryFor(args);
+      return { ...controlInput.parse(scoped.args), ...scoped.agent };
+    }
     throw Object.assign(new Error('This personal-data action is not available for review.'), {
       statusCode: 400,
     });
@@ -149,21 +160,22 @@ export function createPersonalService(dependencies: PersonalDependencies) {
     args: Record<string, unknown>,
     provenance: { sourceMessageId: string | null; turnId: string; ownerRooted: boolean },
   ): Promise<Record<string, unknown>> {
-    if (!memory) throw new Error('Memory is unavailable.');
+    const scoped = memoryFor(args);
+    if (!scoped.memory) throw new Error('Memory is unavailable.');
     if (action === 'memory_forget') {
       if (!provenance.sourceMessageId || !provenance.ownerRooted)
         throw new Error('Only a request from the owner can forget a note.');
-      const { path } = forgetInput.parse(args);
-      const note = await memory.note(path);
+      const { path } = forgetInput.parse(scoped.args);
+      const note = await scoped.memory.note(path);
       if (note === undefined) throw new Error('This note is no longer in memory.');
-      return { path, note };
+      return { path, note, ...scoped.agent };
     }
-    const { quote, ...change } = args;
+    const { quote, ...change } = scoped.args;
     const input = controlInput.parse(change);
     if (input.clear && !provenance.ownerRooted)
       throw new Error('Only a request from the owner can clear memory.');
-    await memory.currentSource(provenance, z.string().trim().min(1).parse(quote));
-    return input;
+    await scoped.memory.currentSource(provenance, z.string().trim().min(1).parse(quote));
+    return { ...input, ...scoped.agent };
   }
 
   async function manage(
@@ -280,16 +292,18 @@ export function createPersonalService(dependencies: PersonalDependencies) {
       return memory.read(args);
     }
     if (action === 'memory_control') {
-      if (!memory) throw new Error('Memory is unavailable.');
-      const result = await memory.control(args);
+      const scoped = memoryFor(args);
+      if (!scoped.memory) throw new Error('Memory is unavailable.');
+      const result = await scoped.memory.control(scoped.args);
       if (result.cleared) remembered('clear', 'agent');
       afterCommit(options?.client ?? pool, refresh);
       return result;
     }
     if (action === 'memory_forget') {
-      if (!memory) throw new Error('Memory is unavailable.');
-      const input = forgetReview.parse(args);
-      const result = await memory.forget(input.path, input.note);
+      const scoped = memoryFor(args);
+      if (!scoped.memory) throw new Error('Memory is unavailable.');
+      const input = forgetReview.parse(scoped.args);
+      const result = await scoped.memory.forget(input.path, input.note);
       remembered('forget', 'agent');
       return result;
     }

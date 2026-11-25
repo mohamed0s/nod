@@ -34,6 +34,9 @@ export function createMemoryRecall(options: {
   ownerId: string;
   memory: MemoryService;
   curator: MemoryCurator;
+  documents?: (
+    turnId: string,
+  ) => Promise<Array<{ scope?: 'agent' | 'shared'; memory: MemoryService }>>;
 }) {
   const search = createHistorySearch({
     pool: options.pool,
@@ -77,11 +80,19 @@ export function createMemoryRecall(options: {
       (context.background && !context.taskContext)
     )
       return;
-    const view = await options.memory.view();
+    const documents = (await options.documents?.(context.turnId)) ?? [{ memory: options.memory }];
+    const keyOf = (note: { path: string; scope?: string }) =>
+      note.scope ? `${note.scope}:${note.path}` : note.path;
     const today = new Date().toISOString().slice(0, 10);
-    const notes = view.notes.filter(
-      (note) => (!note.expires || note.expires >= today) && !unsafe(note.text),
-    );
+    const notes = (
+      await Promise.all(
+        documents.map(async ({ scope, memory }) =>
+          (await memory.view()).notes.map((note) => (scope ? { ...note, scope } : note)),
+        ),
+      )
+    )
+      .flat()
+      .filter((note) => (!note.expires || note.expires >= today) && !unsafe(note.text));
     const request = selectionText(context.prompt, 4_000);
     const recent = context.history
       .filter((message) => message.role === 'user' && !unsafe(message.text))
@@ -92,7 +103,13 @@ export function createMemoryRecall(options: {
         return bounded;
       });
     if (!notes.length && !recent.length && !context.relatedConversation?.length) return;
-    const fallback = await options.memory.find({ query: context.prompt });
+    const fallback = (
+      await Promise.all(
+        documents.map(async ({ scope, memory }) =>
+          (await memory.find({ query: context.prompt })).map(({ path }) => keyOf({ path, scope })),
+        ),
+      )
+    ).flat();
     const selectionDeadline = AbortSignal.timeout(1_000);
     const parsed = planSchema.safeParse(
       options.curator.configured && canContinue()
@@ -103,7 +120,12 @@ export function createMemoryRecall(options: {
               today,
               timeZone: context.timeZone,
               recent,
-              notes: notes.map(({ path, text, status, fact }) => ({ path, text, status, fact })),
+              notes: notes.map((note) => ({
+                path: keyOf(note),
+                text: note.text,
+                status: note.status,
+                fact: note.fact,
+              })),
             },
             signal,
             selectionDeadline,
@@ -114,12 +136,12 @@ export function createMemoryRecall(options: {
       ? parsed.data
       : {
           mode: 'recall' as const,
-          paths: fallback.map((note) => note.path),
+          paths: fallback,
           queries: [],
         };
     if (plan.mode === 'none') return;
     const selected = new Set(plan.paths.slice(0, plan.mode === 'aggregate' ? 100 : 12));
-    const noteByPath = new Map(notes.map((note) => [note.path, note]));
+    const noteByPath = new Map(notes.map((note) => [keyOf(note), note]));
     let facts = [...selected]
       .flatMap((path) => noteByPath.get(path) ?? [])
       .map((note) => ({
@@ -171,7 +193,12 @@ export function createMemoryRecall(options: {
       options.curator.configured && canContinue() && (facts.length || candidates.length)
         ? await ask(
             rankInstructions,
-            { request, mode: plan.mode, notes: facts, messages: candidates },
+            {
+              request,
+              mode: plan.mode,
+              notes: facts.map((note) => ({ ...note, path: keyOf(note) })),
+              messages: candidates,
+            },
             signal,
             selectionDeadline,
           )
@@ -180,7 +207,7 @@ export function createMemoryRecall(options: {
     if (ranked.success) {
       const paths = new Set(ranked.data.paths);
       const ids = new Set(ranked.data.messages);
-      const noteByPath = new Map(facts.map((note) => [note.path, note]));
+      const noteByPath = new Map(facts.map((note) => [keyOf(note), note]));
       const messageById = new Map(candidates.map((message) => [message.id, message]));
       facts = [...paths].flatMap((path) => noteByPath.get(path) ?? []);
       candidates = [...ids].flatMap((id) => messageById.get(id) ?? []);
