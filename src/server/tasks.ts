@@ -589,6 +589,16 @@ export function createTasks(options: {
       if (current.task_id || current.session_id !== turn.threadId || !sourceMessageId)
         throw failure('Only the main chat can send owner updates to tasks.');
       if (!request.ids && !request.agent) throw failure('Name the tasks or the agent to send to.');
+      const owner = (
+        await client.query<{ text: string }>(
+          "SELECT text FROM messages WHERE id=$1 AND owner_id=$2 AND role='user'",
+          [sourceMessageId, ownerId],
+        )
+      ).rows[0];
+      if (owner && bareConfirmationAnswer(owner.text))
+        throw failure(
+          "A yes or no can't be sent to a task or an agent. The owner answers its question or approval in that chat.",
+        );
       if (request.brief && !request.agent) throw failure('Only a reply to an agent takes a brief.');
       const ids = new Set(request.ids);
       if (request.retry && (ids.size !== 1 || request.agent))

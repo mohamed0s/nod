@@ -5,7 +5,6 @@ import type { Agent } from '../shared/agents.ts';
 import type { Task } from '../shared/contracts.ts';
 import { untrustedBlock } from '../shared/untrusted.ts';
 import { inChatSql } from './chat-scope.ts';
-import { bareConfirmationAnswer } from './owner-instructions.ts';
 import type { TaskAgents } from './tasks.ts';
 
 type Client = Pick<PoolClient, 'query'>;
@@ -106,17 +105,6 @@ export function createChiefOfStaff(options: {
     if (request.current.background || request.current.proactive)
       throw failure(
         "Only Main, answering the owner's message, can send work to an agent. Schedule, event and observer runs can't.",
-      );
-    const message = (
-      await client.query<{ text: string }>(
-        "SELECT text FROM messages WHERE id=$1 AND owner_id=$2 AND role='user'",
-        [request.messageId, ownerId],
-      )
-    ).rows[0];
-    if (!message) throw failure('Sending work to an agent needs an owner message.');
-    if (bareConfirmationAnswer(message.text))
-      throw failure(
-        "A yes or no can't be sent to an agent. The owner answers an agent's question or approval in that agent's own chat.",
       );
     const agent = (
       await client.query<{ id: string; name: string; chat: string | null }>(

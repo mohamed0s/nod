@@ -217,6 +217,7 @@ export async function recentOwnerWords(
     reply_presentation: unknown;
     reply_withdrawn: boolean | null;
     reply_chat: string | null;
+    founding: boolean;
   }>(
     `WITH cleared AS (SELECT COALESCE((SELECT chat_cleared_at FROM threads WHERE id=$2 AND owner_id=$1),'-infinity'::timestamptz) AS at),
      visible AS NOT MATERIALIZED (SELECT m.id,m.created_at FROM messages m
@@ -256,11 +257,16 @@ export async function recentOwnerWords(
            })
      SELECT m.id,m.text,m.created_at,r.id AS reply_id,r.text AS reply_text,r.presentation AS reply_presentation,
        r.withdrawn AS reply_withdrawn,${
-         agentChat
+         taskId
            ? `(SELECT ${turnChatSql('rt')} FROM messages rm JOIN turns rt ON rt.id=rm.turn_id AND rt.owner_id=rm.owner_id
                WHERE rm.id=r.id AND rm.owner_id=$1)`
            : 'NULL::uuid'
-       } AS reply_chat,EXISTS (SELECT 1 FROM approvals p
+       } AS reply_chat,${
+         taskId && !agentChat
+           ? `EXISTS (SELECT 1 FROM tasks k WHERE k.id=$4::uuid AND k.owner_id=$1
+               AND (k.source_message_id=m.id OR m.created_at<=k.created_at))`
+           : 'false'
+       } AS founding,EXISTS (SELECT 1 FROM approvals p
          JOIN turns e ON e.id=p.execution_turn_id AND e.owner_id=p.owner_id
          WHERE p.owner_id=$1 AND e.message_id=m.id) AS answer
      FROM (SELECT id FROM recent UNION SELECT unnest($3::uuid[])) ids
@@ -310,7 +316,9 @@ export async function recentOwnerWords(
   );
   const messages = rows.map((row) => {
     const replied =
-      row.reply_id && !row.reply_withdrawn && (!agentChat || row.reply_chat === taskId);
+      row.reply_id &&
+      !row.reply_withdrawn &&
+      (!taskId || row.reply_chat === taskId || row.founding);
     const visual = replied ? presentationSchema.safeParse(row.reply_presentation) : undefined;
     const reply = replied
       ? [row.reply_text ?? '', visual?.success ? presentationText(visual.data) : '']

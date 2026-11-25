@@ -4613,14 +4613,20 @@ export const approvalCases = inParts(
           const errors = batchErrors.length;
           batches.set('Yes.', {
             subagents: false,
-            calls: [{ tool: 'task', action: 'reply', args: { agent: name } }],
+            calls: [
+              { tool: 'task', action: 'reply', args: { agent: name } },
+              { tool: 'task', action: 'reply', args: { ids: [chat] } },
+            ],
           });
           const yes = await main('Yes.');
           await waitFor(yes, 'succeeded');
           batches.delete('Yes.');
-          assert.match(
-            batchErrors.slice(errors).join('\n'),
-            /A yes or no can't be sent to an agent/,
+          assert.equal(
+            batchErrors
+              .slice(errors)
+              .filter((error) => /A yes or no can't be sent to a task or an agent/.test(error))
+              .length,
+            2,
           );
           assert.equal((await approvalsFor(work))[0].status, 'pending');
           assert.equal(
@@ -4760,6 +4766,115 @@ export const approvalCases = inParts(
           sendReview = undefined;
           await waitFor(await main('No', again.confirmation_message_id), 'succeeded');
           await settled(chat);
+
+          const taskOf = async (title: string) =>
+            (
+              await pool.query<{ id: string }>(
+                'SELECT id FROM tasks WHERE owner_id=$1 AND title=$2',
+                [ownerId, title],
+              )
+            ).rows[0]!.id;
+          const start = (text: string, title: string, to: string) =>
+            batches.set(text, {
+              subagents: false,
+              sequential: true,
+              chatOnly: true,
+              calls: [
+                {
+                  tool: 'task',
+                  action: 'start',
+                  args: {
+                    title,
+                    message: `I'll handle ${title}.`,
+                    doneWhen: 'The synthetic mail is handled.',
+                    now: 'Working on it',
+                  },
+                },
+              ],
+              taskCalls: [{ action: 'GMAIL_SEND_EMAIL', args: email(to) }],
+            });
+          const say = async (text: string) => {
+            const said = `Synthetic Main says ${randomUUID()}`;
+            plans.set(said, { tool: 'send_message', action: '', args: { text } });
+            await waitFor(await main(said), 'succeeded');
+            plans.delete(said);
+          };
+          const covering = new Map<string, string>();
+          const replies: Array<{ text: string; replyTo?: string }> = [];
+          sendReview = (input) => {
+            const words = (input.userMessages ?? []) as Array<{ text: string; replyTo?: string }>;
+            replies.push(...words);
+            const index = words.findIndex(
+              (message) =>
+                covering.has(message.text) &&
+                message.replyTo?.includes(covering.get(message.text)!) &&
+                input.action?.arguments?.recipient_email === covering.get(message.text),
+            );
+            return index >= 0
+              ? { run: true, source: `message:${index}`, terms: [] }
+              : { run: false };
+          };
+
+          const plain = `Synthetic plain task ${randomUUID()}`;
+          const plainAsk = `Synthetic mail the planner later ${randomUUID()}`;
+          start(plainAsk, plain, 'planner@example.test');
+          await waitFor(await main(plainAsk), 'succeeded');
+          const plainChat = await taskOf(plain);
+          const plainWork = (
+            await pool.query<{ id: string }>(
+              "SELECT id FROM turns WHERE session_id=$1 AND source='task' ORDER BY created_at LIMIT 1",
+              [plainChat],
+            )
+          ).rows[0]!.id;
+          await waitFor(plainWork, 'waiting');
+          const [plainHeld] = await approvalsFor(plainWork);
+          assert.equal(plainHeld?.status, 'pending');
+          await say(
+            `The task wants to mail planner@example.test. Tell it to go ahead? ${randomUUID()}`,
+          );
+          const okText = `ok do it ${randomUUID()}`;
+          covering.set(okText, 'planner@example.test');
+          batches.set(okText, {
+            subagents: false,
+            sequential: true,
+            chatOnly: true,
+            calls: [{ tool: 'task', action: 'reply', args: { ids: [plainChat] } }],
+            taskCalls: [{ action: 'GMAIL_SEND_EMAIL', args: email('planner@example.test') }],
+          });
+          const plainSends = sends();
+          await waitFor(await main(okText), 'succeeded');
+          const plainNext = await delivered(plainChat, okText);
+          await waitFor(plainNext, 'waiting');
+          assert.equal(sends(), plainSends);
+          const [plainAgain] = await approvalsFor(plainNext);
+          assert.equal(plainAgain?.status, 'pending');
+          assert.equal(await sessionOf(plainAgain.confirmation_message_id), plainChat);
+          const okSeen = replies.filter((message) => message.text === okText);
+          assert.ok(okSeen.length);
+          assert.ok(okSeen.every((message) => message.replyTo === undefined));
+          await waitFor(await main('No', plainAgain.confirmation_message_id), 'succeeded');
+          await settled(plainChat);
+
+          const proposed = `Synthetic proposed task ${randomUUID()}`;
+          await say(`Shall I mail starter@example.test about the synthetic plan? ${randomUUID()}`);
+          covering.set('Yes!', 'starter@example.test');
+          start('Yes!', proposed, 'starter@example.test');
+          const startSends = sends();
+          await waitFor(await main('Yes!'), 'succeeded');
+          const proposedChat = await taskOf(proposed);
+          await settled(proposedChat);
+          assert.equal(sends(), startSends + 1);
+          assert.deepEqual(
+            (
+              await pool.query(
+                'SELECT a.id FROM approvals a JOIN turns u ON u.id=a.turn_id WHERE u.session_id=$1',
+                [proposedChat],
+              )
+            ).rows,
+            [],
+          );
+          sendReview = undefined;
+          for (const text of [plainAsk, okText, 'Yes!']) batches.delete(text);
 
           const foreignChat = randomUUID();
           const foreignAgent = randomUUID();
