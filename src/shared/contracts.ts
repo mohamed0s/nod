@@ -42,6 +42,7 @@ export interface Message {
   cardAnswer?: true;
   work?: { kind: 'task' | 'schedule'; id: string; title: string; turnId?: string };
   taskId?: string | null;
+  agent?: string | null;
 }
 export type ApprovalState = 'pending' | 'working' | 'done' | 'declined' | 'expired' | 'uncertain';
 export interface MessageApproval {
@@ -275,6 +276,7 @@ export interface AppState {
   chatClearedAt?: string;
   tasks?: Task[];
   agents?: import('./agents').Agent[];
+  rooms?: import('./rooms').Room[];
   threadId: string;
   hasEarlierMessages?: boolean;
   hiddenMessageCount?: number;

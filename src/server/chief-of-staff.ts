@@ -43,6 +43,20 @@ export function createChiefOfStaff(options: {
     sessionId: string,
     turnId: string,
   ): Promise<{ budgetUsd: number; spentUsd: number } | undefined>;
+  rooms?: {
+    watched(quietHours: number): Promise<
+      Array<{
+        agent_id: null;
+        name: string;
+        chat_id: string;
+        turn_id: string;
+        quiet: boolean;
+        loop: boolean;
+        at: Date;
+      }>
+    >;
+    checkIn(roomId: string): Promise<{ budgetUsd: number; spentUsd: number } | undefined>;
+  };
 }) {
   const { pool, ownerId } = options;
 
@@ -169,7 +183,7 @@ export function createChiefOfStaff(options: {
 
   async function watch() {
     const { quietHours, runsPerHour, checkIns } = agentStopLimits;
-    const { rows } = await pool.query<{
+    const { rows: agents } = await pool.query<{
       agent_id: string;
       name: string;
       chat_id: string;
@@ -196,9 +210,12 @@ export function createChiefOfStaff(options: {
        WHERE a.owner_id=$1`,
       [ownerId, quietHours, runsPerHour],
     );
+    const rooms = (await options.rooms?.watched(quietHours)) ?? [];
     const stopped: Array<{ chatId: string; reason: StopReason }> = [];
-    for (const row of rows) {
-      const spend = await options.checkIn(row.chat_id, row.turn_id);
+    for (const row of [...agents, ...rooms]) {
+      const spend = row.agent_id
+        ? await options.checkIn(row.chat_id, row.turn_id)
+        : await options.rooms?.checkIn(row.chat_id);
       const reason: StopReason | undefined =
         spend && spend.spentUsd >= checkIns * spend.budgetUsd
           ? 'cost'
@@ -212,7 +229,7 @@ export function createChiefOfStaff(options: {
         const current = await client.query(
           `SELECT 1 FROM tasks t JOIN turns first ON first.id=t.turn_id AND first.owner_id=t.owner_id
            WHERE t.id=$2 AND t.owner_id=$1 AND t.state='open' AND first.thread_id=$3
-             AND EXISTS (SELECT 1 FROM turns w WHERE w.owner_id=$1 AND w.session_id=t.id
+             AND EXISTS (SELECT 1 FROM turns w WHERE w.owner_id=$1 AND (w.session_id=t.id OR w.task_id=t.id)
                AND w.status IN ('queued','running'))
              AND NOT ${ownerMessageSql('t.id', '$4')}
            FOR UPDATE OF t`,
@@ -230,7 +247,7 @@ export function createChiefOfStaff(options: {
   async function notify(
     client: Client,
     threadId: string,
-    row: { agent_id: string; name: string; chat_id: string },
+    row: { agent_id: string | null; name: string; chat_id: string },
     reason: StopReason,
   ) {
     const stopId = randomUUID();

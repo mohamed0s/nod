@@ -2,6 +2,7 @@ import { parseFragment, type DefaultTreeAdapterMap } from 'parse5';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { agentApprovalContent } from '../shared/agents.ts';
+import { roomApprovalContent } from '../shared/rooms.ts';
 
 const apps: Record<string, string> = {
   GMAIL: 'Gmail',
@@ -43,6 +44,7 @@ const nodActions: Array<[string, string]> = [
   ['NOD_agent_update', 'Change this agent'],
   ['NOD_agent_create', 'Create an agent'],
   ['NOD_agent_schedule', 'Change the agent a schedule runs as'],
+  ['NOD_room_update', "Change a room's members"],
   ['NOD_notification_preferences_update', 'Change Nod settings'],
   ['NOD_schedule_pause', 'Pause a schedule'],
   ['NOD_schedule_cancel', 'Pause a schedule'],
@@ -364,6 +366,7 @@ export function approvalContent(
   args: unknown,
 ): { fields?: Array<{ label: string; value: string }>; body?: string; bodyCut?: true } {
   if (action.startsWith('NOD_agent_')) return agentApprovalContent(action, args);
+  if (action === 'NOD_room_update') return roomApprovalContent(args);
   if (
     /^(NOD_|CONNECTED_|mcp__)/.test(action) ||
     !args ||
@@ -553,6 +556,7 @@ export function actionTarget(
     if (action === 'NOD_agent_update')
       return ['name', 'description', 'instructions'].filter((key) => key in args).join(', ');
     if (action === 'NOD_agent_create') return words(args.name)[0];
+    if (action === 'NOD_room_update') return words(args.room)[0];
     if (action === 'NOD_agent_schedule')
       return `${words(args.schedule)[0] ?? 'schedule'} as ${words(args.agent)[0] ?? 'no agent'}`;
     if (action === 'NOD_limits_update')

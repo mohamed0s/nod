@@ -149,10 +149,12 @@ export function createAgents(options: {
     return (
       await pool.query<AgentScope>(
         `SELECT a.id,a.name,a.description,a.instructions,a.memory_mode AS "memoryMode",a.apps,a.skills,
-           a.chat_id IS DISTINCT FROM cur.session_id AS scheduled
+           a.chat_id IS DISTINCT FROM cur.session_id AND m.agent_id IS NULL AS scheduled
          FROM turns cur ${workOriginSql('cur')}
          LEFT JOIN agent_schedules s ON s.owner_id=cur.owner_id AND s.schedule_id=work_schedule.id
-         JOIN agents a ON a.owner_id=cur.owner_id AND (a.chat_id=cur.session_id OR a.id=s.agent_id)
+         LEFT JOIN room_members m ON m.owner_id=cur.owner_id AND m.session_id=cur.session_id
+         JOIN agents a ON a.owner_id=cur.owner_id
+           AND (a.chat_id=cur.session_id OR a.id=s.agent_id OR a.id=m.agent_id)
          WHERE cur.id=$1 AND cur.owner_id=$2
          ORDER BY (a.chat_id IS NOT DISTINCT FROM cur.session_id) DESC LIMIT 1`,
         [turnId, ownerId],

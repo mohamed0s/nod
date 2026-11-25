@@ -198,6 +198,7 @@ export interface ThreadDependencies {
     operation: () => Promise<void>,
     sessionId: string,
   ) => Promise<void>;
+  routeTurn?: (turnId: string, sessionId: string, run: () => Promise<void>) => Promise<void>;
   taskChecks?: (threadId: string) => Promise<void>;
   taskClassification?: boolean;
   activityLine?: (
@@ -258,7 +259,9 @@ export interface ThreadDependencies {
   checkTyping?: (turn: TurnRef) => Promise<boolean>;
   settleTask?: (turn: TurnRef, result: string) => Promise<void>;
   taskLedger?: (threadId: string) => Promise<NonNullable<RuntimeContext['tasks']>>;
-  agentContext?: (turnId: string) => Promise<Pick<RuntimeContext, 'agent' | 'agents' | 'fromMain'>>;
+  agentContext?: (
+    turnId: string,
+  ) => Promise<Pick<RuntimeContext, 'agent' | 'agents' | 'fromMain' | 'roomMessages' | 'rooms'>>;
   fromMain?: (sessionId: string, messageId: string) => Promise<string | undefined>;
   startTurn?: (turn: TurnRef) => Promise<void>;
   runTurn: (context: RuntimeContext) => Promise<RuntimeResult>;
@@ -1922,10 +1925,14 @@ async function drainThread(threadId: string, dependencies: ThreadDependencies) {
   if (claimed.length) refresh();
   for (const turn of claimed) {
     const execute = () => executeTurn(turn, dependencies);
-    const work = (
+    const observed = () =>
       dependencies.observeTurn
         ? dependencies.observeTurn(turn.id, execute, turn.session_id)
-        : execute()
+        : execute();
+    const work = (
+      dependencies.routeTurn
+        ? dependencies.routeTurn(turn.id, turn.session_id, observed)
+        : observed()
     )
       .catch((error) => logFailure('turn_unfinished', error, { threadId, turnId: turn.id }))
       .then(() => drainNext(threadId))

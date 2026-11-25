@@ -163,6 +163,7 @@ import { createChatTitles } from './chat-titles.ts';
 import { chatModelArgs } from './chat-model.ts';
 import { createAgents } from './agents.ts';
 import { createChiefOfStaff } from './chief-of-staff.ts';
+import { createRooms, roomMirrorSql } from './rooms.ts';
 import { createAgentMemory, sharedReflection } from './agent-memory.ts';
 import { createAgentTools } from './agent-tools.ts';
 import { createAgentSchedules } from './agent-schedules.ts';
@@ -1236,6 +1237,7 @@ async function initializeApplication(
       send: (...args) => chiefOfStaff.send(...args),
       read: (...args) => chiefOfStaff.read(...args),
     },
+    sessions: (...args) => rooms.sessions(...args),
   });
   await tasks.initialize();
   const agents = createAgents({
@@ -1247,12 +1249,15 @@ async function initializeApplication(
     removed: (id) => agentMemory.remove(id),
   });
   await agents.initialize();
+  const rooms = createRooms({ pool, ownerId, refresh, limits: () => ledger.limits() });
+  await rooms.initialize();
   const chiefOfStaff = createChiefOfStaff({
     pool,
     ownerId,
     agents,
     halt: tasks.halt,
     checkIn: ledger.checkIn,
+    rooms,
   });
   await chiefOfStaff.initialize();
   const agentMemory = createAgentMemory({
@@ -1777,6 +1782,18 @@ async function initializeApplication(
         );
         return result;
       }
+      if (action === 'NOD_room_update') {
+        const result = await withTurnLock(turnLock, (client) =>
+          rooms.apply(args, client, provenance.turnId),
+        );
+        await ledger.action(
+          provenance.turnId,
+          action,
+          provenance.basis ?? { kind: 'approved' },
+          actionTarget(action, args, provenance.details),
+        );
+        return result;
+      }
       if (action === 'NOD_agent_schedule') {
         const result = await withTurnLock(turnLock, (client) => agentSchedules.apply(args, client));
         await ledger.action(
@@ -2160,6 +2177,7 @@ async function initializeApplication(
         return agents.validate(args, client, action);
       if (action === 'NOD_agent_schedule')
         return void (await agentSchedules.validate(args, client));
+      if (action === 'NOD_room_update') return rooms.validate(args, client);
       if (
         ['NOD_browser', 'NOD_vault_allow', 'NOD_bug_report_send', 'NOD_workspace_command'].includes(
           action,
@@ -2189,13 +2207,16 @@ async function initializeApplication(
           ? agents.describe(proposal, signal, communication.describe, (channel, text, literal) =>
               Boolean(channels?.canDeliverLiteral(channel, text, literal)),
             )
-          : agentSchedules.describe(
-              proposal,
-              signal,
-              (next, nextSignal) => agentMemory.describe(next, nextSignal, communication.describe),
-              (channel, text, literal) =>
-                Boolean(channels?.canDeliverLiteral(channel, text, literal)),
-            ),
+          : proposal.action === 'NOD_room_update'
+            ? rooms.describe(proposal, signal, communication.describe)
+            : agentSchedules.describe(
+                proposal,
+                signal,
+                (next, nextSignal) =>
+                  agentMemory.describe(next, nextSignal, communication.describe),
+                (channel, text, literal) =>
+                  Boolean(channels?.canDeliverLiteral(channel, text, literal)),
+              ),
     captureAnalytics,
     createErrorRedactor(secrets),
     (input, signal) => ledger.forOwner(() => trust.classifyRepeatedAction(input, signal)),
@@ -2670,17 +2691,18 @@ async function initializeApplication(
       ...(adapters.models
         ? {
             workModel: async (turnId: string) => {
+              const usable = (choice: ModelSelection) => {
+                try {
+                  adapters.models!.validateChoice(choice);
+                  return true;
+                } catch {
+                  return false;
+                }
+              };
               const origin = await agentSchedules.modelOrigin(
                 turnId,
-                await workOrigin(turnId),
-                (choice) => {
-                  try {
-                    adapters.models!.validateChoice(choice);
-                    return true;
-                  } catch {
-                    return false;
-                  }
-                },
+                await rooms.modelOrigin(turnId, await workOrigin(turnId), usable),
+                usable,
               );
               if (!origin) return undefined;
               const { selection } = adapters.models!.workModel(origin);
@@ -2741,6 +2763,7 @@ async function initializeApplication(
             });
         return adapters.traces?.withTurn({ turnId, sessionId }, observe) ?? observe();
       },
+      routeTurn: rooms.turn,
       consumers,
       artifacts,
       writeArtifact: workspace.writeArtifact.bind(workspace),
@@ -2791,7 +2814,7 @@ async function initializeApplication(
       checkTyping: jobs.apply.isApplyChat,
       settleTask: tasks.settle,
       taskLedger: tasks.read,
-      agentContext: chiefOfStaff.context,
+      agentContext: async (turnId) => rooms.context(turnId, await chiefOfStaff.context(turnId)),
       fromMain: chiefOfStaff.fromMain,
       task: async (turn, raw, sourceMessageId, priorMessageId, priorHandoff) => {
         const request = raw as { action?: unknown; model?: unknown } | undefined;
@@ -3024,6 +3047,17 @@ async function initializeApplication(
             check: (input) => trust.check(turn, 'NOD_agent_create', input, signal),
             ask: (input, decision) =>
               approvals.request(turn, 'NOD_agent_create', input, {
+                ...provenance,
+                signal,
+                admit,
+                ...decision,
+              }),
+          });
+        if (action === 'room_update')
+          return rooms.request(turn.turnId, args, {
+            check: (input) => trust.check(turn, 'NOD_room_update', input, signal),
+            ask: (input, decision) =>
+              approvals.request(turn, 'NOD_room_update', input, {
                 ...provenance,
                 signal,
                 admit,
@@ -3666,6 +3700,7 @@ async function initializeApplication(
     verification: chatVerification,
     taskLedger: tasks.read,
     agents: agents.list,
+    rooms: rooms.list,
     activity: activity.current,
     planningTasks: onboardingSuggestions.planning,
     computer,
@@ -3764,6 +3799,7 @@ async function initializeApplication(
   onboardingProfile.registerRoutes(app);
   tasks.registerRoutes(app);
   agents.registerRoutes(app);
+  rooms.registerRoutes(app);
   agentMemory.registerRoutes(app);
   agentSchedules.registerRoutes(app);
   jobs.registerRoutes(app);
@@ -3928,6 +3964,8 @@ async function initializeApplication(
         ).turnId,
       topicAgent: agents.forTopic,
       answerRefusal: agents.answerRefusal,
+      speaker: rooms.speaker,
+      mirrored: roomMirrorSql,
       stopSignal,
       messageAccepted: ownerMessageAccepted,
       answer: (text, channel, replyToMessageId, shownMessageId) =>
