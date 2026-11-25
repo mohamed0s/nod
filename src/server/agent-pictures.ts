@@ -60,7 +60,10 @@ export function createAgentPictures(options: {
   async function keep(client: Client, id: string) {
     const file = (
       await client.query<{ mime_type: string; size: number }>(
-        'SELECT mime_type,size FROM artifacts WHERE id=$1 AND owner_id=$2 AND deleting_at IS NULL FOR UPDATE',
+        `SELECT mime_type,size FROM artifacts
+         WHERE id=$1 AND owner_id=$2 AND deleting_at IS NULL AND thread_id IS NULL
+           AND (expires_at IS NOT NULL OR EXISTS (SELECT 1 FROM agents WHERE owner_id=$2 AND image_id=$1))
+         FOR UPDATE`,
         [id, ownerId],
       )
     ).rows[0];
@@ -84,9 +87,14 @@ export function createAgentPictures(options: {
 
   async function release(client: Client, id: string | null) {
     if (!id) return;
+    const kept = await client.query(
+      'SELECT 1 FROM artifacts WHERE id=$1 AND owner_id=$2 AND thread_id IS NULL FOR UPDATE',
+      [id, ownerId],
+    );
+    if (!kept.rowCount) return;
     await client.query(
       `UPDATE artifacts SET expires_at=clock_timestamp()
-       WHERE id=$1 AND owner_id=$2 AND thread_id IS NULL AND expires_at IS NULL
+       WHERE id=$1 AND owner_id=$2 AND expires_at IS NULL
          AND NOT EXISTS (SELECT 1 FROM agents WHERE owner_id=$2 AND image_id=$1)`,
       [id, ownerId],
     );

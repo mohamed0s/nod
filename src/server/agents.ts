@@ -603,12 +603,14 @@ export function createAgents(options: {
     });
     app.delete<{ Params: { id: string } }>('/api/agents/:id', async (request) => {
       const id = z.uuid().parse(request.params.id);
-      const removed = await pool.query<{ image_id: string | null }>(
-        'DELETE FROM agents WHERE id=$1 AND owner_id=$2 RETURNING image_id',
-        [id, ownerId],
-      );
-      if (!removed.rowCount) throw failure('Agent not found.', 404);
-      await pictures.release(pool, removed.rows[0]!.image_id);
+      await transaction(async (client) => {
+        const removed = await client.query<{ image_id: string | null }>(
+          'DELETE FROM agents WHERE id=$1 AND owner_id=$2 RETURNING image_id',
+          [id, ownerId],
+        );
+        if (!removed.rowCount) throw failure('Agent not found.', 404);
+        await pictures.release(client, removed.rows[0]!.image_id);
+      }, pool);
       await options.removed?.(id);
       refresh();
       return { ok: true };
