@@ -1251,6 +1251,8 @@ async function initializeApplication(
     pool,
     ownerId,
     agents,
+    halt: tasks.halt,
+    checkIn: ledger.checkIn,
   });
   await chiefOfStaff.initialize();
   const agentMemory = createAgentMemory({
@@ -1428,6 +1430,7 @@ async function initializeApplication(
     sweep: async () => {
       await sweepArtifacts();
       await tasks.wakeDue().catch((error) => logFailure('task_wake', error));
+      await chiefOfStaff.watch().catch((error) => logFailure('agent_watch', error));
       await vault.forgetExpiredHolds().catch((error) => logFailure('vault_expiry', error));
     },
     due: () => proactivity.due(),

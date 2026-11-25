@@ -1076,6 +1076,21 @@ export function createTasks(options: {
     );
   }
 
+  async function halt(
+    id: string,
+    guard: (client: PoolClient, threadId: string) => Promise<boolean>,
+  ) {
+    const capture = snapshotAnalytics(options.analytics);
+    const cancelled = await cancellationTransaction(async (client) => {
+      const thread = await lockThread(client);
+      return (await guard(client, thread.id))
+        ? stop(client, id, thread.id, capture, 'agent')
+        : undefined;
+    }, pool);
+    if (cancelled) await afterStop(cancelled);
+    return Boolean(cancelled);
+  }
+
   async function afterStop(cancelled: { ids: string[]; browsers: string[] }) {
     abortTurns(cancelled.ids);
     await Promise.allSettled(cancelled.browsers.map((id) => options.clearBrowser?.(id)));
@@ -1188,6 +1203,7 @@ export function createTasks(options: {
     read: (thread?: string) => read(pool, { closed: true, thread }),
     resumeDue,
     wakeDue,
+    halt,
     registerRoutes,
   };
 }
