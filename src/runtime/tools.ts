@@ -1509,6 +1509,8 @@ export function nodTools(
     bind(toolDefinitions.task, async (p) => {
       if (!context.task) throw new Error('Tasks are unavailable.');
       const result = await context.task(p);
+      if (p.action === 'list' || p.action === 'reply' || p.action === 'stop')
+        return untrustedBlock('task records', JSON.stringify(result));
       return p.action === 'start' && !context.taskContext && !context.background
         ? {
             ...(result as object),
