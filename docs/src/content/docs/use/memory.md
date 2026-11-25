@@ -103,6 +103,14 @@ Note and skill edits appear in the Settings save review. Save or discard them be
 
 You can also tell Nod in chat, for example "forget my old address" or "stop remembering things".
 
+## Agents with their own memory
+
+In the fork [mohamed0s/nod](https://github.com/mohamed0s/nod), an [agent](/use/agents/#memory) can keep its own memory. Facts about you still go to your shared memory, whichever chat you tell them in; the agent keeps only details of its own work.
+
+When an agent has its own memory, **Settings → Memory** shows **Memory of** above the switches. Choose **Shared** or the agent to view, edit, import or export that memory; each has its own switches. On one of the agent's notes, open note options and select **Move to shared** to move it to your shared memory.
+
+In the agent's chat, "forget that" acts on the agent's notes, and "stop remembering things" or "clear your memory" turns off or clears only the agent's memory. Do those for shared memory in Main or here.
+
 ## Check memory from Telegram or WhatsApp
 
 Send `/memory` (or `/context`) for a short summary written by your selected model. That model call counts toward usage. Telegram and the WhatsApp QR connection also receive the full export as a document. With the WhatsApp Cloud API, open Nod to get it.

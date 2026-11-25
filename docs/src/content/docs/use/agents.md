@@ -9,7 +9,7 @@ sidebar:
 Agents are part of [mohamed0s/nod](https://github.com/mohamed0s/nod), a fork of Nod. Nod from n8n doesn't have them.
 :::
 
-An agent is a [chat](/use/tasks/#the-chat-list) with a profile: a name, a line about what it's for, instructions and a model. Use one for work you come back to, such as a job search agent that writes in your tone and runs on a cheaper model.
+An agent is a [chat](/use/tasks/#the-chat-list) with a profile: a name, a line about what it's for, instructions, a memory setting, the apps and skills it may use, and a model. Use one for work you come back to, such as a job search agent that writes in your tone and runs on a cheaper model.
 
 ## Make a chat an agent
 
@@ -20,12 +20,35 @@ Open a chat. Under its card, select **Make this an agent** beside **Agent**, the
 | **Name**          | Up to 60 characters. The chat takes this name, and so does its Telegram topic. No two agents share a name. |
 | **What it's for** | One line, up to 200 characters.                                                                            |
 | **Instructions**  | Up to 4,000 characters. Nod follows them for focus, tone and method in this chat.                          |
+| **Memory**        | **Shared**, **Own** or **Own + read shared**. See [Memory](#memory).                                       |
+| **Apps**          | The connected apps or accounts it may use. None chosen means all.                                          |
+| **Skills**        | The skills it may use. None chosen means all.                                                              |
 
-Agents use your shared [memory](/use/memory/), as every chat does. The agent's model is the chat's [model](/use/tasks/#choose-the-model-for-a-chat): select **Change** beside **Model**.
+The agent's model is the chat's [model](/use/tasks/#choose-the-model-for-a-chat): select **Change** beside **Model**.
 
 Agents sit in their own **Agents** group in the chat list, under **Main**. Select one to open its chat.
 
-To change a profile, select **Edit** beside **Agent**. **Remove agent, keep the chat** removes the profile; the chat stays as an ordinary chat.
+To change a profile, select **Edit** beside **Agent**. **Remove agent, keep the chat** removes the profile and deletes the agent's own memory; the chat stays as an ordinary chat.
+
+## Memory
+
+| Setting               | What the agent reads                 | Where its notes go                                    |
+| --------------------- | ------------------------------------ | ----------------------------------------------------- |
+| **Shared**            | Your shared [memory](/use/memory/)   | Shared memory, as in Main                             |
+| **Own**               | Only its own notes                   | Facts about you to shared memory, its work to its own |
+| **Own + read shared** | Its own notes and your shared memory | Facts about you to shared memory, its work to its own |
+
+**Shared** is the default. A new agent with its own memory starts empty, and switching an agent never moves notes.
+
+A fact about you, such as where you live or what you prefer, always goes to shared memory, even when you tell it to an agent with its own memory. A detail of the agent's work, such as a lead it follows or when a report is due, goes to the agent's own notes. The memory model labels each note; when it isn't sure, the note goes to shared memory. Nod still saves only what you wrote yourself, as in any chat.
+
+In an agent's chat, asking Nod to forget a note, turn memory off or clear it acts on the agent's own memory, and the question says which memory it changes. An agent that reads shared memory can also forget a shared note. A schedule that runs as the agent reads memory the same way as its chat. See and edit each agent's notes in **Settings → Memory**.
+
+## Apps and skills
+
+Choose the connected apps, or single accounts of an app, and the [skills](/how-it-works/skills/) an agent may use. The lists only narrow what it can use: they never give it an app you haven't connected, and every action still goes through the [action check](/trust/approvals/). With none chosen, it can use them all.
+
+In the agent's chat and in runs of schedules that run as it, Nod lists only the chosen apps and skills. A call to another app, from a tool or from code Nod runs, is refused with the reason, and so is reading, saving or fixing another skill.
 
 ## What instructions can and can't do
 
@@ -35,7 +58,7 @@ When your message and the instructions differ, your message wins.
 
 ## Change an agent from chat
 
-In the agent's chat, you can also tell Nod, for example "make your replies more formal". Nod writes out the exact new text and changes the profile. This is a change to Nod's own settings, so it goes through the action check: Nod asks you first unless your own message in that chat covers the whole change. A rule or anything else never covers a change to an agent. In the Nod app, the question's card shows the exact new name, purpose and instructions. In Telegram or WhatsApp, the question ends with the exact new text only when the app can show it unchanged; otherwise it says to open the chat in the Nod app and read it there first. Such a question can only be answered in the app: its Telegram buttons are left off, and a yes or no typed in the chat app gets a reply to answer in the app instead. The question stays open until you answer it there. Nod changes instructions only this way, never on its own.
+In the agent's chat, you can also tell Nod, for example "make your replies more formal". Nod writes out the exact new text and changes the profile. This is a change to Nod's own settings, so it goes through the action check: Nod asks you first unless your own message in that chat covers the whole change. A rule or anything else never covers a change to an agent. This works for its apps and skills too, such as "only use Gmail and the research skill". In the Nod app, the question's card shows the exact new name, purpose, apps, skills and instructions. In Telegram or WhatsApp, the question ends with the exact new text only when the app can show it unchanged; otherwise it says to open the chat in the Nod app and read it there first. Such a question can only be answered in the app: its Telegram buttons are left off, and a yes or no typed in the chat app gets a reply to answer in the app instead. The question stays open until you answer it there. Nod changes instructions only this way, never on its own.
 
 ## Schedules that run as an agent
 

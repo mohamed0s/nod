@@ -5,13 +5,13 @@ sidebar:
   order: 5
 ---
 
-Nod keeps one private memory document per owner. This page explains how it's stored, how the model reads and writes it, and what the hourly maintenance job does. To see and edit memory in the app, read [Memory](/use/memory/).
+Nod keeps one private shared memory document per owner, plus one for each [agent with its own memory](#agent-memory). This page explains how it's stored, how the model reads and writes it, and what the hourly maintenance job does. To see and edit memory in the app, read [Memory](/use/memory/).
 
 The short version: memory notes hold only what the owner said in their messages or wrote in Settings → Memory, what they choose to import from another assistant, and one style note learned from their own sent email. When the owner asks Nod to remember something, a separate memory model writes the notes from the owner's own messages only, and an hourly job archives entries instead of deleting them. Next to the notes, memory keeps [learned skills](#learned-skills): procedures Nod writes itself after a task, without personal data.
 
 ## Where memory lives
 
-Memory is one JSON document, `memory/MEMORY.md`, in Nod's private object store in the database. It sits outside the thread workspace, so it survives a thread reset. It holds up to 256 KiB.
+Shared memory is one JSON document, `memory/MEMORY.md`, in Nod's private object store in the database. It sits outside the thread workspace, so it survives a thread reset. It holds up to 256 KiB.
 
 Each entry has an address, `area/slug`, a text of up to 4,000 characters and an optional one-line abstract. Notes keep their line breaks in memory, in the note card and in the index; summaries such as the note list and the Markdown export show them on one line. Notes the memory model writes, and their support quotes, may keep the owner's line breaks too. There are five areas:
 
@@ -196,6 +196,15 @@ The owner sees, edits and forgets learned skills under **Skills** in **Settings 
 :::caution[Skills come from what Nod read]
 Nod writes a skill from what it did and read, so a web page or an email can shape one. A skill is guidance, never permission. It never counts as the owner's words: the trust check does not see it, and the confirmation writer does not receive it. Saving a note still needs the owner's own messages, quoted, and forgetting a note, turning memory off or clearing it, and changes to schedules, notification rules and limits still go through the check.
 :::
+
+## Agent memory
+
+In the fork [mohamed0s/nod](https://github.com/mohamed0s/nod), an [agent](/use/agents/#memory) set to **Own** or **Own + read shared** has its own document, `memory/agents/<agent id>.md`, in the same object store. It has the same schema, 256 KiB limit, version check and archive. The code is in [`src/server/agent-memory.ts`](https://github.com/mohamed0s/nod/blob/mine/src/server/agent-memory.ts).
+
+- **Reading.** In the agent's chat, and in runs of schedules that run as it, the owner context shows the agent's index in its own untrusted block, and the shared index in another only for **Own + read shared**. `memory_read` and `memory_find` take `scope`: `agent` or `shared`. Without it, `memory_read` tries the agent's notes first and `memory_find` searches every document the chat may read. Selection before a request uses only those documents too. Main, the observer, proactivity and schedules that don't run as an agent read shared memory.
+- **Saving.** The rule above doesn't change: Pi never writes a note, the memory model sees only the owner's own messages from that chat, and the server keeps only notes that quote one. The memory model labels each note `"about": "owner"` for a fact about the owner or `"agent"` for a detail of the agent's work. Only a valid `agent` label sends a note to the agent's document; anything else goes to shared memory. For **Own**, the memory model sees only the agent's index, so it can't archive or replace a shared note. The server checks every change against both documents before it writes either, and nothing is saved when one fails.
+- **Reflection.** The hourly job runs once per document, each with its own watermark. Shared memory skips messages from chats of agents with their own memory. An agent's document reads only owner messages from that agent's chats, and the labels route what it learns the same way. Its first batch starts from the shared watermark.
+- **Forget, off and clear.** They keep their trust check and act on the document of the chat they're asked in; the question names it. In an agent that reads shared memory, `memory_forget` with `scope: "shared"` forgets a shared note.
 
 ## Related resources
 
