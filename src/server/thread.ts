@@ -30,6 +30,7 @@ import type { Pool, PoolClient } from 'pg';
 import { cancellationTransaction, pool } from './db.ts';
 import { afterCommit, afterRollback, transaction } from './transaction.ts';
 import {
+  chatTaskSql,
   laterSupersedingTurnSql,
   turnChainSql,
   withdrawnSql,
@@ -1965,6 +1966,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
     confirmedActions,
     restarted,
     language,
+    chat,
   ] = await Promise.all([
     loadMessage(sourceMessageId),
     pool.query(
@@ -2010,6 +2012,10 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
         )
       : undefined,
     loadConversationLanguage(pool, ownerId, threadId),
+    pool.query<{ id: string | null }>(
+      `SELECT ${chatTaskSql('u')} AS id FROM turns u WHERE u.id=$1 AND u.owner_id=$2`,
+      [turn.id, ownerId],
+    ),
   ]);
   const preference = preferences.rows[0];
   const historyTurnIds = [
@@ -2030,6 +2036,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
   const timeZone: string | undefined = preference?.time_zone || undefined;
   return {
     sourceMessageId,
+    chatId: chat.rows[0]?.id ?? undefined,
     ...source,
     history: history.rows,
     context: {
@@ -2544,7 +2551,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
         shared.splice(0, pending.length);
       },
       delta: (text, streamId, done) => {
-        if (!signal.aborted && (!turn.background || taskContext) && turn.channel === 'web')
+        if (!signal.aborted && (!turn.background || loaded.chatId) && turn.channel === 'web')
           delta({
             ownerId,
             channel: turn.channel,
@@ -2553,7 +2560,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
             text,
             streamId,
             done,
-            ...(taskContext ? { taskId: taskContext.id } : {}),
+            ...(loaded.chatId ? { taskId: loaded.chatId } : {}),
           });
       },
       reactToMessage:
