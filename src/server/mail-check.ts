@@ -135,9 +135,9 @@ export function createMailCheck({
             if (++timeouts === slots) read.abort();
             return 'the check model did not answer within 15 seconds';
           }
-          if (read.signal.aborted) return halted ?? stopped;
           if (error instanceof Error && error.message === spendingLimitReached)
             return spendingLimitReached;
+          if (read.signal.aborted) return halted ?? stopped;
           const status =
             (error as { status?: unknown })?.status ??
             (error as { providerStatus?: unknown })?.providerStatus;
