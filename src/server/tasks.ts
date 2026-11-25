@@ -186,6 +186,7 @@ export function createTasks(options: {
   validateModel?: (choice: ModelSelection) => ModelSelection;
   renamed?: (taskId: string, title: string) => void;
   agents?: TaskAgents;
+  sessions?: (client: PoolClient, taskId: string) => Promise<string[]>;
 }) {
   const { pool, ownerId } = options;
   const refresh = options.refresh ?? (() => {});
@@ -552,14 +553,16 @@ export function createTasks(options: {
       )
     ).rows[0];
     if (!task) throw failure('Task not found.', 404);
-    if (actor === 'owner') stopSession(task.session_id);
-    const cancelled = await cancelTurns(
-      client,
-      threadId,
-      { sessionId: task.session_id },
-      capture,
-      actor,
-    );
+    const stopped = [];
+    for (const sessionId of [task.session_id, ...((await options.sessions?.(client, id)) ?? [])]) {
+      if (actor === 'owner') stopSession(sessionId);
+      stopped.push(await cancelTurns(client, threadId, { sessionId }, capture, actor));
+    }
+    const cancelled = {
+      tasks: stopped.flatMap((item) => item.tasks),
+      ids: stopped.flatMap((item) => item.ids),
+      browsers: stopped.flatMap((item) => item.browsers),
+    };
     const updated = await client.query(
       "UPDATE tasks SET state='cancelled',closed_at=now(),updated_at=now() WHERE id=$1 AND owner_id=$2 AND state='open'",
       [id, ownerId],

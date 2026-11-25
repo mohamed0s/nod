@@ -1,0 +1,45 @@
+.chat-room-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.chat-room-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding-inline-start: 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--foreground);
+}
+.chat-room-add {
+  width: auto;
+  min-height: 28px;
+  padding-block: 2px;
+}
+.chat-room > .field-hint {
+  flex-basis: 100%;
+}
+.chat-room-members {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.chat-room-members > legend {
+  margin-bottom: 4px;
+  font-size: var(--text-control);
+  font-weight: 500;
+}
+.message-agent {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 600;
+}

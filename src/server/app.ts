@@ -232,6 +232,8 @@ export interface AppDependencies {
   onboard?: (timeZone?: string, threadId?: string) => Promise<unknown>;
   taskLedger?: (threadId?: string) => Promise<import('../shared/contracts.ts').Task[]>;
   agents?: (threadId: string) => Promise<import('../shared/agents.ts').Agent[]>;
+  rooms?: (threadId: string) => Promise<import('../shared/rooms.ts').Room[]>;
+  speakers?: (turnIds: string[]) => Promise<Map<string, string>>;
   activity?: () => Promise<Activity[]>;
   planningTasks?: () => string | undefined;
   rateLimit?: boolean;
@@ -263,16 +265,21 @@ export async function createApp(dependencies: AppDependencies = {}) {
         ),
       ]),
     );
-    return rows.map((message) =>
-      messageView(
+    const speakers = await dependencies.speakers?.(
+      rows.flatMap((row) => (row.role === 'assistant' && row.turnId ? [row.turnId] : [])),
+    );
+    return rows.map((message) => {
+      const view = messageView(
         message.replyTo && !message.replyTo.isQuote
           ? {
               ...message,
               replyTo: { ...message.replyTo, text: previews.get(message.replyTo.id) ?? '' },
             }
           : message,
-      ),
-    );
+      );
+      const agent = message.role === 'assistant' && speakers?.get(message.turnId ?? '');
+      return agent ? { ...view, agent } : view;
+    });
   }
   const app = Fastify({
     logger: false,
@@ -448,6 +455,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
       ...(recovery ? { chatRecovery: recovery } : {}),
       tasks: await dependencies.taskLedger?.(thread.id),
       agents: await dependencies.agents?.(thread.id),
+      rooms: await dependencies.rooms?.(thread.id),
       hasEarlierMessages,
       hiddenMessageCount: hiddenMessages.rows[0]!.count,
       hiddenMessageIds: hiddenMessages.rows[0]!.ids,

@@ -199,10 +199,13 @@ export interface RuntimeContext {
     scheduled?: boolean;
     apps?: string[];
     skills?: string[];
+    room?: { name: string; members: Array<{ name: string; description: string }> };
   };
   agentMemory?: { index: string; readsShared: boolean };
   agents?: Array<{ name: string; description: string; chatId: string | null }>;
   fromMain?: string;
+  roomMessages?: Array<{ from: string; agent?: true; text: string; at: string }>;
+  rooms?: Array<{ id: string; name: string; members: string[] }>;
   workspacePath: string;
   signal: AbortSignal;
   attachments: Array<{

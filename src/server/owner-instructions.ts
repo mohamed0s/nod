@@ -190,23 +190,32 @@ export async function recentOwnerWords(
   requestIds: string[],
   taskId: string | null = null,
   chainIds: string[] = requestIds,
+  sessionId?: string,
 ) {
   const tables = (
     await pool.query(
-      "SELECT to_regclass('channel_main_topics') AS topics,to_regclass('agent_chats') AS agents",
+      "SELECT to_regclass('channel_main_topics') AS topics,to_regclass('agent_chats') AS agents,to_regclass('rooms') AS rooms",
     )
   ).rows[0];
   const topics = Boolean(tables?.topics);
-  const agentChat = Boolean(
+  const room = Boolean(
     taskId &&
-    tables?.agents &&
-    (
-      await pool.query('SELECT 1 FROM agent_chats WHERE owner_id=$1 AND chat_id=$2', [
-        ownerId,
-        taskId,
-      ])
-    ).rowCount,
+    tables?.rooms &&
+    (await pool.query('SELECT 1 FROM rooms WHERE owner_id=$1 AND id=$2', [ownerId, taskId]))
+      .rowCount,
   );
+  const agentChat =
+    room ||
+    Boolean(
+      taskId &&
+      tables?.agents &&
+      (
+        await pool.query('SELECT 1 FROM agent_chats WHERE owner_id=$1 AND chat_id=$2', [
+          ownerId,
+          taskId,
+        ])
+      ).rowCount,
+    );
   const { rows } = await pool.query<{
     id: string;
     text: string;
@@ -217,7 +226,9 @@ export async function recentOwnerWords(
     reply_presentation: unknown;
     reply_withdrawn: boolean | null;
     reply_chat: string | null;
+    reply_session: string | null;
     founding: boolean;
+    elsewhere: boolean;
   }>(
     `WITH cleared AS (SELECT COALESCE((SELECT chat_cleared_at FROM threads WHERE id=$2 AND owner_id=$1),'-infinity'::timestamptz) AS at),
      visible AS NOT MATERIALIZED (SELECT m.id,m.created_at FROM messages m
@@ -262,13 +273,24 @@ export async function recentOwnerWords(
                WHERE rm.id=r.id AND rm.owner_id=$1)`
            : 'NULL::uuid'
        } AS reply_chat,${
+         room
+           ? `(SELECT rt.session_id FROM messages rm JOIN turns rt ON rt.id=rm.turn_id AND rt.owner_id=rm.owner_id
+               WHERE rm.id=r.id AND rm.owner_id=$1)`
+           : 'NULL::uuid'
+       } AS reply_session,${
          taskId && !agentChat
            ? `EXISTS (SELECT 1 FROM tasks k WHERE k.id=$4::uuid AND k.owner_id=$1
                AND (k.source_message_id=m.id OR m.created_at<=k.created_at))`
            : 'false'
        } AS founding,EXISTS (SELECT 1 FROM approvals p
          JOIN turns e ON e.id=p.execution_turn_id AND e.owner_id=p.owner_id
-         WHERE p.owner_id=$1 AND e.message_id=m.id) AS answer
+         WHERE p.owner_id=$1 AND e.message_id=m.id) AS answer,${
+           room
+             ? `NOT EXISTS (SELECT 1 FROM turns dt JOIN room_dispatches d ON d.turn_id=dt.id AND d.owner_id=dt.owner_id
+               JOIN room_members s ON s.owner_id=d.owner_id AND s.room_id=d.room_id AND s.session_id=$5::uuid
+               WHERE dt.owner_id=$1 AND dt.message_id=m.id AND s.agent_id=ANY(d.targets))`
+             : 'false'
+         } AS elsewhere
      FROM (SELECT id FROM recent UNION SELECT unnest($3::uuid[])) ids
      JOIN messages m ON m.id=ids.id CROSS JOIN cleared
      LEFT JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id${
@@ -311,14 +333,21 @@ export async function recentOwnerWords(
          WHERE offer.owner_id=$1 AND offer.thread_id=$2 AND offer.suggestions IS NOT NULL AND task->>'title' IS NOT NULL)
      ORDER BY m.created_at,m.id`,
     taskId
-      ? [ownerId, threadId, agentChat ? chainIds : requestIds, taskId]
+      ? [
+          ownerId,
+          threadId,
+          agentChat ? chainIds : requestIds,
+          taskId,
+          ...(room ? [sessionId ?? null] : []),
+        ]
       : [ownerId, threadId, requestIds],
   );
   const messages = rows.map((row) => {
     const replied =
       row.reply_id &&
       !row.reply_withdrawn &&
-      (!taskId || row.reply_chat === taskId || row.founding);
+      (!taskId || row.reply_chat === taskId || row.founding) &&
+      (!room || row.reply_session === sessionId);
     const visual = replied ? presentationSchema.safeParse(row.reply_presentation) : undefined;
     const reply = replied
       ? [row.reply_text ?? '', visual?.success ? presentationText(visual.data) : '']
@@ -329,21 +358,21 @@ export async function recentOwnerWords(
       id: row.id,
       at: row.created_at.toISOString(),
       text: row.text,
-      answer: row.answer,
+      limitsOnly: row.answer || row.elsewhere,
       ...(row.reply_id && reply ? { replyTo: { id: row.reply_id, text: reply } } : {}),
     };
   });
   return {
     words: {
-      userMessages: messages.map(({ replyTo, answer, ...message }) => ({
+      userMessages: messages.map(({ replyTo, limitsOnly, ...message }) => ({
         ...message,
-        ...(answer ? { canAuthorize: false } : {}),
+        ...(limitsOnly ? { canAuthorize: false } : {}),
         ...(replyTo ? { replyTo: excerpt(replyTo.text, 2000) } : {}),
       })),
     } satisfies TrustWords,
     evidence: (messageId?: string): OwnerInstructions => ({
       messages: messages
-        .filter((message) => !message.answer && message.id === messageId)
+        .filter((message) => !message.limitsOnly && message.id === messageId)
         .map(({ id, at, text, replyTo }) => ({ id, at, text, ...(replyTo ? { replyTo } : {}) })),
     }),
   };

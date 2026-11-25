@@ -10,6 +10,7 @@ import Fastify from 'fastify';
 import pg from 'pg';
 import { markdownToPlainText } from 'chat';
 import { channelReply, createChannels } from '../src/server/channels.ts';
+import { createRooms, roomMirrorSql } from '../src/server/rooms.ts';
 import { createAgentReactionService } from '../src/server/agent-reactions.ts';
 import { createChatVerification } from '../src/server/chat-verification.ts';
 import { createCommunication } from '../src/server/communication.ts';
@@ -6845,7 +6846,10 @@ test(
       ALTER TABLE turns ADD COLUMN session_id uuid;
       CREATE TABLE tasks(id uuid PRIMARY KEY,owner_id text NOT NULL,turn_id uuid,session_id uuid,message_id uuid,title text NOT NULL,title_by text);
       CREATE TABLE approvals(id uuid PRIMARY KEY,owner_id text NOT NULL,thread_id uuid NOT NULL,turn_id uuid NOT NULL,
-        confirmation_message_id uuid NOT NULL,status text NOT NULL,action text NOT NULL,title text,decline text)`);
+        confirmation_message_id uuid NOT NULL,status text NOT NULL,action text NOT NULL,title text,decline text);
+      CREATE TABLE agents(id uuid PRIMARY KEY,owner_id text NOT NULL,name text NOT NULL)`);
+    const rooms = createRooms({ pool, ownerId });
+    await rooms.initialize();
     let topicsOn = true;
     let ownerTopics = true;
     let creating: 'ok' | 'refused' | 'busy' = 'ok';
@@ -6951,6 +6955,8 @@ test(
         appOnly.has(approvalId)
           ? 'Open Nod in the app to read the exact new text and answer there.'
           : undefined,
+      speaker: rooms.speaker,
+      mirrored: roomMirrorSql,
       acceptApproval: async (_client, input) => {
         tapped.push({ messageId: input.messageId, approvalId: input.approvalId });
       },
@@ -7307,6 +7313,38 @@ test(
     assert.equal(
       delivery('Synthetic form summary before the final Submit').message_thread_id,
       newest(),
+    );
+    const room = await chat('Synthetic room', 'succeeded', 'event');
+    const scout = randomUUID();
+    const seat = randomUUID();
+    await pool.query('INSERT INTO rooms(id,owner_id) VALUES($1,$2)', [room.id, ownerId]);
+    await pool.query("INSERT INTO agents(id,owner_id,name) VALUES($1,$2,'Synthetic scout')", [
+      scout,
+      ownerId,
+    ]);
+    await pool.query(
+      "INSERT INTO room_members(session_id,owner_id,room_id,agent_id,name,position) VALUES($1,$2,$3,$4,'Synthetic scout',1)",
+      [seat, ownerId, room.id, scout],
+    );
+    const scouting = randomUUID();
+    await pool.query(
+      "INSERT INTO turns(id,owner_id,thread_id,channel,status,session_id,source) VALUES($1,$2,$3,'web','succeeded',$4,'task')",
+      [scouting, ownerId, threadId, seat],
+    );
+    assert.equal(
+      (await pool.query('SELECT task_id FROM turns WHERE id=$1', [scouting])).rows[0].task_id,
+      room.id,
+    );
+    const finding = await say(scouting, 'Synthetic room finding');
+    await service.drain();
+    assert.deepEqual(created.at(-1), { chat_id: '123456', name: 'Synthetic room' });
+    assert.equal(delivery('Synthetic scout: Synthetic room finding').message_thread_id, newest());
+    const followUp = await receive('Synthetic room follow-up', newest());
+    assert.deepEqual(submitted.at(-1), { replyToMessageId: finding, sessionId: undefined });
+    assert.equal(
+      (await pool.query('SELECT task_id FROM turns WHERE id=$1', [followUp.turn_id])).rows[0]
+        .task_id,
+      room.id,
     );
 
     creating = 'refused';

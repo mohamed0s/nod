@@ -62,6 +62,7 @@ export const nodActions = [
   'agent_update',
   'agent_schedule',
   'agent_create',
+  'room_update',
   'schedule_list',
   'schedule_create',
   'schedule_update',

@@ -122,6 +122,7 @@ export function createTrust(options: {
               origin.messageIds,
               origin.taskId,
               origin.chainMessageIds,
+              origin.sessionId,
             )
           : undefined;
       const words: TrustWords = {

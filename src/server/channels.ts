@@ -109,6 +109,8 @@ interface ChannelOptions {
   ) => Promise<string>;
   topicAgent?: (topic: InboxRow) => Promise<string | undefined>;
   answerRefusal?: (approvalId: string) => Promise<string | undefined>;
+  speaker?: (messageId: string) => Promise<string | undefined>;
+  mirrored?: (turn: string) => string;
   stopSignal?: () => AbortSignal;
   messageAccepted?: () => (channel: string) => void;
   answer?: (
@@ -1498,9 +1500,10 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     if (!transport.topics) return;
     const mirrored = `FROM messages m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
       WHERE m.owner_id=$1 AND m.created_at>now()-interval '10 minutes' AND m.role='assistant'
-        AND m.hidden_at IS NULL AND u.channel='web' AND u.session_id::text=to_jsonb(u)->>'task_id'
+        AND m.hidden_at IS NULL AND u.channel='web' AND ((u.session_id::text=to_jsonb(u)->>'task_id'
         AND EXISTS (SELECT 1 FROM (SELECT f.source,f.source_id FROM turns f WHERE f.owner_id=u.owner_id AND f.session_id=u.session_id
-          ORDER BY f.created_at,f.id LIMIT 1) f WHERE ${ownerStarted('f')} OR starts_with(f.source_id,'job-apply:'))
+          ORDER BY f.created_at,f.id LIMIT 1) f WHERE ${ownerStarted('f')} OR starts_with(f.source_id,'job-apply:')))
+          OR ${options.mirrored?.('u') ?? 'false'})
         AND NOT EXISTS (SELECT 1 FROM channel_outbox q WHERE q.message_id=m.id)`;
     if (!(await pool.query(`SELECT 1 ${mirrored} LIMIT 1`, [ownerId])).rowCount) return;
     const [route] = await topicRoutes((mode) => mode.enabled);
@@ -1910,6 +1913,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
         options.acceptApproval &&
         text === row.text.trim() &&
         (await pendingTelegramApproval(pool, row.message_id));
+      const speaker = await options.speaker?.(row.message_id);
       const post = (database: Pool | PoolClient) => {
         const input = {
           ...(target
@@ -1925,7 +1929,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
           threadId: row.thread_id,
           ...(topicId ? { topicId } : {}),
           ...(silent ? { silent } : {}),
-          text,
+          text: speaker ? `${channelText(speaker).text}: ${text}` : text,
           ...(approval
             ? {
                 approval:

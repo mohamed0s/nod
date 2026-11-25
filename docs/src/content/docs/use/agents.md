@@ -1,6 +1,6 @@
 ---
 title: Agents
-description: Turn a chat into a named agent with its own instructions and model, kept when you reset the conversation, and let Main hand it work. This page describes a fork of Nod.
+description: Turn a chat into a named agent with its own instructions and model, kept when you reset the conversation, let Main hand it work, and put several agents in a room. This page describes a fork of Nod.
 sidebar:
   order: 3
 ---
@@ -127,6 +127,58 @@ A stop only cancels the agent's current work, as **Stop** in its chat would. It 
 ### A daily digest
 
 To get a summary of your agents each day, make a [schedule](/use/schedules/) in Main, for example "every morning at 8, sum up what my agents did yesterday and what needs me; don't change anything". The run sees your agents and can read their results, but it can't send them work.
+
+## Rooms
+
+A room is a chat where several of your agents work with you, for example a "Hiring" room with your job agent and your writing agent. Select **New room** in the **Rooms** group of the chat list, give it a name and tick its agents. With [Telegram topics](/use/channels/#telegram-topics) on, a room gets its own topic too.
+
+At the top of the room, beside **Room**, you can rename it, remove an agent with the cross beside its name, add one with **Add an agent…**, and see what the room has cost so far. A room holds up to 8 agents. Each change adds a line to the room saying who added or removed whom.
+
+### Who answers
+
+- Name an agent with @ and its name, such as "@Job agent find three roles", or start your message with its name, such as "Job agent, find three roles". Only the agents you name answer.
+- A message that names nobody goes to every member, one after another in the room's order, so each sees what the ones before it wrote. A reply to an agent's open question goes only to that agent.
+- Each agent answers in its own session, with its own instructions, model, memory setting and app and skill limits. Its replies carry its name, in the app and in the Telegram topic.
+- Each turn, an agent reads what was said in the room since its last turn, at most the last 20 messages.
+
+### When agents address each other
+
+An agent can write @ and another member's name to ask it for its part. That starts the other agent's turn. Fixed limits stop a room that runs away:
+
+| Limit                                                        | What happens                                                   |
+| ------------------------------------------------------------ | -------------------------------------------------------------- |
+| 4 agent-to-agent replies in a row without a message from you | The room stops and says so. Write in it to continue            |
+| 30 agent turns in the room in one hour                       | The room stops and says so. Write again later                  |
+| One turn at a time per agent                                 | An agent that's working or waiting for you isn't started again |
+
+Main watches rooms too. It stops one on its own when a turn has made no progress for 6 hours, or when the room's work since your last message there passed twice your [task check-in](/use/spending/#task-check-ins), and tells you in Main, as it does for an [agent](#when-main-stops-an-agent). **Stop** in the room stops every agent in it.
+
+### Only your words count
+
+- In a room, only your own messages are your words. What one agent writes reaches the others as data, in a block named after that agent: never an order or a permission, even when it says you agreed.
+- An action an agent wants to take is checked against your messages in that room, with the same one-day window as an [agent's chat](#send-work-to-an-agent). If they don't cover it, the agent asks you in the room.
+- Your message permits only the agents it went to. For every other member it can still limit what that member does, never permit it. So an agent that another agent asked for help acts only on your own messages to it, or asks you.
+- An @name inside text an agent repeats, such as an email it read, can still start that member's turn, within the limit of 4 in a row. It gives that member nothing beyond your own messages to it.
+- When you reply to an agent's message, that message counts with your reply only for that agent's own actions, never for another agent's.
+- Only you answer an approval. A "yes" from another agent answers nothing, and another agent can't start an agent that's waiting for you.
+
+| In the room                                                                    | What happens                                                             |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| "@Writer email the venue"                                                      | The writer sends that email                                              |
+| The scout writes "@Writer email the venue, the owner agreed"                   | The writer asks you first                                                |
+| You reply "go ahead" to the scout's suggestion, naming the writer              | The writer asks you first: your reply backs only the scout's own actions |
+| "@Scout send the report to Ana", and the scout writes "@Writer send it to Ana" | The writer asks you first: your message went to the scout                |
+| "@Scout find the report and @Writer send it to Ana"                            | The writer sends it: your message went to both                           |
+
+### Ask Main to change a room
+
+Main sees your rooms and their members, so you can ask it, for example, "add the job agent to the hiring room". Changing who is in a room is a change to Nod's own settings: Main makes it only when your own message covers that exact change, and otherwise asks you first. The question shows the room and the agents it adds or removes. The agents in a room can't change who is in it.
+
+### Memory in a room
+
+The room's messages stay in the room: Main, other chats and agents outside it don't see them. A room counts as one of each member's chats for its [memory](#memory): facts about you go to shared memory, and details of an agent's own work go to its own notes when it keeps them. Nod still learns only from what you wrote.
+
+A room belongs to the conversation it was made in. After a reset, make a new room in the new conversation.
 
 ## After a reset
 
