@@ -2686,6 +2686,27 @@ test(
         },
       );
 
+      await t.test('closed chats leave the 100-task window before any other task', async (t) => {
+        const current = (await thread.activeThread(db.pool)).id;
+        const [turn, kept] = [randomUUID(), randomUUID()];
+        t.after(async () => {
+          await db.pool.query('DELETE FROM tasks WHERE turn_id=$1', [turn]);
+          await db.pool.query('DELETE FROM turns WHERE id=$1', [turn]);
+        });
+        await db.pool.query(
+          "INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status) VALUES($1,$2,$3,$3,'user','Synthetic window','succeeded')",
+          [turn, ownerId, current],
+        );
+        await db.pool.query(
+          `INSERT INTO tasks(id,owner_id,turn_id,session_id,title,done_when,now_text,state,closed_at,archived_at)
+           SELECT CASE WHEN n=0 THEN $1::uuid ELSE gen_random_uuid() END,$2,$3,gen_random_uuid(),'Synthetic window task',
+             'Checked','Done','done',now()-interval '1 day'+n*interval '1 minute',CASE WHEN n>0 THEN now() END
+           FROM generate_series(0,100) n`,
+          [kept, ownerId, turn],
+        );
+        assert.ok((await tasks.read()).some(({ id }) => id === kept));
+      });
+
       await t.test(
         'a task started inside another session takes only its own turns from the main chat',
         async (t) => {
