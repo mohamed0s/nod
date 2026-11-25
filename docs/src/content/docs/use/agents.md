@@ -39,13 +39,13 @@ In the agent's chat, you can also tell Nod, for example "make your replies more 
 
 ## Schedules that run as an agent
 
-A recurring or one-time [schedule](/use/schedules/) can run as one of your agents. Each run, and any work a run starts, then follows that agent's instructions, such as a "Gig radar (Roblox)" schedule that runs as your Roblox agent. On **Scheduled**, open the schedule's details and choose the agent beside **Runs as**, or **No agent**. The agent's settings list the schedules that run as it.
+A recurring or one-time [schedule](/use/schedules/) can run as one of your agents. Each run, and any work a run starts, then follows that agent's instructions, such as a "Weekly report" schedule that runs as your research agent. On **Scheduled**, open the schedule's details and choose the agent beside **Runs as**, or **No agent**. The agent's settings list the schedules that run as it.
 
 The schedule's own instruction stays what it is allowed to do. The agent's instructions only guide focus, tone and method; they never count as your words, and the schedule's instruction and your messages win when they differ. The [action check](/trust/approvals/) never sees them as permission.
 
 A schedule keeps its own model. If it has none, it uses the model for schedules, unless you tick **Use the agent's model**; then it runs on the model of the agent's chat. That choice starts off for every schedule.
 
-You can also tell Nod, for example "run the gig radar as my DevOps agent". Like a change to an agent, it runs only when your own message covers it, and otherwise Nod asks first; the question's card shows the schedule, the agent and the model choice. A schedule Nod creates in an agent's chat runs as that agent from the start, and Nod says so; change it on **Scheduled** any time. Removing an agent leaves its schedules running without an agent.
+You can also tell Nod, for example "run the weekly report as my research agent". Like a change to an agent, it runs only when your own message covers it, and otherwise Nod asks first; the question's card shows the schedule, the agent and the model choice. A schedule Nod creates in an agent's chat runs as that agent from the start, and Nod says so; change it on **Scheduled** any time. Removing an agent leaves its schedules running without an agent.
 
 ## After a reset
 
