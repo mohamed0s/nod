@@ -190,23 +190,32 @@ export async function recentOwnerWords(
   requestIds: string[],
   taskId: string | null = null,
   chainIds: string[] = requestIds,
+  sessionId?: string,
 ) {
   const tables = (
     await pool.query(
-      "SELECT to_regclass('channel_main_topics') AS topics,to_regclass('agent_chats') AS agents",
+      "SELECT to_regclass('channel_main_topics') AS topics,to_regclass('agent_chats') AS agents,to_regclass('rooms') AS rooms",
     )
   ).rows[0];
   const topics = Boolean(tables?.topics);
-  const agentChat = Boolean(
+  const room = Boolean(
     taskId &&
-    tables?.agents &&
-    (
-      await pool.query('SELECT 1 FROM agent_chats WHERE owner_id=$1 AND chat_id=$2', [
-        ownerId,
-        taskId,
-      ])
-    ).rowCount,
+    tables?.rooms &&
+    (await pool.query('SELECT 1 FROM rooms WHERE owner_id=$1 AND id=$2', [ownerId, taskId]))
+      .rowCount,
   );
+  const agentChat =
+    room ||
+    Boolean(
+      taskId &&
+      tables?.agents &&
+      (
+        await pool.query('SELECT 1 FROM agent_chats WHERE owner_id=$1 AND chat_id=$2', [
+          ownerId,
+          taskId,
+        ])
+      ).rowCount,
+    );
   const { rows } = await pool.query<{
     id: string;
     text: string;
@@ -217,6 +226,7 @@ export async function recentOwnerWords(
     reply_presentation: unknown;
     reply_withdrawn: boolean | null;
     reply_chat: string | null;
+    reply_session: string | null;
     founding: boolean;
   }>(
     `WITH cleared AS (SELECT COALESCE((SELECT chat_cleared_at FROM threads WHERE id=$2 AND owner_id=$1),'-infinity'::timestamptz) AS at),
@@ -262,6 +272,11 @@ export async function recentOwnerWords(
                WHERE rm.id=r.id AND rm.owner_id=$1)`
            : 'NULL::uuid'
        } AS reply_chat,${
+         room
+           ? `(SELECT rt.session_id FROM messages rm JOIN turns rt ON rt.id=rm.turn_id AND rt.owner_id=rm.owner_id
+               WHERE rm.id=r.id AND rm.owner_id=$1)`
+           : 'NULL::uuid'
+       } AS reply_session,${
          taskId && !agentChat
            ? `EXISTS (SELECT 1 FROM tasks k WHERE k.id=$4::uuid AND k.owner_id=$1
                AND (k.source_message_id=m.id OR m.created_at<=k.created_at))`
@@ -318,7 +333,8 @@ export async function recentOwnerWords(
     const replied =
       row.reply_id &&
       !row.reply_withdrawn &&
-      (!taskId || row.reply_chat === taskId || row.founding);
+      (!taskId || row.reply_chat === taskId || row.founding) &&
+      (!room || row.reply_session === sessionId);
     const visual = replied ? presentationSchema.safeParse(row.reply_presentation) : undefined;
     const reply = replied
       ? [row.reply_text ?? '', visual?.success ? presentationText(visual.data) : '']

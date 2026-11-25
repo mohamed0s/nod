@@ -118,6 +118,7 @@ function chatConfirmationSql(match: string, delivered = false) {
 type TurnRow = {
   id: string;
   thread_id: string;
+  session_id: string;
   task_id: string | null;
   source: string;
   parent_turn_id: string | null;
@@ -172,7 +173,7 @@ function confirmedOutcome(
 async function turnRow(client: PoolClient, turnId: string) {
   return (
     await client.query<TurnRow>(
-      "SELECT id,thread_id,to_jsonb(turns)->>'task_id' AS task_id,source,parent_turn_id,message_id,prompt,background,channel FROM turns WHERE id=$1 AND owner_id=$2",
+      "SELECT id,thread_id,session_id,to_jsonb(turns)->>'task_id' AS task_id,source,parent_turn_id,message_id,prompt,background,channel FROM turns WHERE id=$1 AND owner_id=$2",
       [turnId, ownerId],
     )
   ).rows[0];
@@ -274,6 +275,7 @@ export async function turnOrigin(turnId: string) {
         : [];
     return {
       taskId: current.task_id,
+      sessionId: current.session_id,
       source: origin.source,
       messageIds: said,
       chainMessageIds: [...new Set(chained)],
