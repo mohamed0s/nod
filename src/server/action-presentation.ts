@@ -1,6 +1,7 @@
 import { parseFragment, type DefaultTreeAdapterMap } from 'parse5';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { agentApprovalContent } from '../shared/agents.ts';
 
 const apps: Record<string, string> = {
   GMAIL: 'Gmail',
@@ -39,6 +40,7 @@ const nodActions: Array<[string, string]> = [
   ['NOD_job_apply_site', 'Apply on this site'],
   ['NOD_bug_report_send', 'Send a bug report to the Nod team'],
   ['NOD_model_select', 'Change the model'],
+  ['NOD_agent_update', 'Change this agent'],
   ['NOD_notification_preferences_update', 'Change Nod settings'],
   ['NOD_schedule_pause', 'Pause a schedule'],
   ['NOD_schedule_cancel', 'Pause a schedule'],
@@ -359,6 +361,7 @@ export function approvalContent(
   action: string,
   args: unknown,
 ): { fields?: Array<{ label: string; value: string }>; body?: string; bodyCut?: true } {
+  if (action === 'NOD_agent_update') return agentApprovalContent(args);
   if (
     /^(NOD_|CONNECTED_|mcp__)/.test(action) ||
     !args ||
@@ -545,6 +548,8 @@ export function actionTarget(
         ? `${model} for ${work}`
         : model;
     }
+    if (action === 'NOD_agent_update')
+      return ['name', 'description', 'instructions'].filter((key) => key in args).join(', ');
     if (action === 'NOD_limits_update')
       return [
         'monthlyUsd' in args && dollarsOrNone(args.monthlyUsd, 'monthly limit'),

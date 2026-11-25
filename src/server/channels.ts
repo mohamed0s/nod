@@ -105,7 +105,10 @@ interface ChannelOptions {
     onInserted?: () => void,
     stopSignal?: AbortSignal,
     sessionId?: string,
+    chatAgent?: string,
   ) => Promise<string>;
+  topicAgent?: (topic: InboxRow) => Promise<string | undefined>;
+  answerRefusal?: (approvalId: string) => Promise<string | undefined>;
   stopSignal?: () => AbortSignal;
   messageAccepted?: () => (channel: string) => void;
   answer?: (
@@ -732,6 +735,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
       [messageId, ownerId],
     );
     const approval = rows[0];
+    if (approval && (await options.answerRefusal?.(approval.approval_id))) return;
     if (approval && channelText(approval.text).text === approval.text.trim()) return approval;
   }
 
@@ -1231,6 +1235,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     const topic = inMain ? null : pending.topic_id;
     const topicTarget = topic ? await taskInTopic(pending) : undefined;
     const newChat = Boolean(topic) && !topicTarget?.id;
+    const chatAgent = newChat ? await options.topicAgent?.(pending) : undefined;
     const native =
       pending.provider_reply_id && !newChat
         ? await nativeReply(pending, pending.thread_id, pending.provider_reply_id)
@@ -1371,6 +1376,21 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
         afterCommit = reply.afterCommit;
         return true;
       }
+      const refusal =
+        answer?.approved === undefined
+          ? undefined
+          : await options.answerRefusal?.(answer.approvalId);
+      if (refusal) {
+        const conversation =
+          currentThread?.id ??
+          (options.activeThread ? (await options.activeThread(client)).id : null);
+        await saveReply(client, row.source_id, conversation, { text: refusal });
+        await client.query(
+          "UPDATE channel_inbox SET state='submitted',channel=$3 WHERE source_id=$1 AND owner_id=$2",
+          [row.source_id, ownerId, channel],
+        );
+        return true;
+      }
       const messageId = row.message_id ?? randomUUID();
       let inserted = false;
       const turnId = await options.submit(
@@ -1387,6 +1407,7 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
         },
         stopSignal,
         newChat ? randomUUID() : undefined,
+        chatAgent,
       );
       if (newChat)
         await client.query(

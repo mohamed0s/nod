@@ -31,7 +31,9 @@ The chat list sits to the left of the conversation. **Main** is your ongoing con
 | **Needs you** | Tasks with a question, an approval, a check-in or a failure         |
 | **Done**      | Tasks that finished or were stopped                                 |
 
-Select a chat to open it. A task's chat shows only that task. Its card sits at the top with its status, steps, activity and **Stop this task**. Below it are the task's own messages, questions, approvals and results. Whatever you type there goes to that task, and the composer's Stop control stops only that task. In the web app run from source, **Open the live browser** under the card opens that task's browser view in a new tab.
+Select a chat to open it. A task's chat shows only that task. Its card sits at the top with its status, steps, activity and **Stop this task**, and the chat's [model](#choose-the-model-for-a-chat) under it. Below it are the task's own messages, questions, approvals and results. Whatever you type there goes to that task, and the composer's Stop control stops only that task. In the web app run from source, **Open the live browser** under the card opens that task's browser view in a new tab.
+
+To give a chat a name, instructions and a model that last, make it an [agent](/use/agents/). Agents have their own group under **Main**.
 
 A number next to a chat counts its unread replies, and the badge on **Chat** counts them all. Reading **Main** doesn't mark a task's replies as read; opening that task's chat does.
 
@@ -42,6 +44,14 @@ A number next to a chat counts its unread replies, and the badge on **Chat** cou
 Select **New chat**, then type what you want. Your first message starts a task directly, without going through the main chat. The chat is named after the first line of your message until Nod first replies; then it gets a short title of a few words in your language, unless you've already renamed it. When Nod has your message, the app opens the new chat. You can start several new chats, and they run at the same time.
 
 A new chat never answers anything outside itself. A "yes" in a new chat starts that chat. It doesn't approve an action that another chat or the main chat is waiting on.
+
+### Choose the model for a chat
+
+Each chat runs on a model. Under a task's card, **Model** shows the chat's own model, or **Default** with the model it uses when it has none: your chat model from **Settings > Models**, or for work Nod started on its own, the model for that kind of work. Select **Change** to choose any connected text model for this chat, or **Default** to go back. Give simple chats a lighter model and risky ones a stronger model. The change applies from the chat's next turn; a turn that's already running keeps its model. Finished chats keep their model when you continue them.
+
+In a new chat, select **Change** beside **Model** before you send your first message, and the chat starts on that model. **Main** shows your chat model and a link to **Settings > Models**. Changing it there changes every chat without its own model.
+
+You can also tell Nod in a chat, for example "Use Opus for this chat", in the web app or in the chat's Telegram topic. Nod changes that chat's model, not your default, and asks you first when your words don't cover the change. To change your default from a task's chat, say so, for example "Make Opus my main model".
 
 ### Continue or close a chat
 
@@ -63,15 +73,15 @@ Select **Rules** to ask Nod in chat to show the rules that apply to every task. 
 
 ## What a card shows
 
-| Part           | What it tells you                                                                 |
-| -------------- | --------------------------------------------------------------------------------- |
-| Title          | The task in a few words                                                           |
-| Status         | Where the task stands, such as **Working** or **Needs you**                       |
-| Now line       | What Nod is doing, with the website it's working in, or the question it asked you |
-| **Waiting on** | Who Nod is waiting for, and how, such as an email reply                           |
-| **Next check** | When Nod will look again                                                          |
-| **Done when**  | What finished looks like                                                          |
-| **Model**      | The model the task uses. Select **Change** to give this task its own model        |
+| Part           | What it tells you                                                                     |
+| -------------- | ------------------------------------------------------------------------------------- |
+| Title          | The task in a few words                                                               |
+| Status         | Where the task stands, such as **Working** or **Needs you**                           |
+| Now line       | What Nod is doing, with the website it's working in, or the question it asked you     |
+| **Waiting on** | Who Nod is waiting for, and how, such as an email reply                               |
+| **Next check** | When Nod will look again                                                              |
+| **Done when**  | What finished looks like                                                              |
+| **Model**      | On **Scheduled**, the model the task uses. Select **Change** to give it its own model |
 
 When Nod starts a task, a chip under its message in **Main** says **Task started** with the task's title. The chip follows the task's [status](#statuses), such as **Needs you**, **Finishing**, **Task done**, **Task failed** or **Task stopped**. Select it while the task is active to open the task's card or, once it's done and has an answer, to jump to that answer. The task's own chat shows the same card at the top, with a live line while it works: the current step, the website or app it's working in, and how long it has been quiet. A task that is waiting, checking back, failed or finished keeps its chip in chat, and its card with every control is on **Scheduled**.
 

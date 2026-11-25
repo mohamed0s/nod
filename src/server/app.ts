@@ -225,6 +225,7 @@ export interface AppDependencies {
   configuration?: () => Configuration;
   onboard?: (timeZone?: string, threadId?: string) => Promise<unknown>;
   taskLedger?: (threadId?: string) => Promise<import('../shared/contracts.ts').Task[]>;
+  agents?: (threadId: string) => Promise<import('../shared/agents.ts').Agent[]>;
   activity?: () => Promise<Activity[]>;
   planningTasks?: () => string | undefined;
   rateLimit?: boolean;
@@ -440,6 +441,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
       ...(cleared ? { chatClearedAt: cleared } : {}),
       ...(recovery ? { chatRecovery: recovery } : {}),
       tasks: await dependencies.taskLedger?.(thread.id),
+      agents: await dependencies.agents?.(thread.id),
       hasEarlierMessages,
       hiddenMessageCount: hiddenMessages.rows[0]!.count,
       hiddenMessageIds: hiddenMessages.rows[0]!.ids,
@@ -659,6 +661,8 @@ export async function createApp(dependencies: AppDependencies = {}) {
         questionAnswer: input.questionAnswer,
         approvalAnswer: input.approvalAnswer,
         ...(input.newChat ? { sessionId: randomUUID() } : {}),
+        ...(input.chatModel ? { chatModel: input.chatModel } : {}),
+        ...(input.chatAgent ? { chatAgent: input.chatAgent } : {}),
         stopSignal: arrival,
       },
     );

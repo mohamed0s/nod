@@ -124,6 +124,12 @@
   align-self: flex-start;
   font-size: var(--text-control);
 }
+.conversation-column > .chat-model {
+  margin-bottom: 16px;
+}
+.chat-model > a {
+  margin-left: auto;
+}
 @media (max-width: 640px) {
   .chat-split {
     flex-direction: column;
@@ -149,4 +155,28 @@
   color: var(--on-solid);
   font-size: 12px;
   line-height: 18px;
+}
+.chat-agent > .work-model-value {
+  flex: 1 1 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.chat-agent > .field-hint {
+  flex-basis: 100%;
+}
+.chat-agent-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.chat-agent-instructions {
+  min-height: 160px;
+  resize: vertical;
+}
+.chat-agent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
 }

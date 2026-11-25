@@ -40,6 +40,7 @@ import { withoutSchemaPatterns } from '../shared/json-schema.ts';
 import type { Turn } from './turn.ts';
 import { jobsToolHelp, jobsToolParameters, runJobsTool } from './jobs-tool.ts';
 import { pagesToolDescription, pagesToolParameters, runPagesTool } from './pages-tool.ts';
+import { nodDescriptionAdditions } from './agent-context.ts';
 import type { FlightOption, FlightSearch } from '../ports/flights.ts';
 
 export const memoryActions = [
@@ -58,6 +59,7 @@ export const nodActions = [
   'docs_read',
   'models_get',
   'model_select',
+  'agent_update',
   'schedule_list',
   'schedule_create',
   'schedule_update',
@@ -723,6 +725,7 @@ export const toolDefinitions = {
     Type.Object({ text: Type.String({ minLength: 1, maxLength: 4096 }) }),
   ),
 };
+toolDefinitions.nod.description += nodDescriptionAdditions;
 
 interface NodTool<P extends TSchema = TSchema> {
   name: string;

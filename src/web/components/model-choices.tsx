@@ -26,7 +26,7 @@ const kindNames: Record<WorkKind, string> = {
   background: 'Nod’s own work',
 };
 
-function modelOf(data: ModelsResponse, choice: ModelSelection | null | undefined) {
+export function modelOf(data: ModelsResponse, choice: ModelSelection | null | undefined) {
   return data.connections
     .find((item) => item.id === choice?.connectionId)
     ?.models.find((item) => item.id === choice?.modelId);
@@ -123,7 +123,7 @@ function scheduleTarget(
   };
 }
 
-function taskTarget(
+export function taskTarget(
   data: ModelsResponse,
   task: Task & { work: WorkKind },
   usage: WorkUsage | undefined,

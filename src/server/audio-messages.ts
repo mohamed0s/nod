@@ -16,6 +16,7 @@ import { classifyVerificationReply, securityCodeIn } from '../shared/verificatio
 import { questionAnswerSchema } from '../shared/answer-choices.ts';
 import { messageTextLimit, messageTooLongError } from '../shared/message-limits.ts';
 import { validateRequestText } from './request-text.ts';
+import { modelSelectionInput } from './models.ts';
 
 const audioMessageOptions = { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } };
 
@@ -38,6 +39,8 @@ export const messageInput = z
     chatClearedAt: z.iso.datetime().nullable().optional(),
     verificationRequestId: z.uuid().optional(),
     newChat: z.literal(true).optional(),
+    chatModel: modelSelectionInput.optional(),
+    chatAgent: z.uuid().optional(),
   })
   .strict();
 

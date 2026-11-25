@@ -160,6 +160,8 @@ import { localArtifacts } from './artifacts.ts';
 import { memoryFileName, memoryMarkdown } from '../shared/memory-export.ts';
 import { createChannels } from './channels.ts';
 import { createChatTitles } from './chat-titles.ts';
+import { chatModelArgs } from './chat-model.ts';
+import { createAgents } from './agents.ts';
 import { createChannelSettings, managedChannelEnvironment } from './channel-settings.ts';
 import { createChannelMedia } from './channel-media.ts';
 import { createChannelSessionStore } from './channel-session.ts';
@@ -1216,6 +1218,8 @@ async function initializeApplication(
     renamed: renameTopic,
   });
   await tasks.initialize();
+  const agents = createAgents({ pool, ownerId, refresh, renamed: renameTopic });
+  await agents.initialize();
   const chatTitles = createChatTitles({
     pool,
     ownerId,
@@ -1304,7 +1308,7 @@ async function initializeApplication(
     withTurnLock,
     changed: () => pagesChanged(ownerId),
   });
-  async function describeModelChoice(input: Record<string, unknown>) {
+  async function describeModelChoice(input: Record<string, unknown>, chat?: string) {
     const models = adapters.models;
     if (!models) return undefined;
     const view = models.view();
@@ -1333,7 +1337,7 @@ async function initializeApplication(
           : 'the schedule being created'
         : scope === 'task'
           ? id
-            ? `the task "${await tasks.modelTask(id)}"`
+            ? `${id === chat ? 'this chat, ' : ''}the task "${await tasks.modelTask(id)}"`
             : 'the task being started'
           : {
               chat: 'when the owner talks to Nod',
@@ -1709,6 +1713,16 @@ async function initializeApplication(
         'NOD_schedule_create',
         'NOD_schedule_update',
       ].includes(action);
+      if (action === 'NOD_agent_update') {
+        const result = await withTurnLock(turnLock, (client) => agents.apply(args, client));
+        await ledger.action(
+          provenance.turnId,
+          action,
+          provenance.basis ?? { kind: 'approved' },
+          actionTarget(action, args, provenance.details),
+        );
+        return result;
+      }
       const lockedWrite =
         action === 'NOD_limits_update' ||
         action === 'NOD_model_select' ||
@@ -2072,6 +2086,7 @@ async function initializeApplication(
       return result;
     },
     async (action, args, expectedRevision, client) => {
+      if (action === 'NOD_agent_update') return agents.validate(args, client);
       if (
         ['NOD_browser', 'NOD_vault_allow', 'NOD_bug_report_send', 'NOD_workspace_command'].includes(
           action,
@@ -2097,7 +2112,11 @@ async function initializeApplication(
     (proposal, signal) =>
       proposal.action === applySiteAction
         ? jobs.apply.siteQuestion(proposal.args)
-        : communication.describe(proposal, signal),
+        : proposal.action === 'NOD_agent_update'
+          ? agents.describe(proposal, signal, communication.describe, (channel, text, literal) =>
+              Boolean(channels?.canDeliverLiteral(channel, text, literal)),
+            )
+          : communication.describe(proposal, signal),
     captureAnalytics,
     createErrorRedactor(secrets),
     (input, signal) => ledger.forOwner(() => trust.classifyRepeatedAction(input, signal)),
@@ -2537,7 +2556,10 @@ async function initializeApplication(
   const submittedMessages = createUserMessageService({
     confirmAction: approvals.chat,
     taskReply: tasks.resolveReply,
-    startChat: tasks.startChat,
+    startChat: async (client, chat) => {
+      await tasks.startChat(client, chat);
+      if (chat.agentId) await agents.attach(client, chat.agentId, chat.sessionId);
+    },
     accepted: ownerMessageAccepted,
   });
   const userMessages = {
@@ -2679,6 +2701,7 @@ async function initializeApplication(
       checkTyping: jobs.apply.isApplyChat,
       settleTask: tasks.settle,
       taskLedger: tasks.read,
+      agentContext: agents.context,
       task: async (turn, raw, sourceMessageId, priorMessageId, priorHandoff) => {
         const request = raw as { action?: unknown; model?: unknown } | undefined;
         if (request?.action === 'start' && request.model) {
@@ -2890,6 +2913,17 @@ async function initializeApplication(
       audioReplies: async () => (await speechPreferences.get()).speechReply,
       manage: async (turn, action, args, { admit, signal, ...provenance }) => {
         if (action === 'pages') return pages.execute({ ...turn, signal }, args);
+        if (action === 'agent_update')
+          return agents.request(turn.turnId, args, {
+            check: (input) => trust.check(turn, 'NOD_agent_update', input, signal),
+            ask: (input, decision) =>
+              approvals.request(turn, 'NOD_agent_update', input, {
+                ...provenance,
+                signal,
+                admit,
+                ...decision,
+              }),
+          });
         if (action === 'jobs')
           return jobs.execute(turn, args, {
             signal,
@@ -2980,8 +3014,12 @@ async function initializeApplication(
           const prepared = action.startsWith('schedule_')
             ? await personal.prepareScheduleChange(action, args)
             : undefined;
+          const chat =
+            action === 'model_select'
+              ? await chatModelArgs(pool, ownerId, turn.turnId, args)
+              : undefined;
           const input: Record<string, unknown> =
-            prepared?.input ?? (await personal.validateReview(action, args));
+            prepared?.input ?? (await personal.validateReview(action, chat?.args ?? args));
           const current = prepared?.before ?? undefined;
           if (action === 'schedule_pause' && current?.enabled === false)
             return personal.getSchedule(String(input.id));
@@ -2993,7 +3031,7 @@ async function initializeApplication(
           const rules = 'rules' in input ? preferences?.rules : undefined;
           const targetModel =
             action === 'model_select'
-              ? await describeModelChoice(input)
+              ? await describeModelChoice(input, chat?.chat)
               : action === 'schedule_create' && input.model
                 ? await describeModelChoice({
                     scope: 'schedule',
@@ -3503,6 +3541,7 @@ async function initializeApplication(
     attributeAudioUsage: ledger.attributeMediaUsage,
     verification: chatVerification,
     taskLedger: tasks.read,
+    agents: agents.list,
     activity: activity.current,
     planningTasks: onboardingSuggestions.planning,
     computer,
@@ -3600,6 +3639,7 @@ async function initializeApplication(
   onboardingSuggestions.registerRoutes(app);
   onboardingProfile.registerRoutes(app);
   tasks.registerRoutes(app);
+  agents.registerRoutes(app);
   jobs.registerRoutes(app);
   pages.registerRoutes(app);
   triage.registerRoutes(app);
@@ -3744,6 +3784,7 @@ async function initializeApplication(
         onInserted,
         stopSignal,
         sessionId,
+        chatAgent,
       ) =>
         (
           await userMessages.submit(text, attachments, {
@@ -3756,8 +3797,11 @@ async function initializeApplication(
             onInserted,
             stopSignal,
             ...(sessionId ? { sessionId } : {}),
+            ...(chatAgent ? { chatAgent } : {}),
           })
         ).turnId,
+      topicAgent: agents.forTopic,
+      answerRefusal: agents.answerRefusal,
       stopSignal,
       messageAccepted: ownerMessageAccepted,
       answer: (text, channel, replyToMessageId, shownMessageId) =>
