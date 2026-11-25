@@ -43,6 +43,7 @@ export interface Message {
   work?: { kind: 'task' | 'schedule'; id: string; title: string; turnId?: string };
   taskId?: string | null;
   agent?: string;
+  agentId?: string;
 }
 export type ApprovalState = 'pending' | 'working' | 'done' | 'declined' | 'expired' | 'uncertain';
 export interface MessageApproval {

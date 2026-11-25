@@ -11,7 +11,7 @@ import {
 import type { Artifact } from '../../shared/contracts';
 import { api, errorMessage } from '../lib/api';
 import { cn } from '../lib/utils';
-import { FileImage, Pencil } from './icons';
+import { Bot, FileImage, Pencil } from './icons';
 import { Button, Input, Notice } from './ui';
 
 export type BotLook = Pick<Agent, 'emoji' | 'color' | 'imageId'>;
@@ -76,14 +76,19 @@ export function useShownBots(agents: Agent[]) {
   }, [agents]);
 }
 
-export function BotName({ name }: { name: string }) {
-  const key = name.toLocaleLowerCase();
+export function BotName({ name, agentId }: { name: string; agentId?: string }) {
   const bot = useSyncExternalStore(watchBots, currentBots, currentBots).find(
-    (agent) => agent.name.toLocaleLowerCase() === key,
+    ({ id }) => id === agentId,
   );
   return (
     <span className="message-agent">
-      {bot && <BotPicture bot={bot} size="xs" />}
+      {bot ? (
+        <BotPicture bot={bot} size="xs" />
+      ) : (
+        <span className="bot-picture" data-size="xs" data-color="mist" aria-hidden="true">
+          <Bot size={10} />
+        </span>
+      )}
       {name}
     </span>
   );

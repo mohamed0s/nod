@@ -233,7 +233,7 @@ export interface AppDependencies {
   taskLedger?: (threadId?: string) => Promise<import('../shared/contracts.ts').Task[]>;
   agents?: (threadId: string) => Promise<import('../shared/agents.ts').Agent[]>;
   rooms?: (threadId: string) => Promise<import('../shared/rooms.ts').Room[]>;
-  speakers?: (turnIds: string[]) => Promise<Map<string, string>>;
+  speakers?: (turnIds: string[]) => Promise<Map<string, { name: string; agentId: string | null }>>;
   activity?: () => Promise<Activity[]>;
   planningTasks?: () => string | undefined;
   rateLimit?: boolean;
@@ -277,8 +277,10 @@ export async function createApp(dependencies: AppDependencies = {}) {
             }
           : message,
       );
-      const agent = message.role === 'assistant' && speakers?.get(message.turnId ?? '');
-      return agent ? { ...view, agent } : view;
+      const speaker = message.role === 'assistant' && speakers?.get(message.turnId ?? '');
+      return speaker
+        ? { ...view, agent: speaker.name, ...(speaker.agentId ? { agentId: speaker.agentId } : {}) }
+        : view;
     });
   }
   const app = Fastify({

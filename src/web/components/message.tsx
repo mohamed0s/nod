@@ -785,7 +785,7 @@ export function MessageBubble({
                 );
               }}
             >
-              {message.agent && <BotName name={message.agent} />}
+              {message.agent && <BotName name={message.agent} agentId={message.agentId} />}
               {visibleReply && <MessageQuote message={visibleReply} />}
               {cardText?.lead && (
                 <MessageText text={cardText.lead} connectedAppIds={connectedAppIds} />
