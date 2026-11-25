@@ -1150,6 +1150,7 @@ async function initializeApplication(
     },
     memory,
     agentMemory: (id) => agentMemory.service(id),
+    historyChat: (turnId) => agentMemory.historyChat(turnId),
     learnedSkills,
     models: adapters.models,
     localFilesAvailable: Boolean(adapters.trash),

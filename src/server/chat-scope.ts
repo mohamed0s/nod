@@ -5,6 +5,7 @@ type Database = Pick<Pool | PoolClient, 'query'>;
 export interface Chat {
   id: string | null;
   title: string;
+  within?: string[];
 }
 
 export const turnChatSql = (turn: string) =>

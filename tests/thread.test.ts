@@ -13464,6 +13464,16 @@ test(
         curator,
         documents: { shared: sharedReflection, list: () => agentMemory.reflected() },
       });
+      await memory.edit((tree) => {
+        tree.entries.push({
+          area: 'about',
+          slug: 'town',
+          text: 'Lives in Synthetic Town.',
+          origin: 'inferred',
+          updated: new Date().toISOString(),
+          sources: [randomUUID()],
+        });
+      });
       for (const document of [memory, agentMemory.service(ids.own), agentMemory.service(ids.both)])
         await document.edit((tree) => {
           tree.reflected = nilMark;
@@ -13483,7 +13493,10 @@ test(
         if (said.includes('Synthetic City'))
           return {
             ops: [
-              add(undefined, 'about', 'city', 'I moved to Synthetic City'),
+              {
+                ...add(undefined, 'about', 'city', 'I moved to Synthetic City'),
+                replaces: ['about/town'],
+              },
               add('agent', 'routines', 'delta', 'The Delta lead replied on Monday'),
             ],
           };
@@ -13502,7 +13515,7 @@ test(
       assert.doesNotMatch(JSON.stringify(call('synthetic stamps').messages), /City|Gamma/);
       assert.doesNotMatch(JSON.stringify(call('Synthetic City').messages), /stamps|Gamma/);
       assert.ok(!('agentMemory' in call('synthetic stamps')));
-      assert.ok('agentMemory' in call('Synthetic City') && !('memory' in call('Synthetic City')));
+      assert.ok('agentMemory' in call('Synthetic City') && 'memory' in call('Synthetic City'));
       assert.ok('agentMemory' in call('Gamma') && 'memory' in call('Gamma'));
       const texts = async (document: MemoryService) =>
         (await document.load()).entries.map(({ text }) => text).toSorted();
@@ -13517,6 +13530,11 @@ test(
         'The Gamma report is due Friday.',
       ]);
       assert.deepEqual(await texts(agentMemory.service(ids.foreign)), []);
+      assert.ok(
+        (await memory.load()).archive.some(
+          ({ text, reason }) => text === 'Lives in Synthetic Town.' && reason === 'superseded',
+        ),
+      );
       assert.equal(await learning.reflect(), 0);
 
       assert.deepEqual(await agentMemory.context(main.turnId), { memory: await memory.context() });

@@ -163,6 +163,7 @@ export function createMemoryLearning(options: {
     }
     const result = await memory.edit((fresh) => {
       if (fresh.reflected !== tree.reflected) return;
+      if (routed) fresh.sensitive = routed.sensitive;
       const { applied: operations } = applyOps(fresh, ops, messages, new Date().toISOString());
       fresh.reflected = mark;
       fresh.retries = 0;

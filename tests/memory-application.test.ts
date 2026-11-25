@@ -38,6 +38,7 @@ type Step = {
   tool: string;
   args: Record<string, unknown>;
   rejected?: boolean;
+  check?: (result: unknown) => void;
 };
 
 test(
@@ -121,7 +122,10 @@ test(
                 const plan = input ? plans.get(JSON.parse(input).currentInstruction) : undefined;
                 for (const step of plan?.steps ?? []) {
                   if (step.rejected) await assert.rejects(run(options, step));
-                  else await run(options, step);
+                  else {
+                    const result = await run(options, step);
+                    step.check?.(result);
+                  }
                 }
                 options.onEvent({
                   type: 'final',
@@ -779,11 +783,45 @@ test(
           assert.match(ownContext, /This agent keeps its own memory index/);
           assert.doesNotMatch(ownContext, /Synthetic manager is Robin Example/);
           const asked = JSON.parse(rememberInputs.at(-1)!);
-          assert.ok('agentMemory' in asked && !('memory' in asked));
+          assert.ok('agentMemory' in asked && 'memory' in asked);
           assert.ok((await sharedNotes()).includes('Lives in Synthetic Town.'));
           assert.ok((await sharedNotes()).includes('Prefers synthetic tea.'));
           assert.ok(!(await sharedNotes()).includes('The ledger closes on the 5th.'));
           assert.deepEqual(await agentNotes(), ['The ledger closes on the 5th.']);
+
+          const town = (await view()).notes.find(
+            (note) => note.text === 'Lives in Synthetic Town.',
+          )!.path;
+          rememberAnswer = (input) => ({
+            ops: [
+              {
+                ...op(
+                  input,
+                  'owner',
+                  'about',
+                  'Lives in Synthetic City.',
+                  'I moved to Synthetic City',
+                ),
+                replaces: [town],
+              },
+            ],
+          });
+          const history = (others: boolean): Step => ({
+            ...personal('history_search', { query: 'short synthetic reports city', chats: 'all' }),
+            check: (result) => {
+              assert.match(JSON.stringify(result), /Synthetic City/);
+              assert[others ? 'match' : 'doesNotMatch'](
+                JSON.stringify(result),
+                /short synthetic reports/,
+              );
+            },
+          });
+          await inChat('Remember that I moved to Synthetic City.', [learn(), history(false)]);
+          assert.ok((await sharedNotes()).includes('Lives in Synthetic City.'));
+          assert.ok(!(await sharedNotes()).includes('Lives in Synthetic Town.'));
+          assert.ok(
+            (await view()).archive.some((item) => item.text === 'Lives in Synthetic Town.'),
+          );
 
           rememberAnswer = (input) => ({
             ops: [
@@ -805,7 +843,7 @@ test(
             personal('memory_forget', { path: ledgerPath, agent: randomUUID() }),
           ]);
           assert.deepEqual(await agentNotes(), []);
-          assert.ok((await sharedNotes()).includes('Lives in Synthetic Town.'));
+          assert.ok((await sharedNotes()).includes('Lives in Synthetic City.'));
 
           const revision = (await request('GET', '/api/state'))
             .json<{ agents: Array<{ id: string; revision: number }> }>()
@@ -833,8 +871,9 @@ test(
           const bothContext = await inChat('Remember that the ledger export is a CSV.', [
             learn(),
             personal('memory_read', { path: 'about', scope: 'shared' }),
+            history(true),
           ]);
-          assert.match(bothContext, /Lives in Synthetic Town/);
+          assert.match(bothContext, /Lives in Synthetic City/);
           assert.match(bothContext, /This agent keeps its own memory index/);
           assert.ok('memory' in JSON.parse(rememberInputs.at(-1)!));
           assert.deepEqual(await agentNotes(), ['The ledger export is a CSV.']);
@@ -855,7 +894,7 @@ test(
             personal('memory_control', { clear: true, quote: clearAgent }),
           ]);
           assert.deepEqual(await agentNotes(), []);
-          assert.ok((await sharedNotes()).includes('Lives in Synthetic Town.'));
+          assert.ok((await sharedNotes()).includes('Lives in Synthetic City.'));
 
           const foreign = randomUUID();
           await pool.query(

@@ -8,7 +8,7 @@ import { memoryFileName, memoryMarkdown } from '../shared/memory-export.ts';
 import type { AgentScope } from './agents.ts';
 import type { CaptureAnalytics, MemoryChange } from './analytics.ts';
 import type { ApprovalDescription, ApprovalPresentation } from './approvals.ts';
-import { messageChatSql } from './chat-scope.ts';
+import { messageChatSql, turnChat } from './chat-scope.ts';
 import { createMemoryService, type MemoryService } from './memory.ts';
 import { applyOps, type Rejection } from './memory-ops.ts';
 import {
@@ -50,38 +50,18 @@ function failure(message: string, statusCode: number) {
   return Object.assign(new Error(message), { statusCode });
 }
 
-function blind(op: unknown) {
-  const value = Object(op) as { op?: unknown; replaces?: unknown };
-  return value.op === 'archive' || (Array.isArray(value.replaces) && value.replaces.length > 0);
-}
-
 export function routeMemory(shared: Document, own: Document, agent: RoutedDocument) {
   const now = () => new Date().toISOString();
   const split = (ops: unknown[]) => {
-    const routed = { shared: [] as unknown[], own: [] as unknown[], blind: 0 };
-    for (const op of ops)
-      if (agentNote.safeParse(op).success) routed.own.push(op);
-      else if (!agent.readsShared && blind(op)) routed.blind++;
-      else routed.shared.push(op);
+    const routed = { shared: [] as unknown[], own: [] as unknown[] };
+    for (const op of ops) routed[agentNote.safeParse(op).success ? 'own' : 'shared'].push(op);
     return routed;
   };
-  const writes = (routed: ReturnType<typeof split>) =>
-    [
-      { document: shared, ops: routed.shared, scope: 'shared' as const, off: 'Shared memory' },
-      {
-        document: own,
-        ops: routed.own,
-        scope: 'agent' as const,
-        off: `The memory of the agent ${JSON.stringify(agent.name)}`,
-      },
-    ].filter(({ ops }) => ops.length);
   return {
     sensitive: shared.tree.sensitive,
-    instructions: ` This chat belongs to the owner's agent ${JSON.stringify(agent.name)}, which keeps its own memory. Give every op "about": "owner" when its note is about the user: who they are, their preferences, their life or facts about them; or "about": "agent" when it is a detail of this agent's own work, such as its tasks, projects, sources or progress. When unsure, use "owner". ${agent.readsShared ? 'memory is the shared index, for "owner" notes, and agentMemory is this agent\'s index, for "agent" notes; an archive or replaces path names an entry of the index its about selects.' : 'agentMemory is this agent\'s index, for "agent" notes. The shared index is not shown, so never archive or replace an "owner" note.'}`,
+    instructions: ` This chat belongs to the owner's agent ${JSON.stringify(agent.name)}, which keeps its own memory. Give every op "about": "owner" when its note is about the user: who they are, their preferences, their life or facts about them; or "about": "agent" when it is a detail of this agent's own work, such as its tasks, projects, sources or progress. When unsure, use "owner". memory is the shared index, for "owner" notes, and agentMemory is this agent's index, for "agent" notes; an archive or replaces path names an entry of the index its about selects.`,
     input: {
-      ...(agent.readsShared
-        ? { memory: JSON.stringify(indexLayout(shared.tree, { tentative: true })) }
-        : {}),
+      memory: JSON.stringify(indexLayout(shared.tree, { tentative: true })),
       agentMemory: JSON.stringify(indexLayout(own.tree, { tentative: true })),
     },
     async save(
@@ -91,26 +71,43 @@ export function routeMemory(shared: Document, own: Document, agent: RoutedDocume
     ) {
       const routed = split(ops);
       const at = now();
-      const rejected: Rejection[] = Array.from({ length: routed.blind }, () => 'missing');
-      const planned = writes(routed);
-      for (const { document, ops, off } of planned) {
-        if (!document.tree.enabled) throw new Error(`Nothing was saved. ${off} is turned off.`);
+      const planned = [
+        { document: shared, ops: routed.shared, scope: 'shared' as const, name: 'shared memory' },
+        {
+          document: own,
+          ops: routed.own,
+          scope: 'agent' as const,
+          name: `the memory of the agent ${JSON.stringify(agent.name)}`,
+        },
+      ].filter(({ ops }) => ops.length);
+      const rejected: Rejection[] = [];
+      for (const { document, ops, name } of planned) {
+        if (!document.tree.enabled) throw new Error(`Nothing was saved: ${name} is turned off.`);
         rejected.push(
           ...applyOps(structuredClone(document.tree), ops, messages, at, 'stated').rejected,
         );
       }
       if (rejected.length) refuse(rejected);
       const applied: Array<ReturnType<typeof applyOps>['applied'][number] & { memory: Scope }> = [];
-      for (const { document, ops, scope } of planned)
-        applied.push(
-          ...(await document.memory.edit((fresh) => {
-            if (fresh.generation !== document.tree.generation)
-              throw new Error('Memory changed while this note was being prepared. Save it again.');
-            const result = applyOps(fresh, ops, messages, at, 'stated');
-            if (result.rejected.length) refuse(result.rejected);
-            return result.applied.map((change) => ({ ...change, memory: scope }));
-          })),
-        );
+      for (const [index, { document, ops, scope, name }] of planned.entries())
+        try {
+          applied.push(
+            ...(await document.memory.edit((fresh) => {
+              if (fresh.generation !== document.tree.generation)
+                throw new Error(
+                  'Memory changed while this note was being prepared. Save it again.',
+                );
+              const result = applyOps(fresh, ops, messages, at, 'stated');
+              if (result.rejected.length) refuse(result.rejected);
+              return result.applied.map((change) => ({ ...change, memory: scope }));
+            })),
+          );
+        } catch (error) {
+          if (!index) throw error;
+          throw new Error(
+            `Part of this was saved, to ${planned[0]!.name}, but saving to ${name} failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       return applied;
     },
     async share(ops: unknown[], messages: Array<{ id: string; text: string }>) {
@@ -294,6 +291,21 @@ export function createAgentMemory(options: {
     }));
   }
 
+  async function historyChat(turnId: string | undefined) {
+    const chat = await turnChat(pool, ownerId, turnId);
+    if (!chat || !turnId) return chat;
+    const scoped = await documents(turnId);
+    if (!scoped.own || scoped.readsShared) return chat;
+    const { rows } = await pool.query<{ chat_id: string }>(
+      'SELECT chat_id FROM agent_chats WHERE owner_id=$1 AND agent_id=$2',
+      [ownerId, scoped.agent.id],
+    );
+    return {
+      ...chat,
+      within: [...new Set([...(chat.id ? [chat.id] : []), ...rows.map(({ chat_id }) => chat_id)])],
+    };
+  }
+
   async function remove(agentId: string) {
     await options.store.remove(key(agentId));
     services.delete(key(agentId));
@@ -302,25 +314,27 @@ export function createAgentMemory(options: {
   async function share(own: MemoryService, target: string) {
     const entry = locate(await own.load(), path.parse(target));
     if (!entry) throw failure('This note is no longer in memory.', 404);
-    await shared.edit(
-      (tree) => {
-        if (areaEntries(tree, entry.area).some((item) => same(item.text, entry.text))) return;
-        const before = tree.entries;
-        tree.entries = [
-          ...tree.entries,
-          {
-            ...entry,
-            slug: freeSlug(tree, entry.area, entry.slug),
-            updated: new Date().toISOString(),
-          },
-        ];
-        if (!fits(tree)) {
-          tree.entries = before;
-          throw failure('Shared memory is full.', 409);
-        }
-      },
-      { allowDisabled: true },
-    );
+    if (!(await shared.enabled()))
+      throw failure(
+        'Shared memory is turned off, so the note was not moved. Turn on Save new notes in shared memory first.',
+        409,
+      );
+    await shared.edit((tree) => {
+      if (areaEntries(tree, entry.area).some((item) => same(item.text, entry.text))) return;
+      const before = tree.entries;
+      tree.entries = [
+        ...tree.entries,
+        {
+          ...entry,
+          slug: freeSlug(tree, entry.area, entry.slug),
+          updated: new Date().toISOString(),
+        },
+      ];
+      if (!fits(tree)) {
+        tree.entries = before;
+        throw failure('Shared memory is full.', 409);
+      }
+    });
     await own.forget(target);
   }
 
@@ -388,7 +402,14 @@ export function createAgentMemory(options: {
         )
         .send(memoryMarkdown(await memory.view(), now));
     });
-    route('patch', '', (memory, body) => memory.settings(body));
+    route('patch', '', (memory, body) => {
+      if (Object(body).sensitive !== undefined)
+        throw failure(
+          'Include sensitive details is one setting for shared and agent memory. Change it in shared memory.',
+          400,
+        );
+      return memory.settings(body);
+    });
     route('post', '/notes', (memory, body) => memory.add(body), 'save');
     app.post(`${base}/import`, async (request): Promise<MemoryUpdate> => {
       const memory = await documentOf(request.params);
@@ -429,6 +450,7 @@ export function createAgentMemory(options: {
     target,
     describe,
     reflected,
+    historyChat,
     remove,
     registerRoutes,
   };

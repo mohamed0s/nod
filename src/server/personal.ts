@@ -15,13 +15,14 @@ import type { MemoryChange } from './analytics.ts';
 import { modelSelectionInput, type createModelService } from './models.ts';
 import { defaultEffort } from '../shared/model-defaults.ts';
 import type { ModelRoute, ModelSelection } from '../shared/models.ts';
-import { messageChatSql, turnChat } from './chat-scope.ts';
+import { messageChatSql, turnChat, type Chat } from './chat-scope.ts';
 
 type ModelScope = 'chat' | 'schedules' | 'background' | 'schedule' | 'task';
 
 type PersonalDependencies = ScheduleDependencies & {
   memory?: MemoryService;
   agentMemory?: (agentId: string) => MemoryService;
+  historyChat?: (turnId: string | undefined) => Promise<Chat | undefined>;
   learnedSkills?: LearnedSkills;
   models?: ReturnType<typeof createModelService>;
   localFilesAvailable?: boolean;
@@ -308,7 +309,12 @@ export function createPersonalService(dependencies: PersonalDependencies) {
       return result;
     }
     if (action === 'history_search')
-      return searchHistory(args, await turnChat(pool, ownerId, provenance?.turnId));
+      return searchHistory(
+        args,
+        await (dependencies.historyChat ?? ((turnId) => turnChat(pool, ownerId, turnId)))(
+          provenance?.turnId,
+        ),
+      );
     throw new Error('This personal-data action is not available.');
   }
 

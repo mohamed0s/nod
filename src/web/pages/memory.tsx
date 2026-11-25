@@ -1563,17 +1563,19 @@ export function Memory({
             />
             Save new notes
           </label>
-          <label className="memory-setting">
-            <Switch
-              checked={view.sensitive}
-              disabled={saving > 0}
-              onCheckedChange={(sensitive) => void setting({ sensitive })}
-            />
-            <span className="memory-setting-copy">
-              <span>Include sensitive details</span>
-              <span className="memory-setting-hint">Such as health, religion and politics</span>
-            </span>
-          </label>
+          {!memoryDocument.agent && (
+            <label className="memory-setting">
+              <Switch
+                checked={view.sensitive}
+                disabled={saving > 0}
+                onCheckedChange={(sensitive) => void setting({ sensitive })}
+              />
+              <span className="memory-setting-copy">
+                <span>Include sensitive details</span>
+                <span className="memory-setting-hint">Such as health, religion and politics</span>
+              </span>
+            </label>
+          )}
         </div>
       )}
       {settingError && <Notice>{settingError}</Notice>}
