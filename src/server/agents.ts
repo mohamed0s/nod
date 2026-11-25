@@ -12,6 +12,9 @@ import type { TrustBasis } from './trust-basis.ts';
 
 type Client = Pick<PoolClient, 'query'>;
 
+const outsideApp = 'Open this chat in the Nod app to read the exact new text before you answer.';
+const appOnly = 'Open Nod in the app to read the exact new text and answer there.';
+
 const hidden = /(?![\u200c\u200d])\p{Cf}/u;
 
 const oneLine = (max: number) =>
@@ -301,10 +304,18 @@ export function createAgents(options: {
     return {
       ...presentation,
       cardQuestion: presentation.cardQuestion ?? presentation.question,
-      question: verbatim
-        ? text
-        : `${presentation.question}\n\nOpen this chat in the Nod app to read the exact new text before you answer.`,
+      question: verbatim ? text : `${presentation.question}\n\n${outsideApp}`,
     };
+  }
+
+  async function answerRefusal(approvalId: string) {
+    const refused = await pool.query(
+      `SELECT 1 FROM approvals a JOIN messages m ON m.id=a.confirmation_message_id AND m.owner_id=a.owner_id
+       WHERE a.id=$1 AND a.owner_id=$2 AND a.action='NOD_agent_update' AND a.status='pending'
+         AND right(m.text,$3)=$4`,
+      [approvalId, ownerId, outsideApp.length, outsideApp],
+    );
+    return refused.rowCount ? appOnly : undefined;
   }
 
   async function validate(raw: Record<string, unknown>, client: Client = pool) {
@@ -374,6 +385,7 @@ export function createAgents(options: {
     validate,
     apply,
     forTopic,
+    answerRefusal,
     registerRoutes,
   };
 }

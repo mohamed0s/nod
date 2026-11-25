@@ -3731,6 +3731,7 @@ async function initializeApplication(
           })
         ).turnId,
       topicAgent: agents.forTopic,
+      answerRefusal: agents.answerRefusal,
       stopSignal,
       messageAccepted: ownerMessageAccepted,
       answer: (text, channel, replyToMessageId, shownMessageId) =>
