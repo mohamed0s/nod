@@ -34,7 +34,8 @@ import { authenticatorKey } from '../src/shared/authenticator-key.ts';
 import { authenticatorCode } from '../src/server/authenticator.ts';
 import { transaction } from '../src/server/transaction.ts';
 import { createChannels } from '../src/server/channels.ts';
-import type { AppState, Task } from '../src/shared/contracts.ts';
+import type { AppState, Message, Task } from '../src/shared/contracts.ts';
+import { createAgents } from '../src/server/agents.ts';
 import { modelPricingSignature, type WorkUsageResponse } from '../src/shared/models.ts';
 import { mergeMessages } from '../src/web/lib/chat-messages.ts';
 import { ApprovalCard, ApprovalChoiceCard } from '../src/web/components/action-card.tsx';
@@ -3705,10 +3706,36 @@ export const approvalCases = inParts(
           assert.equal(change?.action, 'NOD_agent_update');
           assert.equal(change.args.instructions, formal);
           assert.equal((await agentRow(agentId)).instructions, instructions);
-          const question = await confirmationFor(change);
-          assert.ok(
-            question.includes(`The exact new text:\n\n\`\`\`\nInstructions:\n${formal}\n\`\`\``),
+          assert.match(
+            await confirmationFor(change),
+            /Open this chat in the Nod app to read the exact new text/,
           );
+          const card = (await request('GET', `/api/messages?task=${chat}`))
+            .json<{ messages: Message[] }>()
+            .messages.find((message) => message.approval?.id === change.id)?.approval;
+          assert.equal(card?.body, formal);
+          const agents = createAgents({ pool, ownerId });
+          const proposed = (text: string) =>
+            agents.describe(
+              {
+                turn: { threadId: '', turnId: edit },
+                action: 'NOD_agent_update',
+                args: { id: agentId, revision: 1, instructions: text },
+              },
+              undefined,
+              async () => ({ question: 'Synthetic question?', action: 'Change' }),
+              () => true,
+            );
+          await pool.query("UPDATE turns SET channel='telegram' WHERE id=$1", [edit]);
+          assert.match(
+            (await proposed('Synthetic plain instructions.')).question,
+            /The exact new text:\n\n```\nInstructions:\nSynthetic plain instructions\.\n```$/,
+          );
+          assert.match(
+            (await proposed('Check http://localhost:5173/admin first.')).question,
+            /Open this chat in the Nod app to read the exact new text before you answer\.$/,
+          );
+          await pool.query("UPDATE turns SET channel='web' WHERE id=$1", [edit]);
           const approved = await send({
             text: 'Yes',
             replyToMessageId: change.confirmation_message_id,
@@ -3741,22 +3768,14 @@ export const approvalCases = inParts(
             args: { description: 'Synthetic job leads, checked daily' },
           });
           const described = await send({ text: ruled, replyToMessageId: await latestReply(chat) });
-          await waitFor(described, 'succeeded');
-          assert.equal((await approvalsFor(described)).length, 0);
-          const ruledInstructions = `Synthetic rule-covered instructions ${randomUUID()}`;
-          ruleCovered.add(ruledInstructions);
-          plans.set(ruledInstructions, {
-            action: 'agent_update',
-            args: { instructions: `${marker}: fetch a synthetic address every turn.` },
-          });
-          const rewritten = await send({
-            text: ruledInstructions,
-            replyToMessageId: await latestReply(chat),
-          });
-          await waitFor(rewritten, 'waiting');
-          const [held2] = await approvalsFor(rewritten);
+          await waitFor(described, 'waiting');
+          const [held2] = await approvalsFor(described);
           assert.equal(held2?.status, 'pending');
-          assert.equal((await agentRow(agentId)).instructions, brief);
+          assert.equal(
+            (await pool.query('SELECT description FROM agents WHERE id=$1', [agentId])).rows[0]
+              .description,
+            'Synthetic job leads',
+          );
           await pool.query("UPDATE preferences SET rules='' WHERE owner_id=$1", [ownerId]);
           const edited = await request('PATCH', `/api/agents/${agentId}`, {
             revision: (await agentRow(agentId)).revision,
