@@ -114,7 +114,7 @@ Telegram shows the task as messages Nod writes. If its first message arrives as 
 
 The web chat list shows **Main** and one chat per task of the active conversation. A message belongs to a task's chat when its turn is linked to that task, or ran in a session that task owns. Other messages belong to **Main**, including a task's first message, which shows there with the task's chip. A task's chat shows the task's card, then its own messages; `GET /api/messages?task=<task ID>` pages through them and `task=main` pages through **Main**. Each message the owner sends in a task's chat is an explicit reply to the chat's latest Nod message, so it takes the reply path above: it continues the task's session, answers only that task's question or confirmation, and reopens a finished task. On web, a main chat message without a reply target never answers a confirmation from a task's chat.
 
-Each task saves when its chat was last read in `tasks.read_at`, set by `POST /api/tasks/:id/read` when the owner reaches the chat's latest message. A task's unread count is its chat's Nod messages after that, up to 100. **Main** keeps its own read position on each device.
+Each task saves when its chat was last read in `tasks.read_at`, set by `POST /api/tasks/:id/read` when the owner reaches the chat's latest message. A task's unread count is its chat's Nod messages after that, up to 100, and a closed chat counts none. **Main** keeps its own read position on each device.
 
 Closing a chat sets `tasks.archived_at`, which hides it from the list. Only a finished or stopped task can be closed; closing an open one is refused. A later owner input to the task clears it, so a reopened task shows again. A rename uses `PATCH /api/tasks/:id` with `title`, as the Tasks page does.
 

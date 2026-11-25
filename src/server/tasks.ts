@@ -190,7 +190,7 @@ export function createTasks(options: {
            t.message_id,t.steps,t.step_index,t.revision,t.applied_revision,
            t.created_at,t.updated_at,t.closed_at,t.archived_at,
            (SELECT count(*)::int FROM (SELECT 1 FROM turns w JOIN messages m ON m.turn_id=w.id AND m.owner_id=w.owner_id
-             WHERE w.owner_id=t.owner_id AND (w.task_id=t.id OR w.session_id=t.session_id) AND ${chatTaskSql('w')}=t.id
+             WHERE t.archived_at IS NULL AND w.owner_id=t.owner_id AND (w.task_id=t.id OR w.session_id=t.session_id) AND ${chatTaskSql('w')}=t.id
                AND m.role='assistant' AND m.hidden_at IS NULL AND m.created_at>t.read_at AND NOT ${reactionReplySql('m')}
              LIMIT 100) unread) AS unread,COALESCE((SELECT r.status FROM turns r WHERE r.owner_id=t.owner_id AND r.session_id=t.session_id AND r.status='running'),u.status) AS turn_status,
            EXISTS(SELECT 1 FROM turns n WHERE n.owner_id=u.owner_id AND n.thread_id=u.thread_id
