@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Task } from '../../shared/contracts';
 import type { Agent } from '../../shared/agents';
+import type { Room } from '../../shared/rooms';
 import { taskLabels } from '../../shared/task-status';
 import { api, errorMessage } from '../lib/api';
 import { captureAnalytics } from '../lib/analytics';
 import { ActionMenu, ActionMenuItem } from './action-menu';
 import { Bot, Ellipsis, MessageCircle, Plus } from './icons';
-import { Button, Input, Notice } from './ui';
+import { Button, Dialog, Input, Notice } from './ui';
+import { NewRoomDialog } from './chat-room';
 
 const groups = [
   { label: 'Working', statuses: ['queued', 'working', 'waiting', 'scheduled'] },
@@ -17,6 +19,7 @@ const groups = [
 export function ChatList({
   tasks,
   agents,
+  rooms = [],
   chat,
   fresh,
   freshAgent,
@@ -27,6 +30,7 @@ export function ChatList({
 }: {
   tasks: Task[];
   agents: Agent[];
+  rooms?: Room[];
   chat?: string;
   fresh: boolean;
   freshAgent?: string;
@@ -44,7 +48,11 @@ export function ChatList({
   const renameNext = useRef<Task | undefined>(undefined);
   const items = useRef(new Map<string, HTMLButtonElement>());
   const renamed = useRef<string | undefined>(undefined);
-  const agentChats = new Set(agents.map((agent) => agent.chatId));
+  const [creatingRoom, setCreatingRoom] = useState(false);
+  const agentChats = new Set([
+    ...agents.map((agent) => agent.chatId),
+    ...rooms.map(({ id }) => id),
+  ]);
   const open = tasks.filter((task) => !task.archivedAt && !agentChats.has(task.id));
   useEffect(() => {
     if (renaming || !renamed.current) return;
@@ -162,6 +170,59 @@ export function ChatList({
                 </li>
               );
             })}
+          </ul>
+        </section>
+      )}
+      {(agents.length > 0 || rooms.length > 0) && (
+        <section className="chat-list-group" aria-label="Rooms">
+          <h2>Rooms</h2>
+          <ul role="list">
+            {rooms.map((room) => {
+              const task = tasks.find((item) => item.id === room.id);
+              return (
+                <li key={room.id} className="chat-list-row">
+                  <button
+                    type="button"
+                    className="chat-list-item"
+                    aria-current={chat === room.id ? 'page' : undefined}
+                    title={room.members.map(({ name }) => name).join(', ') || undefined}
+                    onClick={() => onChat(room.id)}
+                  >
+                    <span className="chat-list-dot" data-status={task?.status} aria-hidden="true" />
+                    <span className="chat-list-title">{room.name}</span>
+                    {task && <span className="sr-only">, {taskLabels[task.status]}</span>}
+                    {Boolean(unread[room.id]) && chat !== room.id && (
+                      <span className="chat-list-unread">
+                        {unread[room.id]! > 99 ? '99+' : unread[room.id]}
+                        <span className="sr-only"> unread</span>
+                      </span>
+                    )}
+                  </button>
+                </li>
+              );
+            })}
+            <li className="chat-list-row">
+              <Dialog open={creatingRoom} onOpenChange={setCreatingRoom}>
+                <button
+                  type="button"
+                  className="chat-list-item"
+                  onClick={() => setCreatingRoom(true)}
+                >
+                  <Plus size={16} aria-hidden="true" />
+                  <span className="chat-list-title">New room</span>
+                </button>
+                {creatingRoom && (
+                  <NewRoomDialog
+                    agents={agents}
+                    onCreated={async (id) => {
+                      await refresh();
+                      setCreatingRoom(false);
+                      onChat(id);
+                    }}
+                  />
+                )}
+              </Dialog>
+            </li>
           </ul>
         </section>
       )}

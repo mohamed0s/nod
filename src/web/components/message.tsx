@@ -784,6 +784,7 @@ export function MessageBubble({
                 );
               }}
             >
+              {message.agent && <span className="message-agent">{message.agent}</span>}
               {visibleReply && <MessageQuote message={visibleReply} />}
               {cardText?.lead && (
                 <MessageText text={cardText.lead} connectedAppIds={connectedAppIds} />

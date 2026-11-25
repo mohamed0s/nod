@@ -56,6 +56,7 @@ import { TaskChip, TaskLine, TaskStackCard } from '../components/task-stack';
 import { TaskCard } from './tasks';
 import { MainChatModel, NewChatModel, TaskChatModel } from '../components/chat-model';
 import { NewAgentChat, TaskChatAgent } from '../components/chat-agent';
+import { RoomHeader } from '../components/chat-room';
 import { recordingSource } from '../lib/recording';
 import { money } from '../lib/money';
 import type { ImagePreview } from '../components/attachment-images';
@@ -370,6 +371,7 @@ export function Chat({
 }) {
   const dateFormat = useDateFormat();
   const chatTask = chatId ? state.tasks?.find((task) => task.id === chatId) : undefined;
+  const chatRoom = chatId ? state.rooms?.find((room) => room.id === chatId) : undefined;
   const inChat = (message: Message) =>
     !startsChat &&
     (chatId ? message.taskId === chatId || message.id === chatTask?.messageId : !message.taskId);
@@ -2408,12 +2410,18 @@ export function Chat({
                   live={live.find((item) => item.taskId === chatTask.id)}
                   pinned
                 />
-                <TaskChatAgent
-                  task={chatTask}
-                  agent={state.agents?.find((agent) => agent.chatId === chatTask.id)}
-                  refresh={refresh}
-                />
-                <TaskChatModel task={chatTask} />
+                {chatRoom ? (
+                  <RoomHeader room={chatRoom} agents={state.agents ?? []} refresh={refresh} />
+                ) : (
+                  <>
+                    <TaskChatAgent
+                      task={chatTask}
+                      agent={state.agents?.find((agent) => agent.chatId === chatTask.id)}
+                      refresh={refresh}
+                    />
+                    <TaskChatModel task={chatTask} />
+                  </>
+                )}
                 {browserLink && (
                   <a
                     href={`/browser?task=${encodeURIComponent(chatTask.id)}`}

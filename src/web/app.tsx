@@ -256,6 +256,7 @@ function Workspace({
                   <ChatList
                     tasks={state.tasks ?? []}
                     agents={state.agents ?? []}
+                    rooms={state.rooms ?? []}
                     chat={chat.id}
                     fresh={Boolean(chat.fresh) && !chat.agent}
                     freshAgent={chat.fresh ? chat.agent : undefined}
