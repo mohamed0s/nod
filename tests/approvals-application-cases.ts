@@ -4030,36 +4030,78 @@ export const approvalCases = inParts(
             { emoji: '🌱', image_id: null },
           );
 
+          const expiry = async () =>
+            (await pool.query('SELECT expires_at FROM artifacts WHERE id=$1', [picture])).rows[0]
+              .expires_at as Date | null;
+          const twin = await request('POST', '/api/agents', {
+            name: 'Synthetic twin helper',
+            imageId: picture,
+          });
+          assert.equal(twin.statusCode, 200, twin.body);
+          const twinId = twin.json().id as string;
           const cleared = await request('PATCH', `/api/agents/${id}`, {
             revision: await revision(),
             imageId: null,
           });
           assert.equal(cleared.statusCode, 200, cleared.body);
-          assert.ok(
-            (await pool.query('SELECT expires_at FROM artifacts WHERE id=$1', [picture])).rows[0]
-              .expires_at <= new Date(),
+          assert.equal(await expiry(), null);
+          assert.equal((await request('DELETE', `/api/agents/${twinId}`)).statusCode, 200);
+          assert.ok((await expiry())! <= new Date());
+
+          const attached = await upload('attached.png', 'image/png', png);
+          await pool.query('UPDATE artifacts SET expires_at=NULL WHERE id=$1', [attached]);
+          assert.equal(
+            await refused({ imageId: attached }, 404),
+            'The picture is unavailable. Upload it again.',
           );
 
-          const plain = randomUUID();
-          await pool.query("INSERT INTO agents(id,owner_id,name) VALUES($1,$2,'Synthetic plain')", [
-            plain,
-            ownerId,
-          ]);
-          const migrated = createAgents({ pool, ownerId });
-          await migrated.initialize();
-          await migrated.initialize();
-          const row = (
-            await pool.query('SELECT emoji,color,image_id FROM agents WHERE id=$1', [plain])
-          ).rows[0];
-          assert.ok(agentDefaultEmoji.includes(row.emoji));
-          assert.ok(agentColors.includes(row.color));
-          assert.equal(row.image_id, null);
-          assert.deepEqual(
-            (await pool.query('SELECT emoji,color FROM agents WHERE id=$1', [id])).rows[0],
-            { emoji: '🦉', color: 'ink' },
-          );
+          const tools = createAgents({ pool, ownerId });
+          const review = {
+            check: async () => assert.fail('A picture field reached the action check.'),
+            ask: async () => assert.fail('A picture field reached an approval.'),
+          };
+          for (const change of [{ emoji: '🦉' }, { color: 'ink' }, { imageId: picture }]) {
+            await assert.rejects(
+              tools.requestCreate({ name: 'Synthetic drawn bot', ...change }, review),
+              z.ZodError,
+            );
+            await assert.rejects(tools.request(first.json().turnId, change, review), z.ZodError);
+          }
 
-          await pool.query('DELETE FROM agents WHERE id=ANY($1::uuid[])', [[plain, foreignBot]]);
+          const legacy = `test_bot_pictures_${randomUUID().replaceAll('-', '')}`;
+          await admin.query(`CREATE SCHEMA ${legacy}`);
+          const legacyPool = new pg.Pool({
+            connectionString: process.env.TEST_DATABASE_URL,
+            options: `-c search_path=${legacy}`,
+          });
+          try {
+            await legacyPool.query(`CREATE TABLE tasks (id uuid PRIMARY KEY, owner_id text NOT NULL);
+              CREATE TABLE agents (id uuid PRIMARY KEY, owner_id text NOT NULL, name text NOT NULL,
+                chat_id uuid REFERENCES tasks(id) ON DELETE SET NULL)`);
+            const insert = (name: string) =>
+              legacyPool.query('INSERT INTO agents(id,owner_id,name) VALUES($1,$2,$3)', [
+                randomUUID(),
+                ownerId,
+                name,
+              ]);
+            await insert('Synthetic old bot');
+            const migrated = createAgents({ pool: legacyPool, ownerId });
+            await migrated.initialize();
+            await migrated.initialize();
+            await insert('Synthetic bot made from chat');
+            const rows = (await legacyPool.query('SELECT emoji,color,image_id FROM agents')).rows;
+            assert.equal(rows.length, 2);
+            for (const row of rows) {
+              assert.ok(agentDefaultEmoji.includes(row.emoji));
+              assert.ok(agentColors.includes(row.color));
+              assert.equal(row.image_id, null);
+            }
+          } finally {
+            await legacyPool.end();
+            await admin.query(`DROP SCHEMA ${legacy} CASCADE`);
+          }
+
+          await pool.query('DELETE FROM agents WHERE id=$1', [foreignBot]);
           await pool.query('DELETE FROM artifacts WHERE id=$1', [foreignPicture]);
           assert.equal((await request('DELETE', `/api/agents/${id}`)).statusCode, 200);
         },
@@ -5508,6 +5550,7 @@ export const approvalCases = inParts(
           }>().messages;
           const scoutReply = (await replyOf(scoutTurn)).id;
           assert.equal(roomPage.find((message) => message.id === scoutReply)?.agent, scout);
+          assert.equal(roomPage.find((message) => message.id === scoutReply)?.agentId, ids[scout]);
           assert.equal(roomPage.find((message) => message.text === look)?.agent, undefined);
 
           const relay = `@${scout} synthetic ask the writer to mail the venue ${tag}`;
