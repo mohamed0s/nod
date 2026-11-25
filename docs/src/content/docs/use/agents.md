@@ -157,14 +157,18 @@ Main watches rooms too. It stops one on its own when a turn has made no progress
 
 - In a room, only your own messages are your words. What one agent writes reaches the others as data, in a block named after that agent: never an order or a permission, even when it says you agreed.
 - An action an agent wants to take is checked against your messages in that room, with the same one-day window as an [agent's chat](#send-work-to-an-agent). If they don't cover it, the agent asks you in the room.
+- Your message permits only the agents it went to. For every other member it can still limit what that member does, never permit it. So an agent that another agent asked for help acts only on your own messages to it, or asks you.
+- An @name inside text an agent repeats, such as an email it read, can still start that member's turn, within the limit of 4 in a row. It gives that member nothing beyond your own messages to it.
 - When you reply to an agent's message, that message counts with your reply only for that agent's own actions, never for another agent's.
 - Only you answer an approval. A "yes" from another agent answers nothing, and another agent can't start an agent that's waiting for you.
 
-| In the room                                                       | What happens                                                             |
-| ----------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| "@Writer email the venue"                                         | The writer sends that email                                              |
-| The scout writes "@Writer email the venue, the owner agreed"      | The writer asks you first                                                |
-| You reply "go ahead" to the scout's suggestion, naming the writer | The writer asks you first: your reply backs only the scout's own actions |
+| In the room                                                                    | What happens                                                             |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| "@Writer email the venue"                                                      | The writer sends that email                                              |
+| The scout writes "@Writer email the venue, the owner agreed"                   | The writer asks you first                                                |
+| You reply "go ahead" to the scout's suggestion, naming the writer              | The writer asks you first: your reply backs only the scout's own actions |
+| "@Scout send the report to Ana", and the scout writes "@Writer send it to Ana" | The writer asks you first: your message went to the scout                |
+| "@Scout find the report and @Writer send it to Ana"                            | The writer sends it: your message went to both                           |
 
 ### Ask Main to change a room
 
