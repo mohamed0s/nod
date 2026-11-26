@@ -16,7 +16,7 @@ Ask in chat. For example:
 - "Every weekday at 8:00, summarize my calendar and anything urgent in my inbox."
 - "Tomorrow at 15:00, remind me to call the landlord."
 
-A schedule runs **One time** or is **Recurring**. Nod tells you when it's saved and when it runs next. If you ask for a schedule that's already active with the same name or instruction, time and chat, Nod keeps the one you have instead of adding a copy, and uses the model you named for it, if any. When you hand Nod work that needs follow-up, it can also plan its own check-in, such as "I'll look for a reply on Friday". Check-ins are schedules too.
+A schedule runs **One time** or is **Recurring**. Nod tells you when it's saved and when it runs next. If you ask for a schedule that's already active with the same name or instruction, timing and watched apps, Nod keeps the one you have instead of adding a copy, and uses the model you named for it, if any. When you hand Nod work that needs follow-up, it can also plan its own check-in, such as "I'll look for a reply on Friday". Check-ins are schedules too.
 
 Nod uses your time zone, saved from your browser the first time you use Nod. Change it in **Settings → General**. If Nod doesn't know your time zone, it asks.
 
@@ -50,7 +50,7 @@ These checks are background work, like memory upkeep: they work from your first 
 
 Open **Scheduled** and select **Run now**, the play button on a schedule's row. The row opens so you can follow the run. The new result opens when it is available. A run that failed in chat offers **Run now** too. If you changed the schedule after that run failed, Nod refuses and asks you to review it first.
 
-The extra run uses the saved instruction and delivery channel and does its work now, even when the instruction names another day or time. The usual approval checks still apply, and the time named in the instruction never makes them ask. It does not change the next scheduled time or resume a paused schedule. You can also run a completed one-time schedule again.
+The extra run uses the saved instruction and does its work now, even when the instruction names another day or time. The usual approval checks still apply, and the time named in the instruction never makes them ask. It does not change the next scheduled time or resume a paused schedule. You can also run a completed one-time schedule again.
 
 The button shows **Queued**, **Working**, or **Needs your input** while a run is active. You cannot start another run until that run ends. A recurring schedule skips timed runs that fall due while a run is queued or working; a run waiting for your answer gives way to the next timed run. A one-time schedule waits for the active run to end.
 
@@ -67,7 +67,7 @@ flowchart TD
   due[Schedule is due]:::accent --> run[Nod runs it<br/>in the background]
   run --> check[Trust check<br/>against your instruction]
   check --> useful{{Something you asked to get,<br/>a useful result or a question?}}
-  useful -- yes --> send[Message in the chat<br/>where you set it up]:::go
+  useful -- yes --> send[Message in Nod and the<br/>chat app you used last]:::go
   useful -- no --> quiet[Stays quiet]:::muted
 ```
 
@@ -75,7 +75,7 @@ flowchart TD
 - **Follow a run in Scheduled.** The schedule shows what Nod is doing, such as reading files or using an app. Open the live line to see recent completed activity when it is available.
 - **What you asked to get arrives every time.** A summary, brief or reminder comes on every run. A watch or check-in messages you only when something needs you, such as a real price drop, a problem or a question. Routine checks stay quiet.
 - **A failed run tells you.** If a run stops on an error, Nod sends a short message that names the schedule and says what stopped it, so a missing summary never goes unnoticed.
-- **It replies where you asked.** A schedule you set up on Telegram sends its messages to Telegram.
+- **It finds you where you are.** A schedule's results always show in Nod, and also go to the chat app you used last, Telegram or WhatsApp, if you've written from one.
 - **Corrections keep the rest.** Nod keeps the owner request and later changes used to set up the schedule. “Every hour instead” changes timing. “Send it to Lena instead” changes the recipient. Other limits stay in effect, and a later “only summarize” removes an earlier send request. Timing changes keep their owner request even when the work instruction stays the same. There is no ten-change reset.
 - **Approvals still apply.** Each outside action passes the same [trust check](/trust/approvals/). The checker gets the saved owner inputs in order, the exact proposal a reply answered, and the run time. Earlier eligible owner messages can explain “it” or “that folder”; they cannot grant another action. Chat, tasks and schedules use the same source-selection rules. LLM and decision-model checks receive the same evidence. If your instructions do not cover an action, Nod asks first. If the check cannot decide, the action does not run and Nod does not ask.
 - **A complete instruction approval has a clear scope.** When you approve a new complete schedule instruction, Nod shows its future work, targets, timing and limits. That approval can cover the recurring work it describes. Approving a name or timing change changes only those fields. Approving one email never grants recurring sends.

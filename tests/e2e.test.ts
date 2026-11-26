@@ -248,6 +248,54 @@ test(
 );
 
 test(
+  'end to end, turn traces and forget-reset exist only in dev mode',
+  { skip: !process.env.TEST_DATABASE_URL, timeout: 240_000 },
+  async (t) => {
+    for (const [nodeEnv, dev] of [
+      ['production', false],
+      ['test', false],
+      ['development', true],
+    ] as const)
+      await t.test(nodeEnv, async () => {
+        const nod = await startNod({ nodeEnv });
+        try {
+          const session = await nod.api<{ capabilities: { turnTraces?: boolean } }>(
+            'GET',
+            '/api/session',
+          );
+          assert.equal(session.capabilities.turnTraces, dev);
+          const { turnId } = await nod.send('hello there');
+          await nod.settle();
+          const rows = await nod.query<{ count: number }>(
+            'SELECT count(*)::int AS count FROM model_call_traces',
+          );
+          assert.equal(rows[0]!.count > 0, dev);
+          const routes = await Promise.all(
+            ['/api/traces', `/api/turns/${turnId}/trace`].map((path) =>
+              nod.api('GET', path).then(
+                () => 200,
+                (error: Error) => Number(/failed with (\d+)/.exec(error.message)?.[1]),
+              ),
+            ),
+          );
+          assert.deepEqual(routes, dev ? [200, 200] : [404, 404]);
+          const { threadId } = await nod.state();
+          const forget = await nod
+            .api('POST', '/api/conversation/reset', { threadId, forget: true })
+            .then(
+              () => 200,
+              (error: Error) => Number(/failed with (\d+)/.exec(error.message)?.[1]),
+            );
+          assert.equal(forget, dev ? 200 : 404);
+          assert.deepEqual(await nod.violations(), []);
+        } finally {
+          await nod.close();
+        }
+      });
+  },
+);
+
+test(
   'end to end, an earlier request covers every step of a task started from a short reply',
   { skip: !process.env.TEST_DATABASE_URL, timeout: 120_000 },
   async (t) => {

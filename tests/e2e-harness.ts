@@ -186,6 +186,8 @@ async function serve() {
     { createIntegrationFixture },
     { accessKey },
     { fakeComputer, fakeWorkspace },
+    { createModelTraces },
+    { capturePiModelCall },
   ] = await Promise.all([
     import('../src/server/composition.ts'),
     import('../src/providers/pi/index.ts'),
@@ -195,6 +197,8 @@ async function serve() {
     import('../scripts/e2e-fixtures.ts'),
     import('../src/server/access.ts'),
     import('./runtime-fixtures.ts'),
+    import('../src/server/traces.ts'),
+    import('../src/providers/pi/traces.ts'),
   ]);
   const workspacePath = join(directory, 'workspace');
   await mkdir(workspacePath, { recursive: true });
@@ -221,15 +225,19 @@ async function serve() {
         : { run: false };
     },
   };
+  const traces = createModelTraces();
   const application = await createApplication(
     {
+      traces,
       agent: createPiAgent({
+        traces,
         provider: 'openai',
         apiKey: 'scripted',
         sessionRoot: join(directory, '.local', 'sessions'),
         createSession: async (options) => {
           const result = await createAgentSession(options);
-          result.session.agent.streamFunction = (_model, request, streamOptions) => {
+          result.session.agent.streamFunction = (model, request, streamOptions) => {
+            const startedAt = new Date().toISOString();
             const stream = createAssistantMessageEventStream();
             void (async () => {
               const next = scriptedReply(request.messages as Entry[]);
@@ -244,6 +252,11 @@ async function serve() {
                     stopReason: 'toolUse',
                   })
                 : fauxAssistantMessage(next.text!, { stopReason: 'stop' });
+              capturePiModelCall(
+                traces,
+                { model, context: request, message, startedAt },
+                { source: 'agent' },
+              );
               stream.push({ type: 'start', partial: message });
               stream.push({
                 type: 'done',
@@ -284,7 +297,7 @@ async function freePort() {
   return port;
 }
 
-export async function startNod(options: { checker?: boolean } = {}) {
+export async function startNod(options: { checker?: boolean; nodeEnv?: string } = {}) {
   const base = new URL(process.env.TEST_DATABASE_URL!);
   const suffix = randomUUID().replaceAll('-', '').slice(0, 16);
   const schema = `e2e_${suffix}`;
@@ -314,7 +327,7 @@ export async function startNod(options: { checker?: boolean } = {}) {
         DATABASE_URL: database.href,
         PGBOSS_SCHEMA: bossSchema,
         PORT: String(port),
-        NODE_ENV: 'test',
+        NODE_ENV: options.nodeEnv ?? 'test',
         ...(options.checker ? { NOD_E2E_CHECKER: '1' } : {}),
       },
       stdio: ['ignore', 'pipe', 'pipe'],

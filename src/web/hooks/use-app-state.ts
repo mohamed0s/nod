@@ -107,13 +107,14 @@ export function useAppState(accountId?: string) {
   }, [advanceThread]);
 
   const resetConversation = useCallback(
-    (expectedThreadId: string) => {
+    (expectedThreadId: string, forget = false) => {
       if (resetRequest.current) return resetRequest.current;
       const request = (async () => {
         requestVersion.current++;
         cancelStateRead();
         const result = await post<{ ok: true; threadId: string }>('/api/conversation/reset', {
           threadId: expectedThreadId,
+          ...(forget ? { forget } : {}),
         });
         if (typeof result.threadId !== 'string' || !result.threadId)
           throw new Error('The conversation could not be restarted. Try again.');
@@ -172,6 +173,8 @@ export function useAppState(accountId?: string) {
               pageDataCache.revalidateActive('/api/tasks');
             }
           }
+          if (data.type === 'trace' && typeof data.turnId === 'string')
+            window.dispatchEvent(new CustomEvent('nod:trace', { detail: { turnId: data.turnId } }));
           if (data.type === 'refresh') {
             pageDataCache.revalidateActive();
             void refresh();

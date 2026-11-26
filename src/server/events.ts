@@ -12,7 +12,9 @@ type DeltaEvent = {
   done?: boolean;
 };
 type ActivityEvent = { type: 'activity'; ownerId: string; items: Activity[] };
-export type ServerEvent = { type: 'refresh' } | { type: 'working' } | DeltaEvent | ActivityEvent;
+type TraceEvent = { type: 'trace'; ownerId: string; turnId: string };
+export type ServerEvent =
+  { type: 'refresh' } | { type: 'working' } | DeltaEvent | ActivityEvent | TraceEvent;
 
 export const events = new EventEmitter<{ event: [ServerEvent] }>();
 events.setMaxListeners(50);

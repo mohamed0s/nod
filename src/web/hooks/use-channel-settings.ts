@@ -9,8 +9,8 @@ export function telegramState(setup: ChannelSetupSummary | undefined) {
   const saved = Boolean(setup?.enabled);
   const needsDelivery = saved && setup?.webhookStatus === 'registration_pending';
   const ready = saved && !needsDelivery;
-  const paired = Boolean(ready && setup?.allowedUserId && !setup.pairingExpiresAt);
-  const expiry = saved && !paired ? setup?.pairingExpiresAt : undefined;
+  const paired = Boolean(ready && setup?.allowedUserId);
+  const expiry = saved ? setup?.pairingExpiresAt : undefined;
   const expired = Boolean(expiry && Date.parse(expiry) <= Date.now());
   return {
     saved,
@@ -19,7 +19,6 @@ export function telegramState(setup: ChannelSetupSummary | undefined) {
     paired,
     expired,
     waiting: Boolean(ready && expiry && !expired),
-    candidate: ready && !paired && !expired ? setup?.pairingCandidate : undefined,
   };
 }
 
@@ -164,19 +163,22 @@ export function useChannelSettings({
     return { ok: Boolean(result), channel: result?.channel ?? latest };
   }
 
-  async function telegramAction(kind: 'pairing' | 'confirm' | 'user', body: object = {}) {
-    if (action.current) return false;
+  async function pairingLink(provider: ChannelProvider) {
+    if (action.current) return null;
     setError('');
     const result = await perform(
-      `/api/channel-settings/telegram/${kind}`,
-      { method: 'POST', body: JSON.stringify(body) },
+      provider === 'telegram'
+        ? '/api/channel-settings/telegram/pairing'
+        : '/api/channel-settings/whatsapp/phone',
+      { method: 'POST', body: '{}' },
       async (message, signal) => {
         await load();
         if (!signal.aborted) setError(message);
       },
     );
-    if (result) setPairingUrl(result.pairingUrl ?? null);
-    return Boolean(result);
+    if (result) void load();
+    if (result && provider === 'telegram') setPairingUrl(result.pairingUrl ?? null);
+    return result?.pairingUrl ?? null;
   }
 
   async function remove(provider: ChannelProvider) {
@@ -216,7 +218,7 @@ export function useChannelSettings({
     setPairingUrl,
     load,
     save,
-    telegramAction,
+    pairingLink,
     remove,
     reconnect,
   };

@@ -8316,7 +8316,7 @@ describe('interface components', { concurrency: interfaceLanes }, () => {
         if (path === '/api/session') return Response.json({
           user: { id: ownerId, name: 'Synthetic', email: null, avatarUrl: null },
           settings: { theme: 'system', onboardingCompleted: true, usageData: false, traces: false },
-          capabilities: { developer: false, traces: false },
+          capabilities: { developer: false, turnTraces: false, traces: false },
         });
         if (path === '/api/state') return new Promise((resolve, reject) => {
           reads.push({ resolve, signal: options.signal });

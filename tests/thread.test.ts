@@ -198,6 +198,84 @@ test(
         }
       },
     );
+    await t.test('dev turn traces stay owner-scoped and keep secrets out', async () => {
+      const { createTurnTraces } = await import('../src/server/turn-traces.ts');
+      const { createModelTraces } = await import('../src/server/traces.ts');
+      const currentThread = (await thread.activeThread()).id;
+      const otherOwner = 'synthetic-other-owner';
+      const mine = randomUUID();
+      const theirs = randomUUID();
+      const secret = 'fixture-model-key-5d21';
+      const nested = 'hunter2hunter2-private';
+      await db.pool.query(
+        `INSERT INTO turns(id,owner_id,thread_id,source,prompt,status)
+         VALUES($1,$3,$4,'user','hi','done'),($2,$5,$4,'user','hi','done')`,
+        [mine, theirs, ownerId, currentThread, otherOwner],
+      );
+      try {
+        const own = createTurnTraces({ pool: db.pool, ownerId });
+        const other = createTurnTraces({ pool: db.pool, ownerId: otherOwner });
+        const traces = createModelTraces();
+        traces.configure({ secrets: [secret], capture: own.record });
+        const call = (turnId: string) => ({
+          id: randomUUID(),
+          source: 'agent',
+          turnId,
+          provider: 'fixture',
+          model: 'fixture-model',
+          startedAt: '2026-11-25T10:00:00.000Z',
+          endedAt: '2026-11-25T10:00:01.000Z',
+          systemPrompt: `You are Nod. Key ${secret}`,
+          tools: [
+            {
+              name: 'read',
+              description: 'Read a file',
+              parameters: { type: 'object', default: { apiKey: nested } },
+            },
+          ],
+          messages: [
+            { role: 'user', content: JSON.stringify({ password: { value: nested } }) },
+            { role: 'user', content: `use ${secret}`, apiKey: secret },
+          ],
+          output: { content: [{ type: 'text', text: 'done' }], stopReason: 'stop' },
+          usage: {
+            inputTokens: 1,
+            outputTokens: 1,
+            totalTokens: 2,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            costUsd: null,
+          },
+          stopReason: 'stop',
+        });
+        traces.capture(() => call(mine), mine);
+        traces.capture(() => call(theirs), theirs);
+        traces.withTurn({ sessionId: mine, turnId: mine }, () => traces.capture(() => call(mine)));
+        traces.captureTurn(mine, () => traces.outsideTurn(() => traces.capture(() => call(mine))));
+        traces.captureTurn(mine, () => traces.capture(() => call(mine)));
+        let found;
+        for (let attempt = 0; attempt < 40; attempt++) {
+          found = await own.read(mine);
+          if (found?.calls.length === 2) break;
+          await delay(10);
+        }
+        assert.equal(found?.calls.length, 2);
+        assert.equal(found?.calls[0]?.tools[0]?.name, 'read');
+        const stored = JSON.stringify(
+          (await db.pool.query('SELECT call FROM model_call_traces')).rows,
+        );
+        assert.ok(!stored.includes(secret));
+        assert.ok(!stored.includes(nested));
+        assert.equal(await own.read(theirs), undefined);
+        assert.equal((await other.read(theirs))?.calls.length, 0);
+        assert.equal(
+          (await db.pool.query('SELECT count(*)::int AS n FROM model_call_traces')).rows[0].n,
+          2,
+        );
+      } finally {
+        await db.pool.query('DELETE FROM turns WHERE id=ANY($1::uuid[])', [[mine, theirs]]);
+      }
+    });
     await thread.initializeThreads();
     await t.test('periodic checks use an installation-spread five-minute schedule', async () => {
       const { createWorkConsumers } = await import('../src/server/work-admission.ts');
@@ -12277,22 +12355,25 @@ test(
       curator.curate = curate;
 
       const tea = 'I drink synthetic green tea every morning.';
-      const unquoted = add('about', 'coffee', 'Drinks synthetic black coffee.');
+      const uncited = (m: number) => ({
+        ...add('about', 'coffee', 'Drinks synthetic black coffee.')(m),
+        m: [m + 1],
+      });
       const secret = 'The store key is sk-fixturefixture1234.';
       const leaked = (m: number) => ({ ...add('about', 'key', secret)(m), quote: tea });
       const notesBefore = (await memory.view()).notes.length;
       await assert.rejects(
-        remember([unquoted, leaked], await post(tea)),
+        remember([uncited, leaked], await post(tea)),
         (error: Error) =>
-          /quote/.test(error.message) &&
+          /cites none/.test(error.message) &&
           /secret/.test(error.message) &&
           /Nothing was saved/.test(error.message) &&
           !error.message.includes('sk-fixture'),
       );
       assert.equal((await memory.view()).notes.length, notesBefore);
       await assert.rejects(
-        remember([add('about', 'tea', tea), unquoted], await post(tea)),
-        /quote/,
+        remember([add('about', 'tea', tea), uncited], await post(tea)),
+        /cites none/,
       );
       assert.equal((await memory.view()).notes.length, notesBefore);
       await remember([add('about', 'tea', tea)], await post(tea));
@@ -12307,7 +12388,7 @@ test(
               m: [m],
               quote: moved,
             }),
-            unquoted,
+            uncited,
             add('about', 'switch', moved),
           ],
           await post(moved),
@@ -12315,6 +12396,22 @@ test(
         /Nothing was saved/,
       );
       assert.ok((await memory.view()).notes.some((note) => note.path === 'about/tea'));
+      const spanish = 'Háblame en español, por favor.';
+      const spoken = await post(spanish);
+      const translated = (m: number) => ({
+        ...add('preferences', 'idioma-español', 'Prefers replies in Spanish.')(m),
+        quote: 'Speak to me in Spanish, please.',
+      });
+      assert.deepEqual(await remember([translated], spoken), {
+        saved: [{ path: 'preferences/idioma-espanol', text: 'Prefers replies in Spanish.' }],
+        archived: [],
+      });
+      const evidence = await memory.read({ path: 'preferences/idioma-espanol' });
+      assert.ok('sources' in evidence);
+      assert.deepEqual(
+        evidence.sources.map(({ id, text }) => ({ id, text })),
+        [{ id: spoken.sourceMessageId, text: null }],
+      );
 
       const older = await post('My synthetic library card renews in March.');
       for (let index = 0; index < 10; index++) await post(`Synthetic filler ${index}.`);
@@ -13099,7 +13196,7 @@ test(
       CREATE TABLE spending_limits(owner_id text,monthly_usd double precision,task_usd double precision,preparation_usd double precision);
       CREATE TABLE channel_settings(owner_id text,provider text,enabled boolean,summary jsonb,updated_at timestamptz DEFAULT now());
       CREATE TABLE integration_events(id text,owner_id text,slug text,state text,created_at timestamptz DEFAULT now());
-      CREATE TABLE schedules(id uuid,owner_id text,kind text,enabled boolean,delivery_channel text,next_run_at timestamptz,created_at timestamptz DEFAULT now());
+      CREATE TABLE schedules(id uuid,owner_id text,kind text,enabled boolean,next_run_at timestamptz,created_at timestamptz DEFAULT now());
       CREATE TABLE schedule_runs(id uuid,owner_id text,schedule_id uuid,turn_id uuid,created_at timestamptz DEFAULT now());
       CREATE TABLE channel_inbox(source_id text,owner_id text,provider text,state text,turn_id uuid,created_at timestamptz DEFAULT now());
       CREATE TABLE channel_outbox(source_id text,state text,reason text,updated_at timestamptz DEFAULT now());
@@ -13268,7 +13365,7 @@ test(
       await f.pool.query(`INSERT INTO spending_limits VALUES($1,200,5,5)`, [owner]);
       await f.pool.query(
         `INSERT INTO channel_settings(owner_id,provider,enabled,summary) VALUES($1,'whatsapp',true,$2)`,
-        [owner, { accountName: privateText, linkMode: 'self-chat', connectionState: 'logged_out' }],
+        [owner, { accountName: privateText, connectionState: 'logged_out' }],
       );
       await f.pool.query(
         `INSERT INTO integration_events(id,owner_id,slug,state) VALUES($1,$2,'gmail','processing')`,
@@ -13276,7 +13373,7 @@ test(
       );
       const schedule = owner === ownerId ? scheduleId : randomUUID();
       await f.pool.query(
-        `INSERT INTO schedules(id,owner_id,kind,enabled,delivery_channel,next_run_at) VALUES($1,$2,'recurring',true,'web',now()-interval '1 minute')`,
+        `INSERT INTO schedules(id,owner_id,kind,enabled,next_run_at) VALUES($1,$2,'recurring',true,now()-interval '1 minute')`,
         [schedule, owner],
       );
       await f.pool.query(
@@ -13670,7 +13767,6 @@ test(
     assert.equal(report.settings[0].timeZone, 'Europe/Lisbon');
     assert.equal(report.settings[0].notificationRuleSet, true);
     assert.equal(report.settings[0].monthlyLimitUsd, 200);
-    assert.equal(report.channelSettings[0].linkMode, 'self-chat');
     assert.equal(report.channelSettings[0].connectionState, 'logged_out');
     assert.equal(report.clientErrors.length, 1);
     assert.match(report.clientErrors[0].data.message, /Could not open account/);

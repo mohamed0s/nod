@@ -639,10 +639,12 @@ export function ArtifactWorkspace({
   files,
   className,
   children,
+  aside,
 }: {
   files: ImagePreview[];
   className: string;
   children: ReactNode;
+  aside?: ReactNode;
 }) {
   const [state, setState] = useState<{ id: string; source?: 'drafts' } | null>(null);
   const [drafts, setDrafts] = useState<ImagePreview[]>([]);
@@ -695,6 +697,7 @@ export function ArtifactWorkspace({
             onClose={close}
           />
         )}
+        {!current && aside}
       </div>
     </ArtifactDrawerContext.Provider>
   );

@@ -15,12 +15,11 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { Readable, Transform, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { createGunzip } from 'node:zlib';
-import { Parser } from 'tar';
 
 const pending = new Map();
 const hashPattern = /^[a-f0-9]{64}$/;
@@ -64,7 +63,7 @@ export function validateRuntimeRelease(release) {
   if (
     !release ||
     release.version !== 1 ||
-    !['darwin-arm64', 'darwin-x64'].includes(release.platform) ||
+    !['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64'].includes(release.platform) ||
     !hashPattern.test(release.id) ||
     !hashPattern.test(release.archive?.sha256) ||
     !Number.isSafeInteger(release.archive.bytes) ||
@@ -94,7 +93,7 @@ export function validateRuntimeRelease(release) {
     total > maximumBytes ||
     [
       ...criticalFiles,
-      `lima/share/lima/lima-guestagent.Linux-${release.platform === 'darwin-x64' ? 'x86_64' : 'aarch64'}.gz`,
+      `lima/share/lima/lima-guestagent.Linux-${release.platform.endsWith('-x64') ? 'x86_64' : 'aarch64'}.gz`,
     ].some((path) => !paths.has(path))
   )
     throw new Error('The Nod runtime file manifest is incomplete.');
@@ -116,7 +115,13 @@ export function validateRuntimeRelease(release) {
   return release;
 }
 
-export const defaultRuntimeCache = join(homedir(), 'Library/Application Support/nod/runtime');
+export function runtimeCacheDirectory(platform = process.platform, environment = process.env) {
+  if (platform !== 'linux') return join(homedir(), 'Library/Application Support/nod/runtime');
+  const data = environment.XDG_DATA_HOME;
+  return join(data && isAbsolute(data) ? data : join(homedir(), '.local/share'), 'nod/runtime');
+}
+
+export const defaultRuntimeCache = runtimeCacheDirectory();
 
 export function runtimeCacheRoot(release, cacheRoot) {
   return join(cacheRoot || defaultRuntimeCache, release.id);
@@ -179,7 +184,9 @@ async function verifiedCache(release, signal, cacheRoot) {
   } catch (error) {
     signal?.throwIfAborted();
     if (error.code === 'EACCES')
-      throw new Error('Nod cannot read its saved runtime. Check this Mac’s storage permissions.');
+      throw new Error(
+        'Nod cannot read its saved runtime. Check this computer’s storage permissions.',
+      );
     return undefined;
   }
 }
@@ -267,7 +274,7 @@ async function requireDiskSpace(release, directory, inspectDisk, reused) {
   if (available < required)
     throw Object.assign(
       new Error(
-        `Nod needs ${(Math.ceil((Number(required) / 1024 ** 3) * 10) / 10).toFixed(1)} GiB of free space to install its runtime. Free at least ${(Math.ceil((Number(required - available) / 1024 ** 3) * 100) / 100).toFixed(2)} GiB on this Mac, then retry. Your saved conversations and settings are kept.`,
+        `Nod needs ${(Math.ceil((Number(required) / 1024 ** 3) * 10) / 10).toFixed(1)} GiB of free space to install its runtime. Free at least ${(Math.ceil((Number(required - available) / 1024 ** 3) * 100) / 100).toFixed(2)} GiB on this computer, then retry. Your saved conversations and settings are kept.`,
       ),
       { code: 'RUNTIME_DISK_SPACE' },
     );
@@ -277,7 +284,7 @@ function installationError(error) {
   if (!['ENOSPC', 'EDQUOT'].includes(error.code)) return error;
   return Object.assign(
     new Error(
-      'Nod ran out of disk space while installing its runtime. Free space on this Mac, then retry. Your saved conversations and settings are kept.',
+      'Nod ran out of disk space while installing its runtime. Free space on this computer, then retry. Your saved conversations and settings are kept.',
     ),
     { code: 'RUNTIME_DISK_SPACE' },
   );
@@ -437,6 +444,7 @@ function unpackRuntime(
           );
         },
       });
+      const { Parser } = await import('tar');
       const parser = new Parser({
         strict: true,
         onReadEntry(entry) {
@@ -767,9 +775,12 @@ export async function openRuntimeAssets(options) {
     options.signal?.throwIfAborted();
   }
   if (release && downloadUrl) return downloadRuntime(release, { ...options, downloadUrl });
-  throw Object.assign(new Error('Choose the Nod Runtime pack to finish setting up this Mac.'), {
-    code: 'RUNTIME_ARCHIVE_REQUIRED',
-  });
+  throw Object.assign(
+    new Error('Choose the Nod Runtime pack to finish setting up this computer.'),
+    {
+      code: 'RUNTIME_ARCHIVE_REQUIRED',
+    },
+  );
 }
 
 export async function ensureRuntimeAssets(options) {

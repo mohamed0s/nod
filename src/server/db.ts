@@ -115,6 +115,12 @@ export async function initializeDatabase() {
     ALTER TABLE turn_events ADD COLUMN IF NOT EXISTS site text;
     ALTER TABLE turn_events ADD COLUMN IF NOT EXISTS command jsonb;
     CREATE INDEX IF NOT EXISTS turn_events_call ON turn_events(turn_id,call_id) WHERE call_id IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS model_call_traces (
+      id uuid PRIMARY KEY, owner_id text NOT NULL, turn_id uuid NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+      call jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS model_call_traces_turn ON model_call_traces(turn_id,created_at);
+    CREATE INDEX IF NOT EXISTS model_call_traces_age ON model_call_traces(created_at);
     CREATE TABLE IF NOT EXISTS messages (
       id uuid PRIMARY KEY, owner_id text NOT NULL, role text NOT NULL, text text NOT NULL,
       display_text text,

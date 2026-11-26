@@ -4676,6 +4676,76 @@ test('the task ledger reaches the model inside one untrusted block', async () =>
   assert.deepEqual(ledger([]), []);
 });
 
+test('dev turn traces replay the system prompt and tools once and scrub secret fields', async () => {
+  const { createModelTraces } = await import('../src/server/traces.ts');
+  const { capturePiModelCall } = await import('../src/providers/pi/traces.ts');
+  const secret = 'hunter2hunter2-private';
+  const tool = (name: string) => ({
+    name,
+    description: `${name} description`,
+    parameters: { type: 'object', properties: { query: { type: 'string' } } },
+  });
+  const context = {
+    systemPrompt: '',
+    messages: [
+      {
+        role: 'system',
+        content: 'Base prompt.',
+        sections: { memory: '<memory>first</memory>', style: '<style>plain</style>' },
+        toolsAdded: [tool('search'), tool('send'), { ...tool('vault'), token: secret }],
+        timestamp: 1,
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: JSON.stringify({ password: { value: secret } }) },
+          { type: 'image', data: 'a'.repeat(400), mimeType: 'image/png' },
+        ],
+        timestamp: 2,
+      },
+      {
+        role: 'system',
+        content: '',
+        sections: { memory: '<memory>second</memory>', style: null },
+        toolsRemoved: [{ name: 'send' }],
+        timestamp: 3,
+      },
+    ],
+  } as unknown as Context;
+  const stored: string[] = [];
+  const traces = createModelTraces();
+  traces.configure({
+    capture: (entry: { build(): { json: string } }) => stored.push(entry.build().json),
+  });
+  capturePiModelCall(
+    traces,
+    {
+      model: { provider: 'openai', id: 'fixture-model' } as never,
+      context,
+      message: fauxAssistantMessage('done'),
+      startedAt: new Date().toISOString(),
+    },
+    { source: 'agent', turnId: randomUUID() },
+  );
+  assert.equal(stored.length, 1);
+  const trace = JSON.parse(stored[0]!) as {
+    systemPrompt: string;
+    tools: Array<{ name: string }>;
+    messages: Array<{ role: string; content: unknown }>;
+  };
+  assert.match(trace.systemPrompt, /Base prompt\./);
+  assert.match(trace.systemPrompt, /<memory>second<\/memory>/);
+  assert.doesNotMatch(trace.systemPrompt, /<memory>first<\/memory>|<style>/);
+  assert.deepEqual(
+    trace.tools.map((entry) => entry.name),
+    ['search', 'vault'],
+  );
+  const system = trace.messages.filter((entry) => entry.role === 'system');
+  assert.ok(system.every((entry) => !JSON.stringify(entry).includes('<memory>')));
+  assert.ok(!stored[0]!.includes(secret));
+  assert.ok(!stored[0]!.includes('a'.repeat(400)));
+});
+
 test('agent and curator traces share analytics IDs across parallel turns and separate consent switches', async (t) => {
   const { createAnalytics } = await import('../src/server/analytics.ts');
   const { createModelTraces } = await import('../src/server/traces.ts');

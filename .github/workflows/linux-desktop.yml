@@ -20,9 +20,17 @@ on:
     paths:
       - '.github/workflows/linux-desktop.yml'
       - 'desktop/flatpak/**'
+      - 'desktop/rpm/**'
+      - 'desktop/assets/**'
       - 'desktop/scripts/*linux*.mjs'
       - 'desktop/scripts/*linux*.py'
+      - 'desktop/scripts/runtime-pack.mjs'
+      - 'desktop/scripts/runtime-inputs.mjs'
+      - 'desktop/scripts/release-tools.mjs'
+      - 'desktop/scripts/runtime-build-lock.json'
+      - 'desktop/runtime/assets.mjs'
       - 'desktop/test/*linux*.test.mjs'
+      - 'desktop/test/runtime-assets.test.mjs'
 
 permissions:
   contents: read
@@ -104,6 +112,21 @@ jobs:
           pnpm run desktop:test
           pnpm run build
           node desktop/scripts/prepare-runtime.mjs --prebuilt-images
+      - name: Pack the Linux runtime
+        env:
+          NOD_RUNTIME_RELEASE_BASE_URL: ${{ (github.ref == 'refs/heads/main' && inputs.source != '') && format('https://github.com/{0}/releases/download/nod-v{1}', github.repository, inputs.version) || '' }}
+          NOD_RUNTIME_RELEASE_TAG: ${{ (github.ref == 'refs/heads/main' && inputs.source != '') && format('nod-v{0}', inputs.version) || '' }}
+        run: node desktop/scripts/runtime-pack.mjs
+      - name: Save the Linux runtime pack
+        if: github.ref == 'refs/heads/main' && inputs.source != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: desktop-runtime-pack-linux-x64
+          path: .local/desktop-runtime-release/*
+          include-hidden-files: true
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
       - name: Package the Linux app
         env:
           NOD_RELEASE_BUILD: ${{ github.ref == 'refs/heads/main' && inputs.source != '' }}
@@ -128,7 +151,7 @@ jobs:
           '
       - name: Check power services through the installed Flatpak
         run: /usr/bin/python3 desktop/scripts/check-linux-power.py
-      - name: Split and verify release files
+      - name: Check the release files
         run: |
           NOD_FLATPAK_COMMIT="$(flatpak info --user --show-commit io.n8n.Nod)"
           export NOD_FLATPAK_COMMIT
@@ -140,7 +163,22 @@ jobs:
           path: |
             dist/desktop/linux-x64/release-linux-x64.json
             dist/desktop/linux-x64/SHA256SUMS-linux-x64
-            dist/desktop/linux-x64/nod-linux-x64.flatpak.part*
+            dist/desktop/linux-x64/nod-linux-x64.flatpak
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+      - name: Build and install the Fedora RPM
+        if: inputs.source == ''
+        run: |
+          docker run --rm -e NOD_DESKTOP_VERSION -v "$PWD:$PWD" -w "$PWD" registry.fedoraproject.org/fedora:45@sha256:92837d4834c1cff45cc2d534b655489b8e536271de1897932117e396cc9980c5 desktop/rpm/build-rpm.sh
+      - name: Save the Fedora RPM
+        if: inputs.source == ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: desktop-linux-x64-rpm
+          path: |
+            dist/desktop/rpm/nod-linux-x64.rpm
+            dist/desktop/rpm/SHA256SUMS-linux-x64-rpm
           compression-level: 0
           retention-days: 3
           if-no-files-found: error

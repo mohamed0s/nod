@@ -25,6 +25,8 @@ if (
 )
   throw new Error('Desktop runtime configuration is incomplete.');
 const runtimeEnvironment = process.env.NOD_ENVIRONMENT || 'development';
+export const developmentMode =
+  runtimeEnvironment === 'development' && process.env.NODE_ENV === 'development';
 export function configuration(overrides: Partial<Configuration> = {}): Configuration {
   return {
     provider: 'unconfigured',

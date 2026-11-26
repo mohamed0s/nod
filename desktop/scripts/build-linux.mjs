@@ -6,10 +6,12 @@ import { packager } from '@electron/packager';
 import { copyEngineSource, verifyApplicationRuntime } from './engine-source.mjs';
 import { copyBundleSource as copy, copyEngineDependencies } from './engine-dependencies.mjs';
 import { buildDesktopUI } from './build-ui.mjs';
+import { assetHash, runtimeRelease as readRuntimeRelease } from '../runtime/assets.mjs';
 import {
   copyAgentDesktop,
   desktopBuildOptions,
   hardenElectron,
+  resolveRuntimeDescriptor,
   run,
   sourceRevision,
 } from './release-tools.mjs';
@@ -26,12 +28,22 @@ const appSource = join(stage, 'app');
 const runtimeAssets = resolve(
   process.env.NOD_RUNTIME_ASSETS || join(root, '.local', 'desktop-runtime-assets'),
 );
+const runtimeRelease = resolveRuntimeDescriptor(root, process.argv);
+const full = process.argv.includes('--full');
 const platform = `linux-${process.arch}`;
 const buildOptions = desktopBuildOptions();
 
-const manifest = JSON.parse(await readFile(join(runtimeAssets, 'manifest.json'), 'utf8'));
-if (manifest.platform !== platform)
-  throw new Error(`The runtime assets are for ${manifest.platform}, not ${platform}.`);
+let release;
+if (full) {
+  const manifest = JSON.parse(await readFile(join(runtimeAssets, 'manifest.json'), 'utf8'));
+  if (manifest.platform !== platform)
+    throw new Error(`The runtime assets are for ${manifest.platform}, not ${platform}.`);
+} else {
+  release = await readRuntimeRelease(dirname(runtimeRelease));
+  if (!release) throw new Error('The runtime release descriptor is missing.');
+  if (release.platform !== platform)
+    throw new Error(`The runtime release is for ${release.platform}, not ${platform}.`);
+}
 const configuration = JSON.parse(await readFile(join(desktop, 'package.json'), 'utf8'));
 const version = process.env.NOD_DESKTOP_VERSION || configuration.version;
 if (!/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(version))
@@ -49,15 +61,25 @@ await copyEngineSource({ root, target: engine, platform: 'linux' });
 await copyEngineDependencies({ root, target: engine, platform: 'linux', arch: process.arch });
 for (const path of ['main', 'preload']) await copy(join(desktop, path), join(appSource, path));
 await buildDesktopUI(join(appSource, 'ui'));
-await cp(runtimeAssets, join(engine, 'runtime-assets'), {
-  recursive: true,
-  mode: constants.COPYFILE_FICLONE,
-  verbatimSymlinks: true,
-});
+if (full)
+  await cp(runtimeAssets, join(engine, 'runtime-assets'), {
+    recursive: true,
+    mode: constants.COPYFILE_FICLONE,
+    verbatimSymlinks: true,
+  });
+else {
+  const target = join(engine, 'runtime-release.json');
+  await copy(runtimeRelease, target);
+  if ((await assetHash(target)) !== (await assetHash(runtimeRelease)))
+    throw new Error('The packaged runtime release does not match its source.');
+  if (!(await readRuntimeRelease(engine)))
+    throw new Error('The packaged runtime release is missing.');
+}
 configuration.nodBuild = {
   source: await sourceRevision(),
   builtAt: new Date().toISOString(),
   modified: Boolean(await run('/usr/bin/git', ['-C', root, 'status', '--porcelain'])),
+  ...(release ? { runtime: release.id } : {}),
   ...buildOptions,
 };
 delete configuration.devDependencies;

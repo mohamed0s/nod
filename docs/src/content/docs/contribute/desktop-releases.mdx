@@ -27,16 +27,16 @@ flowchart TD
 
 Each release is named **Nod v0.x.x** and links these installers:
 
-| Platform          | Installer                      | Updates                 |
-| ----------------- | ------------------------------ | ----------------------- |
-| Mac Apple silicon | `nod-arm64.dmg`                | Automatic               |
-| Mac Intel         | `nod-x64.dmg`                  | Automatic               |
-| Windows x64       | `nod-Setup-x64.exe`            | Automatic               |
-| Linux x64 preview | `nod-linux-x64.flatpak.partNN` | Install the next bundle |
+| Platform          | Installer               | Updates                 |
+| ----------------- | ----------------------- | ----------------------- |
+| Mac Apple silicon | `nod-arm64.dmg`         | Automatic               |
+| Mac Intel         | `nod-x64.dmg`           | Automatic               |
+| Windows x64       | `nod-Setup-x64.exe`     | Automatic               |
+| Linux x64 preview | `nod-linux-x64.flatpak` | Install the next bundle |
 
-Mac ZIP files, runtime packs, checksums, the public certificate, update metadata and the Terminal and PowerShell install scripts stay on the same release as supporting assets.
+Mac ZIP files, Mac and Linux runtime packs, checksums, the public certificate, update metadata and the Terminal and PowerShell install scripts stay on the same release as supporting assets.
 
-Linux bundles include the runtime pack. The build allows at most two parts, each at most 1900 MiB, to stay below GitHub's 2 GiB limit per file. `release-linux-x64.json` records the version, source commit, Flatpak commit, sizes, and hashes. `SHA256SUMS-linux-x64` covers every part and the joined bundle. Releases keep at most 30 assets so older installed apps can still read them. See [Linux installation](/get-started/install-desktop/#linux).
+The Linux Flatpak bundle does not include the runtime pack; local setup downloads `nod-Runtime-linux-x64-<id>.tar.gz` from the release, the same way as on a Mac. The bundle is one release file of at most 1900 MiB, below GitHub's 2 GiB limit per file. `release-linux-x64.json` records the version, source commit, Flatpak commit, size and hash. `SHA256SUMS-linux-x64` covers the bundle. Releases keep at most 30 assets so older installed apps can still read them. See [Linux installation](/get-started/install-desktop/#linux).
 
 Desktop builds include the server source, built web files, production dependencies, required runtime files, and licenses. The server runs TypeScript through `tsx`.
 
@@ -235,7 +235,7 @@ Each night, and when you start **CI** by hand on a branch, a Windows runner also
 
 The release build's Windows check also stops the WSL service to confirm that Nod reports the Windows error in readable text with the code that offers **Install WSL**, plants a half-installed WSL distribution to confirm that setup replaces it, and installs the private computer in a chosen folder.
 
-Pull requests that change Linux build inputs also run **Build Linux desktop**. It builds and installs the Flatpak preview, checks its engine and bundle parts, and uploads the files. **Build desktop release** packages all desktop apps and verifies their release assets before publication.
+Pull requests that change Linux build inputs also run **Build Linux desktop**. It builds and installs the Flatpak preview, checks its engine and bundle, and uploads the files. **Build desktop release** packages all desktop apps and verifies their release assets before publication.
 
 The required **Checks, tests and build** result waits for both Mac update checks. If either Mac check fails, that required result fails too.
 
@@ -252,13 +252,13 @@ When **automatic** is on, also supply **highlights**. The **video** input is opt
 
 Release builds run one at a time, and up to 100 runs can wait in the queue. A failed build can reuse its matching draft. Published assets are never replaced.
 
-If only the final publisher fails, fix the publisher, then run **Recover desktop release** on `main` with the failed run ID within three days, while its artifacts are retained. It requires all platform builds and checks, and CI on their exact source, to have passed. It uses the current publisher with the original signed files and saved release context, plus the release plan for automatic releases. It verifies their source and hashes, then publishes without rebuilding the apps. If repository visibility changed since the build, start a new release build instead.
+The publisher retries a GitHub server error (HTTP 5xx) three times, waiting 15, 30 and 60 seconds. When creating the draft fails that way, it looks the draft up by tag before trying again and reuses one GitHub created anyway, instead of creating a second one. If only the final publisher fails, fix the publisher, then run **Recover desktop release** on `main` with the failed run ID within three days, while its artifacts are retained. It requires all platform builds and checks, and CI on their exact source, to have passed. It uses the current publisher with the original signed files and saved release context, plus the release plan for automatic releases. It verifies their source and hashes, then publishes without rebuilding the apps. If repository visibility changed since the build, start a new release build instead.
 
 The container images, Linux Flatpak, Windows runtime, Mac signing, Mac update checks, and publishing steps run on Blacksmith runners. Both Mac apps build on Apple silicon. The Intel app uses x64 Node under Rosetta. Windows jobs use GitHub's Windows runners because the installer check needs WSL 2.
 
 Docker builds use Blacksmith's disk cache, with a separate cache for each Mac architecture, the Linux x64 runtime, and the Windows runtime. They do not export Docker layers to GitHub's cache service.
 
-Update checks run alongside the builds. App jobs can install dependencies and build the source while their runtimes are prepared. Each Mac job waits only for its own images. It then signs its runtime and app. The final job downloads platform artifacts in parallel. It checks all four platform bundles, then uploads their files together. It downloads the installers, Mac ZIPs, Windows runtime, and Linux bundle parts to check their bytes before publication.
+Update checks run alongside the builds. App jobs can install dependencies and build the source while their runtimes are prepared. Each Mac job waits only for its own images. It then signs its runtime and app. The final job downloads platform artifacts in parallel. It checks all four platform bundles, then uploads their files together. It downloads the installers, Mac ZIPs, Windows runtime, Linux bundle and Linux runtime pack to check their bytes before publication.
 
 Developer ID builds submit the signed app to Apple and attach its ticket before they create the disk image and update ZIP. The build then submits the signed disk image and attaches its ticket. It mounts the finished disk image, copies its app to a temporary folder, and checks the app's signature, attached ticket and Gatekeeper result. A failed check stops the release. Runtime host tools have a separate notarization check because the app downloads them separately. ZIP and disk image creation run in parallel.
 
@@ -336,7 +336,7 @@ This is an ad-hoc signed local app, not a release. It reuses the cached workspac
 
 ## Build a Linux Flatpak
 
-The Linux app is a Flatpak preview with the runtime pack inside it. **Build Linux desktop** builds and checks the x64 package. The desktop release workflow calls it and includes its files in the release. You can also run it separately from **Actions** to get the `desktop-linux-x64` artifact. On pull requests, this check runs only for `desktop/flatpak/**`, `desktop/scripts/*linux*.mjs`, and `desktop/test/*linux*.test.mjs`. Shared runtime and build files use standard CI. Run the package workflow from **Actions** when those changes need a Linux package check.
+The Linux app is a Flatpak preview, and this workflow also builds a Fedora RPM. As on a Mac and Windows, local setup downloads a matching runtime pack from the release; the Flatpak itself does not include it. **Build Linux desktop** builds and checks the x64 package. The desktop release workflow calls it and includes its files in the release. You can also run it separately from **Actions** to get the `desktop-linux-x64` and `desktop-linux-x64-rpm` artifacts. On pull requests, this check runs only for `desktop/flatpak/**`, `desktop/rpm/**`, `desktop/assets/**`, `desktop/scripts/*linux*.mjs`, `desktop/scripts/*linux*.py`, `desktop/scripts/runtime-pack.mjs`, `desktop/scripts/runtime-inputs.mjs`, `desktop/scripts/release-tools.mjs`, `desktop/scripts/runtime-build-lock.json`, `desktop/runtime/assets.mjs`, `desktop/test/*linux*.test.mjs`, and `desktop/test/runtime-assets.test.mjs`. Other shared build files use standard CI. Run the package workflow from **Actions** when those changes need a Linux package check.
 
 CI installs Flatpak and `flatpak-builder` from the Ubuntu package archive. It does not need an extra package source. The manifest installs Meson libraries in `/app/lib` so QEMU can find its local dependencies.
 
@@ -359,11 +359,19 @@ flatpak run io.n8n.Nod
 
 The Flatpak gets KVM, network, display, audio, notification, tray and Secret Service access, and your home folder and external drives under `/media` and `/run/media` for Local files and downloads, as the Mac and Windows apps have. The VM lives in `~/.nod-desktop`, as on a Mac.
 
-Release builds export a `stable` Flatpak bundle with Flathub as its desktop runtime source. They install it, check the engine, and divide the bundle into release parts. Publication verifies the source, Flatpak commit, each part, and the joined bundle. Linux files use the same release provenance checks as the other platforms. Recovery requires the Linux build to pass and keeps its original files.
+Release builds export a `stable` Flatpak bundle with Flathub as its desktop runtime source. They install it and check the engine. Publication verifies the source, Flatpak commit and bundle checksum. Linux files use the same release provenance checks as the other platforms. Recovery requires the Linux build to pass and keeps its original files.
 
 Official Linux builds use the `release` environment on `main`. Like Mac and Windows builds, they include its `NOD_TRACES_TOKEN` for opt-in conversation traces and mark the build as a release. Pull request and manual preview builds use the separate `linux-preview` environment. Their build metadata keeps usage data in the development environment.
 
 The published bundles have no Nod update repository and are not on Flathub. Users install the next bundle to update Nod. `flatpak update` can update the shared desktop runtime, but it does not fetch new Nod bundles.
+
+## Build a Fedora RPM
+
+**Build Linux desktop** also builds an x64 RPM when you run it from **Actions** or for a pull request that touches `desktop/rpm/**`. It runs in a `fedora:45` container, installs the RPM with `dnf` and checks that the app's libraries resolve, that QEMU, `qemu-img` and `ssh` are installed, that `chrome-sandbox` is setuid and that the server imports and native image library load. The `desktop-linux-x64-rpm` artifact holds `nod-linux-x64.rpm` and its checksum. Release runs skip this step, and the RPM is not published with a release.
+
+The RPM installs the app in `/usr/lib/nod` and depends on Fedora's own `qemu-system-x86-core`, `qemu-img` and `openssh-clients` instead of bundling them, so Lima uses Fedora's QEMU. Like the Flatpak, the RPM does not include the runtime pack; local setup downloads it from the release. Fedora 45 ships QEMU 11.1.2. Fedora 44 ships 10.2.2, which CI does not test. The check does not start the VM, because the runner has no KVM, so start a local assistant on a Fedora desktop before distributing it. Open at login writes an autostart entry that runs `nod`.
+
+To build locally, package the app as for the Flatpak, then run `NOD_DESKTOP_VERSION=<version> desktop/rpm/build-rpm.sh` as root in a Fedora container with the repository mounted.
 
 ## Signing limits
 

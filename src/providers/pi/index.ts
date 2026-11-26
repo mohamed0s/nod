@@ -39,7 +39,7 @@ import { createTurnFallback, modelKey } from './fallback.ts';
 import { modelContext } from './context.ts';
 import { createContextOutput, toolOutputReference } from './context-output.ts';
 import { audioContext, audioEntries, audioMessage, readsNativeAudio } from './audio.ts';
-import { piModelTrace } from './traces.ts';
+import { piModelTrace, recordPiModelCall } from './traces.ts';
 import type { ModelTraces } from '../../ports/traces.ts';
 import type { ModelAccess } from '../../ports/models.ts';
 import type { Agent, AgentEvent } from '../../ports/agent.ts';
@@ -536,9 +536,11 @@ export function createPiAgent(options: {
         automatic: input.automatic,
         trace:
           traces &&
-          ((call) => {
-            if (traces.active())
-              traces.record(
+          ((call) =>
+            recordPiModelCall(
+              traces,
+              call,
+              () =>
                 piModelTrace(
                   call,
                   {
@@ -550,8 +552,13 @@ export function createPiAgent(options: {
                   },
                   input.ownerContext,
                 ),
-              );
-          }),
+              {
+                source: 'agent',
+                turnId: input.turnId,
+                runId: input.runId,
+                parentRunId: input.parentRunId,
+              },
+            )),
         reportCacheUsage: (usage) =>
           input.onEvent({
             type: 'provider_usage',
