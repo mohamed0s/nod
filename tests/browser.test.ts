@@ -8937,7 +8937,7 @@ describe('interface components', { concurrency: interfaceLanes }, () => {
         assert.equal(document.querySelector('[role="status"] [role="status"]'), null);
         await act(async () => history.querySelector('summary').click());
         await settle(() => history.open);
-        await render({ streams: { 'synthetic-stream': 'Synthetic partial result' } });
+        await render({ streams: { 'synthetic-stream': { text: 'Synthetic partial result' } } });
         assert.equal(document.querySelector('.thinking').hidden, true);
         assert.equal(document.querySelector('.thinking details'), history);
         state = { ...state, activity: [{ ...activity, step: 'Checking the return journey', recent }] };
@@ -9017,6 +9017,8 @@ describe('interface components', { concurrency: interfaceLanes }, () => {
         if (path === '/api/trust') return Response.json({});
         if (path === '/api/speech') return Response.json({ transcription: true });
         if (path === '/api/onboarding/introduction') return Response.json({ messageId: null });
+        if (path === '/api/models')
+          return Response.json({ connections: [], selection: null, routes: {}, backups: [], light: null });
         if (String(path).startsWith('/api/browser-handoff/stream')) {
           streams.push(new URL(String(path), 'https://nod.fixture.invalid').searchParams.get('turnId'));
           return new Promise(() => {});
