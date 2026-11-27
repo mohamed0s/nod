@@ -71,7 +71,7 @@ Nod looks for jobs in the sources that are on, on the **Sources** tab:
 | Weekly sweep (off at first)         | career-ops reads every company that Greenhouse, Lever and Ashby list publicly, once a week                                                                                                         |
 | Telegram channels                   | Nod reads the public web preview of each channel you add (`t.me/s/<channel>`), without signing in, and remembers the last post it read                                                             |
 | Job-alert emails                    | When your Gmail is connected, Nod reads recent job alerts and takes the title, company, place and link from each one, without reading the email out to the model                                   |
-| Boards without an API               | Nod's own browser, signed out, on search result pages only                                                                                                                                         |
+| Boards without an API               | Nod's own browser, on search result pages only, without signing in                                                                                                                                 |
 
 The same job from two sources shows once, with both sources: Nod matches postings by their link and by company, title and place.
 

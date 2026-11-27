@@ -32,7 +32,7 @@ The server reads each alert's title, company, place and link. Links from alerts 
 
 ## Boards without an API
 
-For boards without an API, such as Naukri, StepStone, Seek, Wuzzuf or Bayt, use Nod's own `browser`, signed out, on search result pages only: no sign-in, no saved session, no applying. Write what the results show as a JSON array `[{url, title, company, location, postedAt, summary}]` to a workspace file, then `jobs import {workspaceFile, source: "web"}`.
+For boards without an API, such as Naukri, StepStone, Seek, Wuzzuf or Bayt, use Nod's own `browser` on search result pages only: don't sign in and don't apply. Write what the results show as a JSON array `[{url, title, company, location, postedAt, summary}]` to a workspace file, then `jobs import {workspaceFile, source: "web"}`.
 
 ## A link on a site to avoid
 
