@@ -34,6 +34,20 @@ After that, the app updates itself from this fork's releases, the way n8n's app 
 
 The first release, 0.9.1, can't update itself: it downloads each new installer and refuses it, again and again. If you installed it, install the latest release by hand once.
 
+### Linux app (preview)
+
+It needs a 64-bit Intel or AMD computer, [Flatpak](https://flatpak.org/setup/), hardware virtualization with access to `/dev/kvm`, and a secret store such as GNOME Keyring or KWallet.
+
+Download `nod-linux-x64.flatpak` and `SHA256SUMS-linux-x64` from this fork's [latest release](https://github.com/mohamed0s/nod/releases/latest) into one empty folder. A release gets its Linux files a while after the Windows ones, so if they're missing, wait for the build or take them from the release before. Then run in that folder:
+
+```sh
+flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+sha256sum --check SHA256SUMS-linux-x64 && flatpak install --user ./nod-linux-x64.flatpak
+flatpak run io.n8n.Nod
+```
+
+The app downloads its runtime from the same release on first start. It doesn't update itself on Linux: to update, quit Nod and install the newer bundle the same way, and your data stays. The bundle uses the same app ID as n8n's Flatpak, so it replaces that one if you have it.
+
 ### From source on Windows 11
 
 You need [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and started once, [Git](https://git-scm.com/), and about 20 GB free. The install script gets Node.js 24 and pnpm if they're missing.
@@ -84,7 +98,7 @@ The app keeps its own Vault key in `settings.json`, protected by your Windows us
 
 ### From source on macOS or Linux
 
-The fork's changes aren't tied to Windows, but the fork is only tested there, and the Windows scripts don't apply. Follow n8n's [Install from source](https://nod.n8n.io/docs/get-started/install-from-source/) with this fork's address:
+The fork's changes aren't tied to Windows, but day-to-day use is tested only there, and the Windows scripts don't apply. Follow n8n's [Install from source](https://nod.n8n.io/docs/get-started/install-from-source/) with this fork's address:
 
 ```sh
 git clone https://github.com/mohamed0s/nod.git
@@ -240,7 +254,7 @@ flowchart LR
 - **`scripts\windows\update.ps1` does it all:** it stops Nod, merges n8n's latest `main`, pushes both branches to your GitHub copy if you have one, and starts Nod again. If n8n's changes clash with the fork's, it changes nothing and says so. With the desktop app it leaves Nod running, because the app follows server and web changes by itself, and it says when a package, desktop app or runtime change needs a restart.
 - **Changes that could help everyone are offered to n8n.** Backup models ([#1361](https://github.com/n8n-io/nod/pull/1361)), the busy model check ([#1374](https://github.com/n8n-io/nod/pull/1374)) and the connection buttons fix ([#1360](https://github.com/n8n-io/nod/pull/1360)) started in this fork and are now part of n8n's Nod. Task chats are proposed in [Discussion #1359](https://github.com/n8n-io/nod/discussions/1359).
 
-## Build a Windows installer
+## Build the installers
 
 n8n's own release workflow runs only in n8n's repository: it needs their paid build machines and signing keys. This fork has its own, **Fork Windows release**, and it runs by itself.
 
@@ -248,6 +262,8 @@ n8n's own release workflow runs only in n8n's repository: it needs their paid bu
 2. **Versions follow n8n's, a step above them.** n8n's 0.9.1 becomes 0.9.200, and another build of it 0.9.201. n8n's 0.9.2 becomes 0.9.300, and n8n's 0.10.0 becomes 0.10.100. A version is never one of n8n's own, and the run stops with an error if it can't pick one.
 3. **It builds and checks the installer** on GitHub's machines, then publishes `nod-v<version>` as the fork's latest release. The runtime, about 1.5 GB, is rebuilt when its inputs change and by the first build of each week (from Monday, UTC). Otherwise it's copied from an earlier release, so installed apps download only the new installer. If the copied runtime fails its checks, the run builds a fresh one.
 4. **To build one by hand**, open **Actions → Fork Windows release → Run workflow**. It runs only on `mine`. Leave the version empty to number it as above, or enter one in the same range for the current n8n version (0.9.200 to 0.9.299 for n8n's 0.9.1) that's higher than every `nod-v` tag on the fork.
+
+**Fork Linux release** runs after each successful Windows run. It builds the Flatpak and its runtime from the release's own commit, checks them, and adds them to that release. To add them to another release, open **Actions → Fork Linux release → Run workflow** and enter its tag.
 
 Runs never overlap. A new run waits for the running one, and a newer waiting run replaces an older one. To share a build, send the release link.
 
