@@ -278,9 +278,9 @@ function Workspace({
                   <div className="chat-main">
                     <Chat
                       key={chat.fresh ? `new-${chat.agent ?? ''}` : (chat.id ?? 'main')}
-                      turnTraces={session.capabilities.turnTraces === true}
+                      turnTraces={mainChat && session.capabilities.turnTraces === true}
                       onReset={
-                        session.capabilities.turnTraces === true
+                        mainChat && session.capabilities.turnTraces === true
                           ? (threadId) => resetConversation(threadId, true)
                           : undefined
                       }
