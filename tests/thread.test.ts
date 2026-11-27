@@ -4815,6 +4815,41 @@ test(
         );
       });
 
+      await t.test('a chat sees only its own recent approvals', async (t) => {
+        const ids = [randomUUID(), randomUUID()];
+        t.after(async () => {
+          await db.pool.query('DELETE FROM approvals WHERE id=ANY($1::uuid[])', [ids]);
+        });
+        const approve = (id: string, turnId: string, title: string) =>
+          db.pool.query(
+            `INSERT INTO approvals(id,owner_id,thread_id,turn_id,action,args,status,title)
+             VALUES($1,$2,$3,$4,'GMAIL_CREATE_EMAIL_DRAFT','{}','expired',$5)`,
+            [id, ownerId, threadId, turnId, title],
+          );
+        const titles = (turnId: string) => (ran(turnId)!.approvals ?? []).map(({ title }) => title);
+        const main = await thread.submitUserMessage('approval scope main fixture', [], {
+          channel: 'web',
+        });
+        await waitFor(settled(main.turnId));
+        await approve(ids[0]!, main.turnId, 'Main synthetic approval');
+        const response = await sendJson({
+          clientMessageId: randomUUID(),
+          text: 'approval scope chat fixture',
+          newChat: true,
+        });
+        assert.equal(response.statusCode, 200, response.body);
+        const chat = response.json<SubmitMessageResponse>();
+        await waitFor(settled(chat.turnId));
+        assert.ok(!titles(chat.turnId).includes('Main synthetic approval'));
+        await approve(ids[1]!, chat.turnId, 'Chat synthetic approval');
+        const later = await thread.submitUserMessage('approval scope later fixture', [], {
+          channel: 'web',
+        });
+        await waitFor(settled(later.turnId));
+        assert.ok(titles(later.turnId).includes('Main synthetic approval'));
+        assert.ok(!titles(later.turnId).includes('Chat synthetic approval'));
+      });
+
       await t.test('a reached spending limit pauses all but owner messages', async (t) => {
         const raced = await thread.submitUserMessage('limit race fixture');
         await waitFor(settled(raced.turnId));

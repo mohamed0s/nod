@@ -2173,10 +2173,12 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
       turn.background ? { turnId: turn.id, sessionId: turn.session_id } : undefined,
     ),
     pool.query<{ title: string; status: string; createdAt: Date }>(
-      `SELECT COALESCE(title,action) AS title,status,created_at AS "createdAt" FROM approvals
-         WHERE owner_id=$1 AND thread_id=$2 AND created_at>now()-interval '24 hours'
-         ORDER BY created_at DESC,id DESC LIMIT 10`,
-      [ownerId, threadId],
+      `SELECT COALESCE(a.title,a.action) AS title,a.status,a.created_at AS "createdAt" FROM approvals a
+         LEFT JOIN turns u ON u.id=a.turn_id AND u.owner_id=a.owner_id
+         WHERE a.owner_id=$1 AND a.thread_id=$2 AND a.created_at>now()-interval '24 hours'
+         ${chat ? `AND ${inChatSql('u', !chat.id, '$3', '$1')}` : ''}
+         ORDER BY a.created_at DESC,a.id DESC LIMIT 10`,
+      [ownerId, threadId, chat?.id ?? null],
     ),
   ]);
   const preference = preferences.rows[0];
