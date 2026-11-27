@@ -20,6 +20,7 @@ import './components/app-discovery-dialog.css';
 import './components/composer.css';
 import './pages/chat.css';
 import './components/chat-list.css';
+import './components/chat-room.css';
 import './theme.css';
 import './pages/secondary-pages.css';
 import './pages/apps.css';

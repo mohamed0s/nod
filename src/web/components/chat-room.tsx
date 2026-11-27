@@ -16,7 +16,6 @@ import {
   Input,
   Notice,
 } from './ui';
-import './chat-room.css';
 
 export function NewRoomDialog({
   agents,
