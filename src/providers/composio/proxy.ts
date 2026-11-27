@@ -15,6 +15,7 @@ import {
   type IntegrationFile,
   type IntegrationConnectionBrowser,
 } from '../../ports/integrations.ts';
+import { defaultConnectionService } from '../../shared/integrations.ts';
 import type { CredentialKeyStore } from '../../ports/key-store.ts';
 import type { IntegrationIdentityCheckpoint } from '../../ports/integration-identity.ts';
 import { loadIntegrationIdentity } from './identity.ts';
@@ -47,7 +48,7 @@ export function createComposioProxy(options: {
   url?: string;
   request?: typeof fetch;
 }) {
-  const endpoint = new URL(options.url || 'https://composio.n8n.cloud');
+  const endpoint = new URL(options.url || defaultConnectionService);
   if (
     (endpoint.protocol !== 'https:' &&
       !(
@@ -437,7 +438,11 @@ export function createComposioProxy(options: {
         .strict()
         .parse(await rpc('/v2/connect/status', { ticket }, { signal, timeout: 5_000 }));
     },
-    async authorize(toolkit: string, callbackUrl: string, reconnectAccountId?: string) {
+    async authorize(
+      toolkit: string,
+      callbackUrl: string,
+      { reconnectAccountId, app }: { reconnectAccountId?: string; app?: string } = {},
+    ) {
       const callback = new URL(callbackUrl);
       const transactionId = stateSchema.parse(callback.searchParams.get('state'));
       const host =
@@ -518,6 +523,7 @@ export function createComposioProxy(options: {
             throw new Error('The app sign-in address could not be verified.');
           return redirect.href;
         },
+        app,
       );
       return { accountId: `${pendingPrefix}${transactionId}`, url, verificationSecret: challenge };
     },

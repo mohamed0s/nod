@@ -22,6 +22,7 @@ export function createAccountSession(options: {
   accounts: AccountStore;
   localUser: AccountUser;
   developerIds?: ReadonlySet<string>;
+  turnTraceIds?: ReadonlySet<string>;
   analytics?: Analytics;
   model?(): { provider: string; name: string; configured: boolean };
   start?(): Promise<void>;
@@ -130,6 +131,7 @@ export function createAccountSession(options: {
         },
         capabilities: {
           developer: Boolean(options.developerIds?.has(owner)),
+          turnTraces: Boolean(options.turnTraceIds?.has(owner)),
           traces: options.traces === true,
           updatesEmail: options.updatesEmail === true,
         },

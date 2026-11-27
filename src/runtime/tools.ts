@@ -10,7 +10,14 @@ import {
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import { answerChoiceInputSchema, answerChoicesSchema } from '../shared/answer-choices.ts';
-import { presentationInputSchema, type Presentation } from '../shared/presentation.ts';
+import {
+  flightItems,
+  presentationInputSchema,
+  presentationPick,
+  presentationSchema,
+  type Presentation,
+} from '../shared/presentation.ts';
+import { previewableUrl } from '../shared/link-preview.ts';
 import { proactiveUpdateSchema, sourceReadSchema } from '../shared/proactivity.ts';
 import { Value } from '@sinclair/typebox/value';
 import {
@@ -98,6 +105,50 @@ function literals<const T extends readonly string[]>(values: T) {
 }
 
 type ObjectSchema = TSchema & { properties: Record<string, TSchema>; required?: string[] };
+
+const browserFields = {
+  url: Type.Optional(Type.String()),
+  script: Type.Optional(Type.String()),
+  tabId: Type.Optional(Type.String({ minLength: 1 })),
+  selector: Type.Optional(Type.String()),
+  targetSelector: Type.Optional(Type.String()),
+  text: Type.Optional(Type.String()),
+  key: Type.Optional(Type.String()),
+  load: Type.Optional(literals(['load', 'domcontentloaded', 'networkidle'])),
+  direction: Type.Optional(literals(['up', 'down'])),
+  amount: Type.Optional(Type.Integer({ minimum: 1 })),
+  waitMs: Type.Optional(Type.Integer({ minimum: 0 })),
+};
+
+const browserStep = Type.Object(
+  {
+    action: literals([
+      'open',
+      'click',
+      'fill',
+      'type',
+      'press',
+      'scroll',
+      'select',
+      'check',
+      'uncheck',
+      'hover',
+      'drag',
+      'back',
+      'forward',
+      'reload',
+      'tab_switch',
+      'wait',
+      'evaluate',
+      'accept_dialog',
+      'dismiss_dialog',
+      'snapshot',
+      'screenshot',
+    ]),
+    ...browserFields,
+  },
+  { additionalProperties: false },
+);
 
 function unionOfObjects(schema: TSchema) {
   const members = (schema as { anyOf?: ObjectSchema[] }).anyOf;
@@ -223,10 +274,88 @@ const flightReferences = z.looseObject({
     .min(1)
     .max(8),
 });
+const clip = (value: unknown, max: number) =>
+  typeof value === 'string' && value.length > max ? `${value.slice(0, max - 1).trimEnd()}…` : value;
+const coerceStatus = (value: unknown) => {
+  if (typeof value !== 'string') return value;
+  const label = value.trim();
+  if (!label) return undefined;
+  const lower = label.toLowerCase();
+  const tone = /fail|error|block|refus|declin|cancel|reject|overdue|missed/.test(lower)
+    ? 'failed'
+    : /wait|pend|hold/.test(lower)
+      ? 'waiting'
+      : /done|paid|sent|confirm|approv|complet|resolv|deliver|closed|settled/.test(lower)
+        ? 'done'
+        : /open|schedul|review|progress/.test(lower)
+          ? 'waiting'
+          : 'new';
+  return { label: clip(label, 40) as string, tone };
+};
+const safeHttpsUrl = (value: unknown) =>
+  typeof value === 'string' && Boolean(previewableUrl(value)?.startsWith('https://'))
+    ? value
+    : undefined;
+const normalizePresentationInput = (value: unknown) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const record = { ...(value as Record<string, unknown>) };
+  if (!('sources' in record)) record.sources = [];
+  else if (Array.isArray(record.sources)) {
+    record.sources = record.sources
+      .filter(
+        (entry): entry is Record<string, unknown> =>
+          Boolean(entry) &&
+          typeof entry === 'object' &&
+          !Array.isArray(entry) &&
+          typeof (entry as { label?: unknown }).label === 'string' &&
+          Boolean((entry as { label: string }).label.trim()) &&
+          Boolean(safeHttpsUrl((entry as { url?: unknown }).url)),
+      )
+      .slice(0, 8)
+      .map((entry) => ({
+        label: clip((entry.label as string).trim(), 100),
+        url: entry.url,
+      }));
+  }
+  if (typeof record.title === 'string') record.title = clip(record.title.trim(), 120);
+  if (typeof record.caption === 'string') record.caption = clip(record.caption.trim(), 600);
+  if (typeof record.status === 'string' && record.type === 'facts') {
+    const coerced = coerceStatus(record.status);
+    if (coerced) record.status = coerced;
+    else delete record.status;
+  }
+  if (typeof record.note === 'string') record.note = clip(record.note.trim(), 220);
+  if (typeof record.verdict === 'string') record.verdict = clip(record.verdict.trim(), 240);
+  if (Array.isArray(record.items)) {
+    record.items = record.items.map((entry) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return entry;
+      const item = { ...(entry as Record<string, unknown>) };
+      if (typeof item.title === 'string') item.title = clip(item.title.trim(), 120);
+      if (typeof item.sub === 'string') item.sub = clip(item.sub.trim(), 160);
+      if (typeof item.badge === 'string') item.badge = clip(item.badge.trim(), 24);
+      if (Array.isArray(item.tags))
+        item.tags = item.tags
+          .filter((tag): tag is string => typeof tag === 'string' && Boolean(tag.trim()))
+          .slice(0, 3)
+          .map((tag) => clip(tag.trim(), 24));
+      if (typeof item.detail === 'string')
+        item.detail = clip(item.detail.trim(), record.type === 'schedule' ? 180 : 360);
+      if (typeof item.status === 'string') {
+        const coerced = coerceStatus(item.status);
+        if (coerced) item.status = coerced;
+        else delete item.status;
+      }
+      if ('url' in item && !safeHttpsUrl(item.url)) delete item.url;
+      return item;
+    });
+  }
+  return record;
+};
 TypeRegistry.Set(
   'NodPresentation',
   (_schema, value) =>
-    presentationInputSchema.safeParse(value).success || flightReferences.safeParse(value).success,
+    presentationInputSchema.safeParse(normalizePresentationInput(value)).success ||
+    flightReferences.safeParse(value).success,
 );
 const { $schema, ...presentationJsonSchema } = z.toJSONSchema(presentationInputSchema, {
   target: 'draft-7',
@@ -240,7 +369,7 @@ const presentation = Type.Unsafe<Presentation>({
 export const toolDefinitions = {
   flights: defineTool(
     'flights',
-    'Search live Google Flights fares and schedules. Each search is one way, or a round trip with returnDate. Put nearby airports in one search, and list up to six searches to compare dates or routes in one call. For a multi-city trip or stopover, search each leg; those are separate tickets. Use IATA codes, the conversation language code and the owner\'s currency. Prices are totals for all travellers with taxes, before bags and seat fees. Show options with send_message presentation {version:1,type:"flights",title,options:[{id,recommended?,label?}]}; Nod fills each id from these results with its source. Join legs of one trip with +, such as A3+B2, and Nod shows them as one itinerary with the total price.',
+    'Search live Google Flights fares and schedules. Each search is one way, or a round trip with returnDate. Put nearby airports in one search, and list up to six searches to compare dates or routes in one call. For a multi-city trip or stopover, search each leg; those are separate tickets. Use IATA codes, the conversation language code and the owner\'s currency. Prices are totals for all travellers with taxes, before bags and seat fees. Show options with send_message presentation {version:1,type:"flights",title,options:[{id,recommended?,label?}],pick?:{question}}; Nod fills each id from these results with its source. Join legs of one trip with +, such as A3+B2, and Nod shows them as one itinerary with the total price.',
     Type.Object(
       {
         searches: Type.Array(
@@ -305,7 +434,7 @@ export const toolDefinitions = {
   ),
   send_message: defineTool(
     'send_message',
-    'Deliver a checked result, necessary decision or task handoff now. A partial result must be useful on its own; finish related checks that could change its meaning. Use intent "final" only when this delivery completes the owner\'s request; it ends the turn. Use "handoff" only for a short acknowledgement right before starting a task. Omit intent or use "update" for partial results, then continue. Deliver results with their element in presentation: flight options or an itinerary → flights; places or locations → map; venues, stays, restaurants or a reservation → booking; numbers across items or over time → chart; a seat layout → seats; a process or relationship → diagram; an image you inspected → image; apps to connect, only when the owner asks for more ideas → apps. visual-replies has the field rules. Text states any detail the owner asked for, such as a code, amount or time, plus only missing context, caveats or sources; leave it empty only for a self-contained visual. End without delivery announcements or recaps. Background final text stays private. Completion requires confirmed, inspectable output.',
+    'Deliver a checked result, decision or task handoff. A partial result must stand alone. intent "final" completes the request, ends the turn and settles a task without task finish; "handoff" acknowledges right before starting a task; omit or "update" continues. Prefer presentation over Markdown lists/tables for short results (use share_file for longer reports/guides); plain text for short replies. Base: {version:1, type, title, sources:[{label,url}], asOf?}. items {items:[{title, sub?, badge?, tags?, value?, valueSub?, status?:{label,tone:"new"|"waiting"|"done"|"failed"}, detail?, facts?, url?, image?:"photo src or own site, not a map", location?}], ranked?, note?, pick?:{question,multiple?}}. compare {columns:[{label,sub?:price,url:own product page,image?}], rows:[{label, values, best?, amounts?}], winner?, verdict?, pick?}. facts {stats?:[{label,value,sub?}], items?:[{label,value,strong?}], status?}. schedule {items:[{day?, start, end?, title, detail?, quiet?}]}. flights {options:[{id, recommended?}], pick?}. draft for emails you write. Other types: skills read visual-replies. Add pick {question} only when the turn cannot finish until the owner chooses (omit intent "final"; never on a recommendation, comparison, brief or brainstorm). Keep text to caveats, recommendation or links not in the card; empty if self-contained. No delivery recaps. Background final text stays private.',
     Type.Object({
       text: Type.String(),
       presentation: Type.Optional(presentation),
@@ -332,15 +461,16 @@ export const toolDefinitions = {
   ),
   delegate: defineTool(
     'delegate',
-    "Run one part of the request as a subagent with its own browser, Nod's tools and the shared workspace, and get its final answer back. Call it several times in one step to run independent parts in parallel, such as checking three shops, then combine the answers. The instruction must be complete on its own: the subagent does not see this conversation. Each subagent writes new files in its own directory inside the shared workspace. A subagent cannot delegate, ask or send chat messages to the owner, connect apps, sign in, pay or open saved browser sessions. It returns questions and blockers to you; handle those yourself.",
+    "Run one part of the request as a faster subagent with its own browser tab, Nod's tools and the shared workspace, and get its final answer back. For 2+ independent sites, venues or options, call delegate in parallel in one step instead of browsing sequentially. The instruction must stand alone (the subagent does not see this conversation). Each subagent writes new files in its own workspace directory and cannot delegate, message the owner, connect apps, sign in or pay; handle questions and blockers yourself.",
     Type.Object({
       title: Type.String({ minLength: 1 }),
       instruction: Type.String({ minLength: 1 }),
     }),
+    true,
   ),
   ask_user: defineTool(
     'ask_user',
-    'Ask one necessary question and pause. For a finite decision, supply known choices instead of a prose list, normally two to four. Each label is one short line that names the option with the detail that tells it apart. The owner can write another answer. Never use choices for action approvals or secrets.',
+    'Ask one necessary question, ending with a question mark, and pause. Supply choices whenever likely answers exist, normally two to four, even for open details such as dates, budgets or counts: offer the likely values, for example "This weekend" or "Under €150 a night". Each label is one short line that names the option with the detail that tells it apart; add one such as "Decide for me" when you can pick a sensible default. The owner can write another answer. Put assumptions and any answer to earlier messages first, as their own paragraph, and end with the question alone. Never use choices for action approvals or secrets.',
     Type.Object({
       question: Type.String(),
       choices: Type.Optional(
@@ -369,7 +499,7 @@ export const toolDefinitions = {
   ),
   browser: defineTool(
     'browser',
-    'Control the private browser. open {url}; snapshot {selector?,offset?} returns page text and @eN refs; selector takes a current @eN ref, or CSS only for an element without one; click/fill/type/select/check/uncheck/hover {selector,text?}; press {key}; drag {selector,targetSelector} or {points,durationMs?}; upload {selector,path}; back/forward/reload; tab_list/tab_switch {tabId}; scroll {direction,selector?,amount?}; wait {text|url|load,waitMs?}; accept_dialog {text?}/dismiss_dialog; evaluate {script} runs one JavaScript expression. screenshot returns an image; share_screenshot {name?} stages an image for delivery. Coordinates x,y are fractions of a fresh screenshot. Never type secrets. download {url?|selector?,name?} saves a file; with neither it uses the open PDF or last download. Click document controls and inspect before downloading. Background files stay private until share_file. handoff {text} gives the owner control and pauses; state the needed action, then inspect after handback. Never send a /browser link. waitMs allows slow pages.',
+    'Control the private browser. open {url}; snapshot {selector?,offset?} returns page text and @eN refs; selector takes a current @eN ref, or CSS only for an element without one; click/fill/type/select/check/uncheck/hover {selector,text?}; press {key}; drag {selector,targetSelector} or {points,durationMs?}; upload {selector,path}; back/forward/reload; tab_list/tab_switch {tabId}; scroll {direction,selector?,amount?}; wait {text|url|load,waitMs?}; accept_dialog {text?}/dismiss_dialog; evaluate {script} runs one JavaScript expression. screenshot returns an image; share_screenshot {name?} stages an image for delivery. Coordinates x,y are fractions of a fresh screenshot. Never type secrets. download {url?|selector?,name?} saves a file; with neither it uses the open PDF or last download. Click document controls and inspect before downloading. Background files stay private until share_file. handoff {text} gives the owner control and pauses; state the needed action, then inspect after handback. Never send a /browser link. waitMs allows slow pages. After an action, the page is its first 10,000 characters without link addresses; snapshot reads up to 40,000 with them. steps {steps} runs up to 10 actions in order, each as {action,...}, without coordinates, and returns script results and the last page; snapshot or screenshot only as the last step. Use steps when you know the next actions, such as open then evaluate, or fill fields then submit. It stops at a failure, an unmet wait, a step that needs approval, or an @eN ref after the page address changed, and says which steps ran.',
     Type.Object({
       action: literals([
         'handoff',
@@ -398,12 +528,10 @@ export const toolDefinitions = {
         'wait',
         'accept_dialog',
         'dismiss_dialog',
+        'steps',
       ]),
-      url: Type.Optional(Type.String()),
-      script: Type.Optional(Type.String()),
-      tabId: Type.Optional(Type.String({ minLength: 1 })),
-      selector: Type.Optional(Type.String()),
-      targetSelector: Type.Optional(Type.String()),
+      ...browserFields,
+      steps: Type.Optional(Type.Array(browserStep, { minItems: 1, maxItems: 10 })),
       x: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
       y: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
       points: Type.Optional(
@@ -417,21 +545,15 @@ export const toolDefinitions = {
       ),
       durationMs: Type.Optional(Type.Integer({ minimum: 0 })),
       path: Type.Optional(Type.String()),
-      text: Type.Optional(Type.String()),
-      key: Type.Optional(Type.String()),
-      load: Type.Optional(literals(['load', 'domcontentloaded', 'networkidle'])),
-      direction: Type.Optional(literals(['up', 'down'])),
-      amount: Type.Optional(Type.Integer({ minimum: 1 })),
-      waitMs: Type.Optional(Type.Integer({ minimum: 0 })),
       offset: Type.Optional(Type.Integer({ minimum: 0 })),
       name: Type.Optional(Type.String({ minLength: 1 })),
     }),
     true,
-    ['sign_in', 'browser_session', 'pay'],
+    ['sign_in', 'pay'],
   ),
   sign_in: defineTool(
     'sign_in',
-    "Private sign-in on the current exact origin. Inspect the page and saved account metadata first. Use the owner's method or a unique matching saved login, which selects password sign-in. For ambiguous methods use kind:method with one {label,selector} per visible method control, by current @eN ref or CSS. Ask only for an ambiguous account. For identifier/password/otp, pass current field refs or CSS selectors and submitSelector if required; omit it for automatic submission. passwordSelector can be an ordered array for split codes. savedLoginId selects a Vault login from manage_apps list; one matching Vault login is used automatically. Otherwise the owner enters values privately. Use emailCode:true and the page's emailRecipient only for a code sent by email; Nod retrieves it privately. Omit emailCode for an authenticator code. Never read codes with apps or ask in chat. message describes private entry without repeating the button label; action is that short button label; label names the login. The server checks consent, fills and submits once; the result includes the page when available. Inspect it without submitting again. Read-only scripts need no reload; reload only when entry was refused because a script changed the document.",
+    "Private sign-in on the current exact origin. Inspect the page and saved account metadata first. Use the owner's method or a unique matching saved login, which selects password sign-in. For ambiguous methods use kind:method with one {label,selector} per visible method control, by current @eN ref or CSS. Ask only for an ambiguous account. Otherwise pass the sign-in fields visible on the page as current refs or CSS selectors: usernameSelector, passwordSelector or both, and submitSelector if required; omit it for automatic submission. For a verification code use kind:otp with its field as passwordSelector, which can be an ordered array for split codes. savedLoginId selects a Vault login from manage_apps list; one matching Vault login is used automatically. Otherwise the owner enters values privately. Use emailCode:true and the page's emailRecipient only for a code sent by email; Nod retrieves it privately. Omit emailCode for an authenticator code. Never read codes with apps or ask in chat. message describes private entry without repeating the button label; action is that short button label; label names the login. The server checks consent, fills and submits once; the result includes the page when available. Inspect it without submitting again. Read-only scripts need no reload; reload only when entry was refused because a script changed the document.",
     Type.Union([
       Type.Object(
         {
@@ -440,7 +562,7 @@ export const toolDefinitions = {
           savedLoginId: Type.Optional(uuid),
           message: Type.String({ minLength: 1 }),
           action: Type.String({ minLength: 1 }),
-          kind: literals(['identifier', 'password', 'otp']),
+          kind: Type.Optional(Type.Literal('otp')),
           usernameSelector: Type.Optional(fieldSelector),
           passwordSelector: Type.Optional(
             Type.Union([fieldSelector, Type.Array(fieldSelector, { minItems: 1 })]),
@@ -493,39 +615,6 @@ export const toolDefinitions = {
         ]),
       ]),
     }),
-  ),
-  browser_session: defineTool(
-    'browser_session',
-    'Manage private browser profiles. connect {url,label?} opens a new profile. use {url,connectionId} opens a saved one after the sign-in trust check; inspect the page to check access. save {url,connectionId,signedIn:true} records a checked sign-in on that origin. Public pages need only browser open.',
-    Type.Union([
-      Type.Object(
-        {
-          action: Type.Literal('connect'),
-          url: Type.String({ minLength: 1 }),
-          label: Type.Optional(Type.String({ minLength: 1 })),
-        },
-        { additionalProperties: false },
-      ),
-      Type.Object(
-        {
-          action: Type.Literal('use'),
-          url: Type.String({ minLength: 1 }),
-          connectionId: uuid,
-        },
-        { additionalProperties: false },
-      ),
-      Type.Object(
-        {
-          action: Type.Literal('save'),
-          url: Type.String({ minLength: 1 }),
-          connectionId: uuid,
-          signedIn: Type.Literal(true),
-        },
-        { additionalProperties: false },
-      ),
-    ]),
-    false,
-    ['sign_in', 'pay'],
   ),
   apps: defineTool(
     'apps',
@@ -614,7 +703,7 @@ export const toolDefinitions = {
   ),
   manage_apps: defineTool(
     'manage_apps',
-    'list {query?} reads accounts and paths; use a service query for exact-origin saved logins and browser profiles. discover {query?} finds integrations; connect {service} uses a returned slug and pauses for private sign-in. Reconnect only with the saved connectionId and canReconnect:true. For canReconnect:false managed accounts, direct the owner to Apps, that app, Add account for the saved identity; explain it adds a separate connection. Ask if identity is unclear. Do not use this fallback for not_configured, disconnectPending, browser or Vault entries. newAccount:true requires an explicit request for another account. propose {service,proposal} offers an official path through private setup; proposal is {service,name,connectionId?,setupUrl?,setupText?,paths:[{kind:"http",endpoint,auth?:"bearer"|"x-api-key",testPath} | {kind:"mcp",endpoint,auth?:"bearer"|"x-api-key"|"oauth",scope?,clientIdRequired?} | {kind:"cli",command,auth?:"env",env:[names],source:{npm}|{pypi}|{url,sha256?}}]}. A CLI needs its declared npm, pypi or HTTPS release source and actual credential env names; Nod installs and runs its own copy, never from your workspace. Never request keys in chat. Deliver completed work before a required sign-in.',
+    'list {query?} reads accounts and paths; use a service query for exact-origin saved logins. discover {query?} finds integrations; connect {service} uses a returned slug and pauses for private sign-in. Reconnect only with the saved connectionId and canReconnect:true. For canReconnect:false managed accounts, direct the owner to Apps, that app, Add account for the saved identity; explain it adds a separate connection. Ask if identity is unclear. Do not use this fallback for not_configured, disconnectPending, browser or Vault entries. newAccount:true requires an explicit request for another account. propose {service,proposal} offers an official path through private setup; proposal is {service,name,connectionId?,setupUrl?,setupText?,paths:[{kind:"http",endpoint,auth?:"bearer"|"x-api-key",testPath} | {kind:"mcp",endpoint,auth?:"bearer"|"x-api-key"|"oauth",scope?,clientIdRequired?} | {kind:"cli",command,auth?:"env",env:[names],source:{npm}|{pypi}|{url,sha256?}}]}. A CLI needs its declared npm, pypi or HTTPS release source and actual credential env names; Nod installs and runs its own copy, never from your workspace. Never request keys in chat. Deliver completed work before a required sign-in.',
     Type.Object({
       action: literals(['list', 'discover', 'connect', 'propose']),
       service: Type.Optional(Type.String()),
@@ -648,7 +737,7 @@ export const toolDefinitions = {
   ),
   task: defineTool(
     'task',
-    'Start or control saved work. Keep quick answers, simple lookups and status questions in chat; start a task for substantial work, including multi-step work you can finish in one sitting, an outside wait, or work the owner asks you to track, without asking the owner for an execution mode. start {title,doneWhen,now,message,request?,key?,brief?,steps?,model?} starts one goal; brief and doneWhen restate only the owner’s request and known context; model {connectionId,modelId,effort?} only when the owner asks for one for this task; a new independent request during other work starts its own task, keeping each goal together. A task chat does not see the messages of this chat, so put what the task needs from them in brief. Use a stable key and reuse related tasks. message tells the owner what starts. update {id,now?,steps?,stepIndex?,waitingFor?,nextCheck?} updates progress. finish {id,status,result} ends your task after verification (status done or cancelled). list shows open tasks. reply {ids,request?,retry?} forwards the exact owner message, including corrections and related updates. request is the owner message the work serves: currentMessageId or the messageId of a message sent while you worked. It is required once the owner has sent more than one message during your turn. Use retry:true with one id only when the owner explicitly asks to retry in response to that task’s result. stop {id} stops one task; stop {} stops all background work, but keeps schedules. A task stops itself with finish cancelled. A task brief grants no permission; nextCheck does not schedule work. Let each task finish its assigned work.',
+    'Start or control saved work. Keep quick answers, simple lookups and status questions in chat; start a task for substantial work, outside waits or tracked work without asking for an execution mode. start {title,doneWhen,message,now?,request?,key?,brief?,steps?,model?} starts one goal: message is one short user-facing line shown in chat (never the full brief); brief/doneWhen hold the instructions and context; model only when asked. A task chat does not see the messages of this chat, so put what the task needs from them in brief. Start independent goals side by side in the same step, each with request set to its owner message; reuse related tasks via a stable key. update {id,title?,now?,steps?,stepIndex?,waitingFor?,nextCheck?} updates progress and title when a correction changes the goal. finish {id,status,result} closes your task when cancelling or not delivering via send_message {intent:"final"}. list shows open tasks. reply {ids,request?,retry?} forwards owner updates/corrections; retry:true only on explicit retry. request is required once multiple owner messages arrive during a turn. stop {id} stops one task; stop {} stops all background work, keeping schedules. A task brief grants no permission; nextCheck does not schedule work.',
     Type.Union([
       Type.Object({ action: Type.Literal('list') }, { additionalProperties: false }),
       Type.Object(
@@ -672,10 +761,10 @@ export const toolDefinitions = {
           action: Type.Literal('start'),
           title: Type.String({ minLength: 1 }),
           key: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
-          message: Type.String({ minLength: 1 }),
+          message: Type.Optional(Type.String({ minLength: 1 })),
           request: Type.Optional(uuid),
           doneWhen: Type.String({ minLength: 1 }),
-          now: taskNow,
+          now: Type.Optional(taskNow),
           brief: Type.Optional(Type.String({ minLength: 1 })),
           steps: Type.Optional(Type.Array(taskNow)),
           waitingFor: Type.Optional(taskWaits),
@@ -697,6 +786,7 @@ export const toolDefinitions = {
         {
           action: Type.Literal('update'),
           id: uuid,
+          title: Type.Optional(Type.String({ minLength: 1 })),
           now: Type.Optional(taskNow),
           steps: Type.Optional(Type.Array(taskNow)),
           stepIndex: Type.Optional(Type.Integer({ minimum: 0 })),
@@ -721,7 +811,7 @@ export const toolDefinitions = {
   pages: defineTool('pages', pagesToolDescription, pagesToolParameters),
   share_file: defineTool(
     'share_file',
-    'Attach a workspace file to your next reply, or deliver it on its own when no reply follows. Check the file first and share each file once.',
+    'Attach a workspace file to your next reply, or deliver it on its own. Prefer Markdown via share_file for reusable reports, guides or playbooks. Check first and share once.',
     Type.Object({
       path: Type.String(),
       name: Type.Optional(Type.String()),
@@ -800,6 +890,15 @@ function pageKey(url: string) {
   }
 }
 
+function pageLocation(url: string) {
+  try {
+    const page = new URL(url);
+    return `${page.origin}${page.pathname}${page.search}${page.hash}`;
+  } catch {
+    return url;
+  }
+}
+
 const inputRoles = new Set([
   'link',
   'tab',
@@ -816,6 +915,10 @@ const commits = (step: BrowserAction) =>
     step.action,
   ) ||
   (step.action === 'type' && /[\r\n]/.test(step.text ?? ''));
+
+const navigations = new Set(['open', 'back', 'forward', 'reload', 'tab_switch']);
+
+const reference = (value: string | undefined) => /^@?(?:ref=)?e\d+$/.test(value?.trim() ?? '');
 
 const mcpPart = (value: string) =>
   value
@@ -923,11 +1026,11 @@ export function nodTools(
         return result;
       }),
     );
-    const { sources: _sources, asOf: _asOf, ...rest } = references.data;
+    const { sources: _sources, asOf: _asOf, pick, ...rest } = references.data;
     const cited = parts.flat();
     const sources = [...new Map(cited.map((leg) => [leg.source.url, leg.source])).values()];
     if (sources.length > 8) throw new Error('One flight card can cite at most eight searches.');
-    return {
+    const flights = presentationSchema.parse({
       version: 1,
       ...rest,
       options: references.data.options.map(({ recommended, label }, index) => {
@@ -959,7 +1062,9 @@ export function nodTools(
       }),
       sources,
       asOf: cited[0]!.asOf(cited.map((leg) => leg.searchedAt).sort()[0]!),
-    };
+    });
+    if (flights.type !== 'flights') throw new Error('Flight references must build a flights list.');
+    return { ...flightItems(flights), ...(pick === undefined ? {} : { pick }) };
   };
   const { browserId } = turn.execution;
   const { signal } = context;
@@ -977,6 +1082,7 @@ export function nodTools(
     return 'Waiting for the user to sign in.';
   };
   let typedPage = '';
+  let lastLocation = '';
   let typed: string[] = [];
   let pressing = false;
   const observed = (
@@ -985,6 +1091,7 @@ export function nodTools(
     choice?: string,
   ) => {
     turn.visited(browserId, page.url);
+    lastLocation = pageLocation(page.url);
     const key = pageKey(page.url);
     const same = typedPage === key || !typedPage;
     if (key !== typedPage) {
@@ -1059,6 +1166,112 @@ export function nodTools(
       );
     if (appConfirmation in verdict) return { output: await confirm(verdict) };
     return { output: verdict.result };
+  };
+  const act = async (
+    step: BrowserAction,
+    started?: () => void,
+  ): Promise<{ page: BrowserObservation; choice?: string } | { output: unknown }> => {
+    if (step.action === 'evaluate' && context.browserStep)
+      try {
+        return { page: await computer.act(browserId, { ...step, readOnly: true }, signal) };
+      } catch (error) {
+        if (!(error instanceof BrowserActionError && error.code === 'browser_script_writes'))
+          throw error;
+      }
+    const checked =
+      commits(step) || (context.checkTyping && ['fill', 'type'].includes(step.action))
+        ? await check(step)
+        : { binding: {} };
+    if ('output' in checked) return { output: checked.output };
+    started?.();
+    const page = await computer.act(browserId, { ...step, ...checked.binding }, signal);
+    if ('record' in checked) await checked.record?.();
+    return { page, choice: checked.choice };
+  };
+  const steps = async (list: Static<typeof browserStep>[]) => {
+    if (list.slice(0, -1).some((step) => ['snapshot', 'screenshot'].includes(step.action)))
+      throw new Error('Put snapshot or screenshot only as the last step.');
+    const notes: string[] = [];
+    let shown = '';
+    let at = lastLocation;
+    let moved = false;
+    const ran = (count: number) =>
+      `Ran ${count} of ${list.length} steps${
+        count
+          ? `: ${list
+              .slice(0, count)
+              .map((step) => step.action)
+              .join(', ')}`
+          : ''
+      }.`;
+    const report = (count: number, reason?: string) =>
+      [ran(count), reason, ...notes, shown].filter(Boolean).join('\n\n');
+    for (const [index, item] of list.entries()) {
+      const label = `Step ${index + 1} (${item.action})`;
+      if (item.action === 'screenshot') {
+        let bytes: Awaited<ReturnType<typeof screenshot>>;
+        try {
+          bytes = await screenshot();
+        } catch (error) {
+          if (signal.aborted) throw error;
+          const message = error instanceof Error ? error.message : String(error);
+          throw new Error(`${ran(index)} ${label} failed; later steps did not run. ${message}`, {
+            cause: error,
+          });
+        }
+        if (!bytes) return report(index, `${label} found no open page.`);
+        shown = '';
+        return {
+          content: [
+            { type: 'text', text: report(index + 1) },
+            { type: 'image', data: bytes.toString('base64'), mimeType: 'image/png' },
+          ],
+          details: {},
+        };
+      }
+      if (moved && [item.selector, item.targetSelector].some((value) => reference(value)))
+        return report(
+          index,
+          `Stopped before ${label}: the page may have changed, so its @eN refs may be out of date. Choose them again from the page below.`,
+        );
+      const step = item as BrowserAction;
+      let done;
+      let started = false;
+      try {
+        done = await act(step, () => {
+          started = true;
+        });
+      } catch (error) {
+        if (signal.aborted) throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        if (error instanceof BrowserActionError && error.code === 'browser_click_intercepted')
+          return report(index, `${label} did not run; later steps did not run. ${message}`);
+        throw new Error(
+          `${ran(index)} ${label} ${started ? 'failed and may have taken effect' : 'did not run'}; later steps did not run. ${message}`,
+          { cause: error },
+        );
+      }
+      if ('output' in done)
+        return {
+          steps: ran(index),
+          stopped: `${label} and the steps after it did not run.`,
+          result: done.output,
+        };
+      const text = observed(step, done.page, done.choice);
+      if (step.action === 'evaluate') {
+        notes.push(`${label}:\n${text}`);
+        shown = '';
+      } else shown = text;
+      const key = pageLocation(done.page.url);
+      if (navigations.has(step.action) || (at ? key !== at : commits(step))) moved = true;
+      at = key;
+      if (done.page.unmet && index < list.length - 1)
+        return report(
+          index + 1,
+          `The wait in ${label.toLowerCase()} was not met, so later steps did not run.`,
+        );
+    }
+    return report(list.length);
   };
   return [
     ...(context.proactivity
@@ -1160,16 +1373,49 @@ export function nodTools(
       const visual =
         p.presentation === undefined
           ? undefined
-          : presentationInputSchema.parse(withFlights(p.presentation));
+          : presentationInputSchema.parse(normalizePresentationInput(withFlights(p.presentation)));
       if (!p.text.trim() && !visual) throw new Error('A text answer or visual is required.');
+      const pick = visual && presentationPick(visual);
+      if (pick && p.intent === 'final')
+        throw new Error(
+          'A presentation with pick pauses for the owner to choose and cannot use intent "final". Omit pick to finish, or omit intent "final" if you must wait for a choice.',
+        );
       const delivery =
         p.intent === 'handoff'
           ? await turn.reply(p.text, undefined, p.replyToMessageId, visual, true)
-          : await turn.reply(p.text, undefined, p.replyToMessageId, visual);
+          : await turn.reply(
+              p.text,
+              undefined,
+              p.replyToMessageId,
+              visual,
+              false,
+              p.intent === 'update',
+            );
       const outcome = {
         none: 'The text answer is already visible to the owner.',
         original: 'The visual and accompanying text are already visible to the owner.',
       }[delivery.presentation];
+      if (pick) {
+        const waiting = await pause(
+          'question',
+          pick.question,
+          answerChoicesSchema.parse({
+            options: pick.choices.map((choice) => ({ ...choice, id: randomUUID() })),
+            multiple: pick.multiple ?? false,
+          }),
+          {
+            deferred: true,
+            answered: delivery.delivered,
+            ...(p.replyToMessageId ? { replyToMessageId: p.replyToMessageId } : {}),
+          },
+        );
+        return {
+          ...delivery,
+          message: waiting
+            ? `${outcome} Waiting for the user to choose.`
+            : `${outcome} The owner can still choose on it. They sent new messages before choosing, which follow this result: answer those without sending this card again.`,
+        };
+      }
       return {
         ...delivery,
         message: `${outcome} If this completes the request, finish with no additional text. Continue only for substantive new results, caveats or remaining work; do not announce or recap delivery.`,
@@ -1212,7 +1458,7 @@ export function nodTools(
         };
       return context.reactToMessage(p.messageId, p.reaction);
     }),
-    bind(toolDefinitions.browser, async ({ action, name, ...rest }) => {
+    bind(toolDefinitions.browser, async ({ action, name, steps: list, ...rest }) => {
       if (action === 'handoff') {
         if (turn.execution.parentRunId)
           throw new Error(
@@ -1283,22 +1529,13 @@ export function nodTools(
         await checked.record?.();
         return observed({ action }, page);
       }
+      if (action === 'steps') {
+        if (!list?.length) throw new Error('Give the steps to run as a non-empty steps list.');
+        return steps(list);
+      }
       const step = { action, ...rest } as BrowserAction;
-      if (action === 'evaluate' && context.browserStep)
-        try {
-          return observed(step, await computer.act(browserId, { ...step, readOnly: true }, signal));
-        } catch (error) {
-          if (!(error instanceof BrowserActionError && error.code === 'browser_script_writes'))
-            throw error;
-        }
-      const checked =
-        commits(step) || (context.checkTyping && ['fill', 'type'].includes(step.action))
-          ? await check(step)
-          : { binding: {} };
-      if ('output' in checked) return checked.output;
-      const page = await computer.act(browserId, { ...step, ...checked.binding }, signal);
-      if ('record' in checked) await checked.record?.();
-      return observed(step, page, checked.choice);
+      const done = await act(step);
+      return 'output' in done ? done.output : observed(step, done.page, done.choice);
     }),
     bind(toolDefinitions.sign_in, async ({ message, action, ...request }) => {
       const result = await context.requestCredential(request);
@@ -1331,42 +1568,6 @@ export function nodTools(
           : paymentExplanation(result.question),
       );
       return 'Waiting for private payment approval.';
-    }),
-    bind(toolDefinitions.browser_session, async (p) => {
-      if (!context.browserConnection) throw new Error('Browser connections are unavailable.');
-      const outcome = await context.browserConnection(p);
-      if (outcome && typeof outcome === 'object' && appConfirmation in outcome)
-        return confirm(outcome);
-      const result = outcome as Record<string, unknown>;
-      if (result.status === 'rejected') {
-        switch (result.code) {
-          case 'invalid_browser_connection_arguments':
-            throw new Error(
-              'Invalid browser session input. Valid forms: connect {url, label?}; use {url, connectionId}; save {url, connectionId, signedIn:true}.',
-            );
-          case 'browser_connection_origin_mismatch':
-            throw new Error(
-              'This browser connection belongs to a different website. Use a saved connection for the current origin.',
-            );
-          case 'browser_connection_unavailable':
-            throw new Error(
-              'This browser connection is unavailable for the current task. List saved connections and inspect the current page before choosing one.',
-            );
-          case 'browser_connection_busy':
-            throw new Error(
-              'This browser profile is open in another task, waiting for the user to finish signing in. Open public pages with browser instead, or try again later.',
-            );
-          default:
-            throw new Error(
-              'The browser session request was rejected. Check the current page and saved connection before trying again.',
-            );
-        }
-      }
-      if (p.action === 'connect' || result.status === 'needs_sign_in') {
-        const { url: _url, ...safe } = result;
-        return safe;
-      }
-      return result;
     }),
     ...(context.localFiles
       ? [
@@ -1491,15 +1692,24 @@ export function nodTools(
     bind(toolDefinitions.task, async (p) => {
       if (!context.task) throw new Error('Tasks are unavailable.');
       const result = await context.task(p);
-      if (p.action === 'list' || p.action === 'reply' || p.action === 'stop')
-        return untrustedBlock('task records', JSON.stringify(result));
-      return p.action === 'start' && !context.taskContext && !context.background
-        ? {
-            ...(result as object),
-            message:
-              'The task has started and its start message is already visible. Do not add another acknowledgement. The task now does this work in its own session and reports its result. End the turn unless another request still needs an answer.',
-          }
-        : result;
+      const records =
+        p.action === 'list' || p.action === 'reply' || p.action === 'stop'
+          ? untrustedBlock('task records', JSON.stringify(result))
+          : result;
+      if (context.taskContext || context.background) return records;
+      if (p.action === 'start')
+        return {
+          ...(result as object),
+          message:
+            'The task has started and its start message is already visible. The task now does this work in its own session and reports its result. Text you write after this is not shown: if another request still needs an answer, send it with send_message, otherwise end the turn.',
+        };
+      if (p.action === 'reply')
+        return {
+          records,
+          message:
+            'The task has the message and answers the owner itself. Do not confirm or repeat it in chat. Text you write after this is not shown: if another request still needs an answer, send it with send_message, otherwise end the turn.',
+        };
+      return records;
     }),
     bind(toolDefinitions.jobs, (p) => runJobsTool(turn, p)),
     bind(toolDefinitions.pages, (p) => runPagesTool(turn, p)),

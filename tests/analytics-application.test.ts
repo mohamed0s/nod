@@ -324,6 +324,24 @@ test(
           );
         },
       );
+      await t.test('orderly shutdown sends runtime_stopped only while sharing is on', async () => {
+        const shared = events.length;
+        await application.app.close();
+        assert.equal(
+          events.slice(shared).filter((event) => event.event === 'runtime_stopped').length,
+          1,
+        );
+        application = await start();
+        await sharing(false);
+        const unshared = events.length;
+        await application.app.close();
+        assert.equal(
+          events.slice(unshared).some((event) => event.event === 'runtime_stopped'),
+          false,
+        );
+        application = await start();
+        await sharing(true);
+      });
       await t.test(
         'startup saves a redacted failure when the trace key is unavailable',
         async () => {

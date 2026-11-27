@@ -59,6 +59,7 @@ export function InlineName({
       }}
       onKeyDown={(event) => {
         event.stopPropagation();
+        if (event.nativeEvent.isComposing || event.keyCode === 229) return;
         if (event.key === 'Escape' && !busy) {
           event.preventDefault();
           setEditing(false);

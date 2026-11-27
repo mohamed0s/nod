@@ -1321,6 +1321,38 @@ test('memory notes keep their line breaks from every writer while other control 
   assert.deepEqual(replacing(['about/old-signoff'], ['about/old-signoff']), []);
 });
 
+test('a memory import matches notes across the batch and the saved notes', async () => {
+  const memory = createMemoryService({
+    pool: {} as pg.Pool,
+    ownerId: 'import-owner',
+    store: memoryObjectStore(),
+  });
+  await memory.edit((tree) => {
+    tree.entries.push({
+      area: 'about',
+      slug: 'jazz',
+      text: 'Likes jazz',
+      origin: 'inferred',
+      updated: '2026-01-01T00:00:00.000Z',
+      edited: '2026-01-01T00:00:00.000Z',
+      sources: [],
+    });
+  });
+  const result = await memory.importNotes({
+    notes: [
+      { area: 'about', text: 'likes  JAZZ!' },
+      { area: 'people', text: 'Likes jazz' },
+      { area: 'people', text: 'LIKES jazz.' },
+      { area: 'about', text: 'Lives in Zürich' },
+      { area: 'about', text: 'lives in zurich' },
+    ],
+  });
+  assert.deepEqual(result, { added: 2, existing: 3, skipped: 0, saved: true });
+  const entries = (await memory.load()).entries;
+  assert.equal(entries.find((entry) => entry.slug === 'jazz')?.origin, 'stated');
+  assert.equal(entries.length, 3);
+});
+
 test('repair archives expired, stale and duplicate entries, keeps distinct numbers and never deletes', () => {
   const now = new Date('2026-06-01T00:00:00.000Z');
   const tree = treeOf(

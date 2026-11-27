@@ -402,6 +402,7 @@ async function windowsInstall(options = {}) {
     fixture,
     JSON.stringify({
       build: options.build || '26100',
+      architecture: options.architecture ?? 9,
       running: Boolean(options.running),
       elevated: Boolean(options.elevated),
       existing: Boolean(options.existing),
@@ -427,7 +428,10 @@ async function windowsInstall(options = {}) {
   );
   const mocks = String.raw`
 $ErrorActionPreference = 'Stop'
-$fixture = Get-Content -Raw $env:NOD_FIXTURE | ConvertFrom-Json
+$PSDefaultParameterValues['Add-Content:Encoding'] = 'utf8'
+$fixture = Get-Content -Encoding utf8 -Raw $env:NOD_FIXTURE | ConvertFrom-Json
+function Get-CimInstance { param($ClassName, $Property)
+  if ($ClassName -eq 'Win32_Processor' -and $Property -eq 'Architecture') { [pscustomobject]@{ Architecture = $fixture.architecture } } }
 function Get-ItemProperty { param($Path, $ErrorAction)
   if ($Path -like 'HKLM:*') { [pscustomobject]@{ CurrentBuildNumber = $fixture.build } }
   elseif ($fixture.existing -or $script:installed) { [pscustomobject]@{ InstallDir = $(if ($script:installed -and $fixture.wrongTarget) { Join-Path $fixture.target 'other' } else { $fixture.target }) } } }
@@ -532,6 +536,20 @@ test(
         [`launch ${join(installed.target, 'nod.exe')} working=${installed.target}`],
       );
       assert.deepEqual(installed.staged, []);
+    }
+  },
+);
+
+test(
+  'CLI-INSTALL: the Windows script rejects Arm before requesting an x64 release',
+  { skip: !powershell && 'pwsh is unavailable' },
+  async () => {
+    for (const powershell of powershellCommands) {
+      const rejected = await windowsInstall({ architecture: 12, powershell });
+      assert.notEqual(rejected.result.status, 0, rejected.output);
+      assert.match(rejected.output, /Windows 11.*x64/);
+      assert.deepEqual(rejected.calls, []);
+      assert.deepEqual(rejected.staged, []);
     }
   },
 );

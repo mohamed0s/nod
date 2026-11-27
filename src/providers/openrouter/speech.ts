@@ -69,7 +69,7 @@ export function createOpenRouterSpeechProvider(options: {
           await response.body?.cancel().catch(() => {});
           throw new Error('Invalid audio response.');
         }
-        const bytes = await readSpeechResponse(response, 50 * 1024 * 1024, 'OpenRouter');
+        const bytes = await readSpeechResponse(response, 50 * 1024 * 1024, 'OpenRouter', [key]);
         if (!bytes.length) throw new Error('Invalid audio response.');
         signal?.throwIfAborted();
         usage.status = 'succeeded';
@@ -129,7 +129,7 @@ export function createOpenRouterTranscriptionProvider(options: {
         signal: AbortSignal.any([AbortSignal.timeout(120_000), ...(signal ? [signal] : [])]),
       });
       const result = JSON.parse(
-        (await readSpeechResponse(response, 1024 * 1024, 'OpenRouter')).toString(),
+        (await readSpeechResponse(response, 1024 * 1024, 'OpenRouter', [key])).toString(),
       ) as {
         text?: unknown;
         usage?: { cost?: number; input_tokens?: number; output_tokens?: number };

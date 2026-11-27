@@ -67,7 +67,7 @@ export function AppConnectionDialog({
           : signIn?.reopened && !onRetry
             ? 'Sign-in is already open in your browser. If you closed it, ask Nod for a new sign-in link.'
             : signIn?.broker
-              ? `${signIn.name} will ask you to allow Composio, the service Nod uses to connect apps. Review what it can access, then allow it.`
+              ? 'Finish connecting in the sign-in window.'
               : opening || !signIn?.url
                 ? 'Your browser will open when sign-in is ready.'
                 : 'Review what Nod can access in your browser.');

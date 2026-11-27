@@ -13,6 +13,7 @@ import {
   clampThinkingLevel,
   contentText,
   getCurrentTools,
+  validateToolArguments,
   type AssistantMessage,
   type ToolResultMessage,
 } from '@earendil-works/pi-ai';
@@ -39,10 +40,10 @@ import { createTurnFallback, modelKey } from './fallback.ts';
 import { modelContext } from './context.ts';
 import { createContextOutput, toolOutputReference } from './context-output.ts';
 import { audioContext, audioEntries, audioMessage, readsNativeAudio } from './audio.ts';
-import { piModelTrace } from './traces.ts';
+import { modelFailure, piModelTrace, recordPiModelCall } from './traces.ts';
 import type { ModelTraces } from '../../ports/traces.ts';
 import type { ModelAccess } from '../../ports/models.ts';
-import type { Agent, AgentEvent } from '../../ports/agent.ts';
+import type { Agent, AgentEvent, AgentToolResult } from '../../ports/agent.ts';
 import {
   closeInterruptedCalls,
   completeAssistantMessage,
@@ -57,7 +58,7 @@ import {
 import { threadIdentity } from '../../ports/thread-identity.ts';
 import { createPiUsageTracker, piUsageMetrics, usageId } from './usage.ts';
 import { agentModels } from '../../shared/model-defaults.ts';
-import { modelPricingSignature, type ModelSelection } from '../../shared/models.ts';
+import { lighterEffort, modelPricingSignature, type ModelSelection } from '../../shared/models.ts';
 import { createSandbox, workspaceOutputs } from './sandbox.ts';
 import { untrustedBlock } from '../../shared/untrusted.ts';
 import { draft2020Schema } from '../../shared/json-schema.ts';
@@ -536,9 +537,11 @@ export function createPiAgent(options: {
         automatic: input.automatic,
         trace:
           traces &&
-          ((call) => {
-            if (traces.active())
-              traces.record(
+          ((call) =>
+            recordPiModelCall(
+              traces,
+              call,
+              () =>
                 piModelTrace(
                   call,
                   {
@@ -550,8 +553,13 @@ export function createPiAgent(options: {
                   },
                   input.ownerContext,
                 ),
-              );
-          }),
+              {
+                source: 'agent',
+                turnId: input.turnId,
+                runId: input.runId,
+                parentRunId: input.parentRunId,
+              },
+            )),
         reportCacheUsage: (usage) =>
           input.onEvent({
             type: 'provider_usage',
@@ -597,11 +605,7 @@ export function createPiAgent(options: {
       );
       if (budget.compact && input.compactInstructions)
         input = { ...input, ...input.compactInstructions };
-      const output = createContextOutput(
-        input.workspace,
-        input.shouldStop,
-        input.ownerContext?.split('\n', 1)[0],
-      );
+      const output = createContextOutput(input.workspace, input.ownerContext?.split('\n', 1)[0]);
       let toolCallCount = 1;
       const boundedOutput = async (
         name: string,
@@ -644,6 +648,7 @@ export function createPiAgent(options: {
       };
       let idle = false;
       let activation: ExtensionAPI | undefined;
+      const early = new Map<string, Promise<AgentToolResult>>();
       const manager = ephemeral
         ? SessionManager.inMemory(directory)
         : openLocalSession(directory, input.contextRestart);
@@ -794,6 +799,8 @@ export function createPiAgent(options: {
             : { exposure: 'direct' as const }),
           executionMode: tool.parallel ? 'parallel' : 'sequential',
           execute: async (id, args, signal) => {
+            const started = early.get(id);
+            early.delete(id);
             const active = activation?.getActiveTools() ?? [];
             const companions =
               typeof tool.companions === 'function'
@@ -807,9 +814,10 @@ export function createPiAgent(options: {
               ...(await boundedOutput(
                 tool.name,
                 () =>
-                  tool
-                    .execute(args as Record<string, unknown>, { nested: id.includes('/') })
-                    .then((result) => ({ ...result, details: result.details ?? {} })),
+                  (
+                    started ??
+                    tool.execute(args as Record<string, unknown>, { nested: id.includes('/') })
+                  ).then((result) => ({ ...result, details: result.details ?? {} })),
                 signal,
                 id.includes('/'),
               )),
@@ -821,12 +829,17 @@ export function createPiAgent(options: {
       const guided = new Set<string>();
       const deferred =
         !input.restricted || budget.compact || input.tools.some((tool) => tool.deferred);
+      const retry = {
+        enabled: true,
+        baseDelayMs: 4000,
+        ...(backups.length ? { maxRetries: 1 } : {}),
+      };
       const settings = SettingsManager.inMemory({
         compaction: budget.compaction,
         transport: 'sse',
         steeringMode: 'all',
         cacheWarming: input.keepWarm ? 'idle' : 'streaming',
-        retry: { baseDelayMs: 4000, ...(backups.length ? { maxRetries: 1 } : {}) },
+        retry,
       });
       const extensionLoader = new DefaultResourceLoader({
         cwd: input.workspace.path,
@@ -1147,12 +1160,16 @@ export function createPiAgent(options: {
         ),
       ];
       const resumed = !restart && manager.buildSessionContext().messages.length > 0;
+      const thinkingLevel =
+        access && input.lighterEffort
+          ? lighterEffort(access.definition.choice.efforts, access.effort)
+          : (access?.effort ?? (input.lighterEffort ? 'low' : 'high'));
       const { session } = await (options.createSession ?? createAgentSession)({
         cwd: input.workspace.path,
         agentDir: directory,
         modelRuntime: runtime,
         model: sessionModel,
-        thinkingLevel: access?.effort ?? 'high',
+        thinkingLevel,
         tools: directTools.map((name) => `+${name}`),
         customTools: tools,
         noTools: 'builtin',
@@ -1226,6 +1243,30 @@ export function createPiAgent(options: {
           }
         return result ?? undefined;
       };
+      const startEarly = (message: AssistantMessage, index: number) => {
+        const call = message.content[index];
+        if (call?.type !== 'toolCall' || early.has(call.id)) return;
+        const tool = input.tools.find((item) => item.early && item.name === call.name);
+        const definition = tools.find((item) => item.name === call.name);
+        if (!tool || !definition || !activation?.getActiveTools().includes(call.name)) return;
+        const earlier = message.content
+          .slice(0, index)
+          .filter(
+            (part): part is Extract<typeof part, { type: 'toolCall' }> => part.type === 'toolCall',
+          );
+        if (earlier.some((part) => !early.has(part.id))) return;
+        let args: Record<string, unknown>;
+        try {
+          args = structuredClone(validateToolArguments(definition, call));
+        } catch {
+          return;
+        }
+        const previous = earlier.length ? early.get(earlier.at(-1)!.id) : undefined;
+        const run = () => tool.execute(args, { nested: call.id.includes('/') });
+        const started = previous ? previous.then(run, run) : run();
+        started.catch(() => undefined);
+        early.set(call.id, started);
+      };
       let textBlock: number | undefined;
       let thinking = { index: -1, text: '', scanned: 0 };
       let contextExhausted = false;
@@ -1258,6 +1299,7 @@ export function createPiAgent(options: {
             input.onEvent({
               type: 'error',
               message: `${target.provider} / ${target.id}: ${error}`,
+              failure: modelFailure(error),
             });
           if (compaction)
             for (const [index, message] of (compaction.requests.length
@@ -1326,8 +1368,13 @@ export function createPiAgent(options: {
             }
             textBlock = update.contentIndex;
           }
+          if (update.type === 'toolcall_end') startEarly(update.partial, update.contentIndex);
           if (update.type === 'toolcall_start' && textBlock !== undefined) {
-            input.onEvent({ type: 'message_end' });
+            const call = update.partial.content[update.contentIndex];
+            input.onEvent({
+              type: 'message_end',
+              ...(call?.type === 'toolCall' && call.name ? { beforeTool: call.name } : {}),
+            });
             input.onEvent({ type: 'message_start' });
             textBlock = undefined;
           }
@@ -1360,6 +1407,13 @@ export function createPiAgent(options: {
           else if (overflow || isRecoverableLength(event.message, model.maxTokens)) {
             settings.applyOverrides({ compaction: { keepRecentTokens: 0 } });
           }
+          if (
+            !['stop', 'toolUse'].includes(event.message.stopReason) &&
+            event.message.content.filter(
+              (part) => part.type === 'toolCall' && early.delete(part.id),
+            ).length
+          )
+            settings.applyOverrides({ retry: { enabled: false }, compaction: { enabled: false } });
           const usage = observeUsage(event.message);
           if (usage) input.onEvent({ ...usage, pricingSignature: usagePricing(event.message) });
           if (event.message.stopReason === 'error')
@@ -1369,6 +1423,7 @@ export function createPiAgent(options: {
                 fallback?.describe(event.message) ??
                 `${event.message.provider} / ${event.message.model}: ${event.message.errorMessage?.trim() || 'The provider gave no reason.'}`,
               ...(overflow ? { contextExhausted: true } : {}),
+              failure: modelFailure(event.message.errorMessage ?? '', overflow),
             });
           if (event.message.stopReason === 'stop') {
             const blocks = event.message.content.filter((item) => item.type === 'text');
@@ -1441,7 +1496,7 @@ export function createPiAgent(options: {
               });
             else await session.prompt(text, { images, expandPromptTemplates: false });
           } finally {
-            settings.applyOverrides({ compaction: budget.compaction });
+            settings.applyOverrides({ compaction: budget.compaction, retry });
             if (dropFailedInput(manager)) session.refreshContext();
           }
         },

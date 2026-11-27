@@ -26,6 +26,7 @@ import {
   pathOf,
   render,
   same,
+  sameKey,
   slug,
   slugFor,
   unsafe,
@@ -241,14 +242,21 @@ export function createMemoryService(options: {
     return owned((tree, now) => {
       let added = 0;
       let confirmed = 0;
+      const known = new Map<string, Entry>();
+      for (const entry of tree.entries) {
+        const text = sameKey(entry.text);
+        if (text && !known.has(`${entry.area}\n${text}`))
+          known.set(`${entry.area}\n${text}`, entry);
+      }
       for (const note of valid) {
-        const match = areaEntries(tree, note.area).find((entry) => same(entry.text, note.text));
+        const text = sameKey(note.text);
+        const match = text ? known.get(`${note.area}\n${text}`) : undefined;
         if (match?.origin === 'inferred') {
           Object.assign(match, { origin: 'stated', updated: now, edited: now });
           confirmed++;
         }
         if (match) continue;
-        tree.entries.push({
+        const entry: Entry = {
           area: note.area,
           slug: slugFor(tree, note.area, note.text),
           text: note.text,
@@ -256,7 +264,9 @@ export function createMemoryService(options: {
           updated: now,
           edited: now,
           sources: [],
-        });
+        };
+        tree.entries.push(entry);
+        if (text) known.set(`${note.area}\n${text}`, entry);
         added++;
       }
       return {

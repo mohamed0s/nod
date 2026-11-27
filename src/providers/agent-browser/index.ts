@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, readFile, readlink, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, readlink, rm, stat, writeFile } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -27,6 +27,7 @@ import { runProcess, serviceEnvironment } from '../process.ts';
 import { createBrowserProxy, browserUrl } from './network.ts';
 import { credentialFields } from './credentials.ts';
 import { openDevtools, type BoundSignInControl } from './devtools.ts';
+import { watchBrowser } from './browser-watch.ts';
 import {
   createScreenStore,
   daemonDeadline,
@@ -38,6 +39,7 @@ import {
 import {
   completedDownloads,
   createDownloadCapture,
+  nextDownload,
   decodeDownloadChunk,
   downloadFile,
   downloadName,
@@ -60,17 +62,17 @@ interface BrowserState {
   privateDocument?: string;
   sealedDocument?: string;
   uploads: Set<string>;
-  proxy?: ReturnType<typeof createBrowserProxy>;
+  root?: string;
+  browser?: string;
+  targetId?: string;
+  seenTabs: Set<string>;
   started: boolean;
-  lastUsed: number;
   busy: number;
   closed: boolean;
   closing: boolean;
   heldAt?: number;
   socket?: string;
-  recovered?: boolean;
   saved: StoredScreen;
-  browserExecutable?: string;
 }
 export interface BrowserDiagnostic {
   at: string;
@@ -93,6 +95,7 @@ const streamFrame = z.object({
 
 const holdMs = 30 * 60_000;
 const snapshotChars = 40_000;
+const actionChars = 10_000;
 
 const withoutPasskeys = `(() => {
   const container = window.CredentialsContainer && CredentialsContainer.prototype;
@@ -153,7 +156,7 @@ export function redactBrowserText(text: string, secrets: Iterable<string>): stri
 }
 
 const browserTabList = z.array(
-  z.object({ tabId: z.string(), active: z.boolean(), url: z.string() }),
+  z.object({ tabId: z.string(), targetId: z.string(), active: z.boolean(), url: z.string() }),
 );
 const browserPoint = z
   .object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1) })
@@ -237,10 +240,8 @@ export function createAgentBrowserComputer(options: {
   sandbox?: boolean;
   platform?: NodeJS.Platform;
   headless?: boolean;
-  evictIdleMs?: number;
   submitReadyMs?: number;
   clickReceiptMs?: number;
-  maxLiveSessions?: number;
   viewport?: { width: number; height: number };
   run?: typeof runProcess;
   daemonCommand?: typeof existingDaemonCommand;
@@ -252,14 +253,22 @@ export function createAgentBrowserComputer(options: {
   let refSequence = 0;
   const discarded = new Set<string>();
   const runtimeRoot = resolve(options.dataRoot, 'runtime');
-  const profilePath = (state: BrowserState) =>
-    resolve(runtimeRoot, 'profiles', state.saved.profileId ?? state.id);
+  const ownerSession = 'owner';
+  const ownerProfile = resolve(runtimeRoot, 'profiles', ownerSession);
+  const incomingDownloads = resolve(runtimeRoot, 'incoming-downloads');
+  const owner: {
+    proxy?: ReturnType<typeof createBrowserProxy>;
+    cdpUrl?: string;
+    launching?: Promise<string>;
+    replaced?: boolean;
+    watch?: Awaited<ReturnType<typeof watchBrowser>>;
+    socketDir?: string;
+  } = {};
   const screens = createScreenStore(runtimeRoot);
   const screenStatuses = new Map<string, ReturnType<NonNullable<Computer['screenStatus']>>>();
   const namespace = `sk-${createHash('sha256').update(runtimeRoot).digest('hex').slice(0, 12)}`;
   const uploadRoot = resolve('/tmp/nod-browser-uploads', namespace);
   const cacheRoot = resolve('/tmp/nod-browser-cache', namespace);
-  const cachePath = (state: BrowserState) => resolve(cacheRoot, state.id);
   const internalPaths = new RegExp(
     `(?:${[runtimeRoot, uploadRoot, cacheRoot].map((path) => path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})[^\\s'"]*`,
     'g',
@@ -281,8 +290,6 @@ export function createAgentBrowserComputer(options: {
   const viewport = options.viewport;
   const platform = options.platform ?? process.platform;
   const headed = options.headless === undefined ? platform === 'darwin' : !options.headless;
-  const evictIdleMs = options.evictIdleMs ?? 5 * 60_000;
-  const maxLiveSessions = Math.max(1, options.maxLiveSessions ?? 4);
   const holding = (state: BrowserState) =>
     state.heldAt !== undefined && Date.now() - state.heldAt < holdMs;
   let disposed = false;
@@ -355,13 +362,12 @@ export function createAgentBrowserComputer(options: {
         refs: new Map(),
         refVersions: new Map(),
         uploads: new Set(),
+        seenTabs: new Set(),
         started: false,
-        lastUsed: Date.now(),
         busy: 0,
         closed: false,
         closing: false,
         saved: { version: 1, url: '', sensitive: false, active: false },
-        browserExecutable: options.browserExecutable,
       };
       browsers.set(id, state);
     }
@@ -375,12 +381,13 @@ export function createAgentBrowserComputer(options: {
         state.busy -= 1;
         throw new Error('The browser session has expired. Open the URL again.');
       }
-      state.lastUsed = Date.now();
       try {
-        return await operation();
+        const result = await operation();
+        if (state.started && !state.closed && !state.closing)
+          await saveState(state).catch(() => {});
+        return result;
       } finally {
         state.busy -= 1;
-        state.lastUsed = Date.now();
       }
     };
     const pending = state.queue.then(execute, execute);
@@ -392,53 +399,12 @@ export function createAgentBrowserComputer(options: {
   }
 
   async function reserveBrowser(state: BrowserState, signal?: AbortSignal): Promise<void> {
-    const stopped = new Promise<never>((_, reject) => {
-      if (signal?.aborted) reject(signal.reason);
-      signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
-    });
-    stopped.catch(() => {});
-    const reserve = () =>
-      allocate(async () => {
-        if (state.started || state.saved.navigationFailed) return true;
-        if (signal?.aborted) return false;
-        const occupied = () =>
-          [...browsers.values()].filter((entry) => entry.started || entry.saved.navigationFailed);
-        const attempted = new Set<string>();
-        while (occupied().length >= maxLiveSessions) {
-          const candidate = occupied()
-            .filter(
-              (entry) =>
-                entry !== state &&
-                !attempted.has(entry.id) &&
-                !entry.busy &&
-                !entry.closed &&
-                !entry.closing &&
-                !entry.injecting &&
-                !holding(entry) &&
-                Date.now() - entry.lastUsed >= evictIdleMs,
-            )
-            .sort((a, b) => a.lastUsed - b.lastUsed)[0];
-          if (!candidate) return false;
-          attempted.add(candidate.id);
-          try {
-            await closeBrowser(candidate.id, candidate.lastUsed);
-          } catch {
-            throw new Error(
-              'The browser sessions are busy. Finish an open browser task and retry.',
-            );
-          }
-        }
-        if (disposed || state.closed || state.closing)
-          throw new Error('The browser session has expired. Open the URL again.');
-        if (signal?.aborted) return false;
-        state.started = true;
-        return true;
-      });
-    while (!(await Promise.race([reserve(), stopped]))) {
+    signal?.throwIfAborted();
+    await allocate(async () => {
       if (disposed || state.closed || state.closing)
         throw new Error('The browser session has expired. Open the URL again.');
-      await delay(500, undefined, { signal });
-    }
+      state.started = true;
+    });
   }
 
   function selector(value: string | undefined): string {
@@ -451,33 +417,66 @@ export function createAgentBrowserComputer(options: {
     /^@?(?:ref=)?(e\d+)$/.exec(value?.trim() ?? '')?.[1];
 
   async function shutDown(state: BrowserState) {
+    const socket = state.socket ?? (await daemonSocket(state).catch(() => undefined));
+    for (const tab of sessionTabs(state))
+      if (tab !== state.targetId) await closeTab(tab).catch(() => {});
     try {
+      await command(state, { action: 'tab_close' }, { timeoutMs: 5000 });
       await command(state, { action: 'close' }, { timeoutMs: 5000 });
     } catch {
       await kill(state);
     }
+    if (socket) await rm(socket.replace(/\.sock$/, '.target'), { force: true });
+    forgetTabs(state);
+  }
+
+  function sessionTabs(state: BrowserState) {
+    if (state.root && owner.watch?.open()) return owner.watch.tabs(state.root);
+    return state.targetId ? [state.targetId] : [];
+  }
+
+  function closeTab(tab: string) {
+    return owner.watch?.open()
+      ? owner.watch.closeTab(tab)
+      : ownerCommand(['tab', 'close', tab]).then(() => ({}));
+  }
+
+  function forgetTabs(state: BrowserState) {
+    delete state.root;
+    delete state.targetId;
+    state.seenTabs.clear();
+  }
+
+  async function followTabs(state: BrowserState, signal?: AbortSignal) {
+    if (!state.socket || !state.root || !owner.watch?.open()) return;
+    const tabs = owner.watch.tabs(state.root);
+    const opened = tabs.filter((tab) => !state.seenTabs.has(tab));
+    for (const tab of tabs) state.seenTabs.add(tab);
+    const next =
+      opened.at(-1) ??
+      (state.targetId && tabs.includes(state.targetId) ? state.targetId : tabs.at(-1));
+    if (!next || next === state.targetId) return;
+    await requestDaemon(state.socket, { action: 'tab_switch', tabId: next }, signal);
+    state.targetId = next;
   }
 
   async function kill(state: BrowserState) {
     const socket = state.socket ?? (await daemonSocket(state).catch(() => undefined));
     const pidFile = socket?.replace(/\.sock$/, '.pid');
-    const host = `${hostname()}-`;
-    const profile = profilePath(state);
-    const lock = await readlink(resolve(profile, 'SingletonLock')).catch(() => '');
     const owned = async (pid: number, file: string, marker: string) =>
       Number.isInteger(pid) &&
       pid > 1 &&
       pid !== process.pid &&
       (process.platform !== 'linux' ||
         (await readFile(`/proc/${pid}/${file}`, 'utf8').catch(() => '')).includes(marker));
-    const chrome = lock.startsWith(host) ? Number(lock.slice(host.length)) : 0;
     const daemon = Number(pidFile ? await readFile(pidFile, 'utf8').catch(() => '') : '');
-    const targets = [
-      ...((await owned(chrome, 'cmdline', `--user-data-dir=${profile}\0`)) ? [chrome] : []),
-      ...((await owned(daemon, 'environ', `AGENT_BROWSER_SESSION=${browserSessionId(state.id)}\0`))
-        ? [daemon]
-        : []),
-    ];
+    const targets = (await owned(
+      daemon,
+      'environ',
+      `AGENT_BROWSER_SESSION=${browserSessionId(state.id)}\0`,
+    ))
+      ? [daemon]
+      : [];
     const signal = (pid: number, value: NodeJS.Signals | 0) => {
       try {
         process.kill(pid, value);
@@ -494,6 +493,187 @@ export function createAgentBrowserComputer(options: {
       await delay(50);
     await Promise.all([socket, pidFile].map((path) => path && rm(path, { force: true })));
     delete state.socket;
+    for (const tab of sessionTabs(state)) await closeTab(tab).catch(() => {});
+    forgetTabs(state);
+  }
+
+  async function ownerCommand(args: string[], signal?: AbortSignal) {
+    const result = await run(
+      executable,
+      ['--namespace', namespace, '--session', browserSessionId(ownerSession), '--json', ...args],
+      { cwd: runtimeRoot, env: serviceEnvironment(), signal, timeoutMs: 15_000 },
+    );
+    const response = JSON.parse(result.stdout.trim() || '{}') as {
+      success?: boolean;
+      data?: Record<string, unknown>;
+      error?: unknown;
+    };
+    if (result.exitCode || response.success === false)
+      throw new DaemonCommandError(typeof response.error === 'string' ? response.error : undefined);
+    return response.data ?? {};
+  }
+
+  async function browserFiles() {
+    await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
+    const config = resolve(runtimeRoot, 'browser-config.json');
+    await writeFile(config, '{}', { mode: 0o600 });
+    const initScript = resolve(runtimeRoot, 'browser-init.js');
+    await writeFile(initScript, withoutPasskeys, { mode: 0o600 });
+    return { config, initScript };
+  }
+
+  function ownerBrowser(saved: StoredScreen, signal?: AbortSignal): Promise<string> {
+    owner.launching ??= (async () => {
+      if (owner.cdpUrl) {
+        if (!owner.watch?.open()) await watchOwner(owner.cdpUrl).catch(() => {});
+        return owner.cdpUrl;
+      }
+      return launchOwner(saved, signal);
+    })().finally(() => delete owner.launching);
+    return owner.launching;
+  }
+
+  async function launchOwner(saved: StoredScreen, signal?: AbortSignal) {
+    const { config, initScript } = await browserFiles();
+    if (!owner.replaced) {
+      owner.replaced = true;
+      const service = { cwd: runtimeRoot, env: serviceEnvironment(), timeoutMs: 30_000 };
+      await run(executable, ['--namespace', namespace, 'close', '--all'], service).catch(() => {});
+      const info = await run(
+        executable,
+        [
+          '--namespace',
+          namespace,
+          '--session',
+          browserSessionId(ownerSession),
+          'session',
+          'info',
+          '--json',
+        ],
+        service,
+      ).catch(() => undefined);
+      const socketDir = z
+        .object({ data: z.object({ socketDir: z.string() }) })
+        .safeParse(JSON.parse(info?.stdout.trim() || '{}')).data?.data.socketDir;
+      owner.socketDir = socketDir;
+      for (const profile of await readdir(resolve(runtimeRoot, 'profiles')).catch(() => []))
+        if (profile !== ownerSession)
+          await rm(resolve(runtimeRoot, 'profiles', profile), { recursive: true, force: true });
+      if (socketDir)
+        for (const file of await readdir(socketDir).catch(() => []))
+          if (file.endsWith('.target')) await rm(resolve(socketDir, file), { force: true });
+    }
+    owner.proxy ??= createBrowserProxy({ privateNetwork });
+    const proxyUrl = await owner.proxy.url();
+    const lockHost = /^(.+)-\d+$/.exec(
+      await readlink(resolve(ownerProfile, 'SingletonLock')).catch(() => ''),
+    )?.[1];
+    if (lockHost !== undefined && lockHost !== hostname())
+      await rm(resolve(ownerProfile, 'SingletonLock'), { force: true });
+    const timeZone = browserTimeZone(saved.timeZone);
+    const locale = browserLocale(saved.locale);
+    const result = await run(
+      executable,
+      [
+        '--config',
+        config,
+        '--namespace',
+        namespace,
+        '--session',
+        browserSessionId(ownerSession),
+        '--profile',
+        ownerProfile,
+        ...(options.browserExecutable ? ['--executable-path', options.browserExecutable] : []),
+        ...(headed ? ['--headed'] : []),
+        '--no-webmcp',
+        '--init-script',
+        initScript,
+        '--json',
+        '--proxy',
+        proxyUrl,
+        '--proxy-bypass',
+        '<-loopback>',
+        '--download-path',
+        incomingDownloads,
+        '--args',
+        '--disable-quic,--force-webrtc-ip-handling-policy=disable_non_proxied_udp,--disable-background-networking,--disable-crash-reporter,--disable-breakpad,--disable-gpu-rasterization,--enable-unsafe-swiftshader,--disable-blink-features=AutomationControlled,--disable-features=BackForwardCache,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-backgrounding-occluded-windows' +
+          `,--disk-cache-dir=${cacheRoot},--disk-cache-size=67108864` +
+          (locale ? `,--accept-lang=${locale}` : '') +
+          (sandbox ? '' : ',--no-sandbox') +
+          (headed && platform === 'darwin' ? ',--start-minimized' : ''),
+        '--idle-timeout',
+        '86400s',
+        'open',
+        'about:blank',
+      ],
+      {
+        cwd: runtimeRoot,
+        env: { ...serviceEnvironment(), ...(timeZone && { TZ: timeZone }) },
+        signal,
+        timeoutMs: 90_000,
+      },
+    );
+    let response: { success?: boolean; error?: unknown };
+    try {
+      response = JSON.parse(result.stdout.trim());
+    } catch {
+      throw new Error(
+        'The workspace browser could not respond. Restart its container and try again.',
+      );
+    }
+    if (result.exitCode || response.success === false)
+      throw new BrowserActionError(
+        'browser_start_failed',
+        typeof response.error === 'string'
+          ? redactBrowserText(response.error, []).replace(internalPaths, '[browser data]')
+          : undefined,
+      );
+    const { cdpUrl } = await ownerCommand(['get', 'cdp-url'], signal);
+    if (typeof cdpUrl !== 'string' || !cdpUrl.startsWith('ws://127.0.0.1:'))
+      throw new BrowserActionError('browser_start_failed');
+    await watchOwner(cdpUrl).catch(() => {});
+    owner.cdpUrl = cdpUrl;
+    return cdpUrl;
+  }
+
+  async function watchOwner(cdpUrl: string) {
+    owner.watch?.close();
+    owner.watch = await watchBrowser({
+      cdpUrl,
+      closed: () => {
+        if (owner.cdpUrl === cdpUrl) delete owner.cdpUrl;
+      },
+      incoming: incomingDownloads,
+      initScript: withoutPasskeys,
+      sessions: () =>
+        [...browsers.values()].flatMap((state) =>
+          state.root
+            ? [{ root: state.root, directory: resolve(runtimeRoot, 'downloads', state.id) }]
+            : [],
+        ),
+    });
+  }
+
+  async function downloadChannel() {
+    if (owner.watch?.open()) return;
+    if (!owner.cdpUrl) throw new Error('Open the file website first.');
+    await watchOwner(owner.cdpUrl);
+  }
+
+  async function openWindow(state: BrowserState) {
+    if (!owner.socketDir) return;
+    const window = await owner.watch?.newWindow().catch(() => undefined);
+    if (!window) return;
+    try {
+      await writeFile(
+        resolve(owner.socketDir, `${browserSessionId(state.id)}.target`),
+        JSON.stringify({ targetId: window, url: 'about:blank', pinned: true }),
+        { mode: 0o600 },
+      );
+      return window;
+    } catch {
+      await closeTab(window).catch(() => {});
+    }
   }
 
   async function closeInterruptedBrowser(state: BrowserState) {
@@ -501,6 +681,7 @@ export function createAgentBrowserComputer(options: {
     await shutDown(state);
     state.started = false;
     state.closed = true;
+    state.saved.fenced = true;
     await saveState(state);
   }
 
@@ -514,6 +695,7 @@ export function createAgentBrowserComputer(options: {
     } catch (error) {
       if (
         action === 'close' ||
+        action === 'tab_close' ||
         error instanceof DaemonCommandError ||
         error instanceof BrowserActionError
       )
@@ -530,6 +712,8 @@ export function createAgentBrowserComputer(options: {
   ): Promise<Record<string, unknown>> {
     options.signal?.throwIfAborted();
     const action = String(request.action);
+    if (state.socket && !['tab_switch', 'tab_close', 'close'].includes(action))
+      await followTabs(state, options.signal);
     if (state.socket) {
       const result = await drainInterruptedCommand(state, action, () =>
         requestDaemon(state.socket!, request, options.signal, options.timeoutMs, options.maxBytes),
@@ -545,111 +729,92 @@ export function createAgentBrowserComputer(options: {
     }
     if (action !== 'navigate' && action !== 'close')
       throw new Error('Reopen this page before continuing browser actions.');
-    await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
-    const config = resolve(runtimeRoot, 'browser-config.json');
-    await writeFile(config, '{}', { mode: 0o600 });
-    const initScript = resolve(runtimeRoot, 'browser-init.js');
-    await writeFile(initScript, withoutPasskeys, { mode: 0o600 });
-    state.proxy ??= createBrowserProxy({ privateNetwork });
-    const proxyUrl = await state.proxy.url();
-    const profile = profilePath(state);
-    const lockHost = /^(.+)-\d+$/.exec(
-      await readlink(resolve(profile, 'SingletonLock')).catch(() => ''),
-    )?.[1];
-    if (lockHost !== undefined && lockHost !== hostname())
-      await rm(resolve(profile, 'SingletonLock'), { force: true });
+    const { config, initScript } = await browserFiles();
+    const cdpUrl = await ownerBrowser(state.saved, options.signal);
     const timeZone = browserTimeZone(state.saved.timeZone);
-    const locale = browserLocale(state.saved.locale);
-    const result = await drainInterruptedCommand(state, action, () =>
-      run(
-        executable,
-        [
-          '--config',
-          config,
-          '--namespace',
-          namespace,
-          '--session',
-          browserSessionId(state.id),
-          '--profile',
-          profile,
-          ...(state.browserExecutable ? ['--executable-path', state.browserExecutable] : []),
-          ...(headed ? ['--headed'] : []),
-          '--no-webmcp',
-          '--init-script',
-          initScript,
-          '--json',
-          '--proxy',
-          proxyUrl,
-          '--proxy-bypass',
-          '<-loopback>',
-          '--args',
-          '--disable-quic,--force-webrtc-ip-handling-policy=disable_non_proxied_udp,--disable-background-networking,--disable-crash-reporter,--disable-breakpad,--disable-gpu-rasterization,--enable-unsafe-swiftshader,--disable-blink-features=AutomationControlled,--disable-features=BackForwardCache' +
-            `,--disk-cache-dir=${cachePath(state)},--disk-cache-size=67108864` +
-            (locale ? `,--accept-lang=${locale}` : '') +
-            (sandbox ? '' : ',--no-sandbox') +
-            (headed && platform === 'darwin' ? ',--start-minimized' : '') +
-            (state.saved.restoreSession ? ',--restore-last-session' : ''),
-          '--download-path',
-          resolve(runtimeRoot, 'downloads', state.id),
-          '--idle-timeout',
-          '86400s',
-          ...(action === 'close' ? ['close'] : ['open', String(request.url)]),
-        ],
-        {
-          cwd: runtimeRoot,
-          env: {
-            ...serviceEnvironment(),
-            ...(timeZone && { TZ: timeZone }),
-          },
-          signal: options.signal,
-          timeoutMs: options.timeoutMs ?? daemonDeadline(request) + 30_000,
-        },
-      ),
-    );
-    let response: { success?: boolean; data?: Record<string, unknown>; error?: unknown };
+    const attach = [
+      '--config',
+      config,
+      '--namespace',
+      namespace,
+      '--session',
+      browserSessionId(state.id),
+      '--cdp',
+      cdpUrl,
+      '--pin-tab',
+      '--init-script',
+      initScript,
+      '--json',
+      '--idle-timeout',
+      '86400s',
+    ];
+    const environment = {
+      cwd: runtimeRoot,
+      env: { ...serviceEnvironment(), ...(timeZone && { TZ: timeZone }) },
+      signal: options.signal,
+    };
+    const window = action === 'close' ? undefined : await openWindow(state);
     try {
-      response = JSON.parse(result.stdout.trim());
-    } catch {
-      throw new Error(
-        'The workspace browser could not respond. Restart its container and try again.',
+      const result = await drainInterruptedCommand(state, action, () =>
+        run(
+          executable,
+          [...attach, ...(action === 'close' ? ['close'] : ['open', String(request.url)])],
+          { ...environment, timeoutMs: options.timeoutMs ?? daemonDeadline(request) + 30_000 },
+        ),
       );
-    }
-    const reason = typeof response.error === 'string' ? response.error : undefined;
-    const failed = Boolean(result.exitCode) || response.success === false;
-    const known =
-      action !== 'navigate' || response.success !== false || reason === undefined
-        ? undefined
-        : /^Navigation failed: net::ERR_[A-Z_]+/.test(reason)
-          ? new BrowserActionError('browser_navigation_failed')
-          : reason.startsWith('Operation timed out.')
-            ? new DaemonCommandError()
-            : undefined;
-    if (action === 'navigate') {
-      await drainInterruptedCommand(state, 'connect', () =>
-        daemonSocket(state, options.signal),
-      ).catch((error: unknown) => {
-        if (!failed) throw error;
-        throw (
-          known ??
-          new BrowserActionError(
-            'browser_start_failed',
-            reason &&
-              redactBrowserText(reason, state.secrets).replace(internalPaths, '[browser data]'),
-          )
+      let response: { success?: boolean; data?: Record<string, unknown>; error?: unknown };
+      try {
+        response = JSON.parse(result.stdout.trim());
+      } catch {
+        throw new Error(
+          'The workspace browser could not respond. Restart its container and try again.',
         );
-      });
-      state.recovered = false;
-      state.pageSize = undefined;
-      if (viewport)
-        await command(
-          state,
-          { action: 'viewport', width: viewport.width, height: viewport.height },
-          { signal: options.signal },
-        );
+      }
+      const reason = typeof response.error === 'string' ? response.error : undefined;
+      const failed = Boolean(result.exitCode) || response.success === false;
+      const known =
+        action !== 'navigate' || response.success !== false || reason === undefined
+          ? undefined
+          : /^Navigation failed: net::ERR_[A-Z_]+/.test(reason)
+            ? new BrowserActionError('browser_navigation_failed')
+            : reason.startsWith('Operation timed out.')
+              ? new DaemonCommandError()
+              : undefined;
+      if (action === 'navigate') {
+        await drainInterruptedCommand(state, 'connect', () =>
+          daemonSocket(state, options.signal),
+        ).catch((error: unknown) => {
+          if (!failed) throw error;
+          throw (
+            known ??
+            new BrowserActionError(
+              'browser_start_failed',
+              reason &&
+                redactBrowserText(reason, state.secrets).replace(internalPaths, '[browser data]'),
+            )
+          );
+        });
+        if (typeof response.data?.targetId === 'string') {
+          state.root = state.targetId = response.data.targetId;
+          state.seenTabs = new Set([state.root]);
+        }
+        state.browser = cdpUrl;
+        state.pageSize = undefined;
+        if (viewport)
+          await command(
+            state,
+            { action: 'viewport', width: viewport.width, height: viewport.height },
+            { signal: options.signal },
+          );
+      }
+      if (known) throw known;
+      if (failed) throw new DaemonCommandError(reason);
+      return response.data ?? {};
+    } finally {
+      if (window && window !== state.root) await closeTab(window).catch(() => {});
+      if (action !== 'close' && state.browser !== cdpUrl && !owner.watch?.open())
+        delete owner.cdpUrl;
     }
-    if (known) throw known;
-    if (failed) throw new DaemonCommandError(reason);
-    return response.data ?? {};
   }
 
   async function evaluate(
@@ -725,52 +890,6 @@ export function createAgentBrowserComputer(options: {
     await screens.save(state.id, state.saved);
   }
 
-  async function recoverBrowser(
-    id: string,
-    allowSensitive = false,
-  ): Promise<BrowserState | undefined> {
-    threadIdentity(id);
-    const existing = browsers.get(id);
-    if (existing) return existing;
-    if (disposed) return undefined;
-    const saved = await screens.load(id);
-    if (
-      !saved ||
-      (!saved.active && !saved.navigationFailed) ||
-      (saved.sensitive && !allowSensitive)
-    )
-      return undefined;
-    try {
-      const result = await run(
-        executable,
-        ['--namespace', namespace, '--session', browserSessionId(id), 'session', 'info', '--json'],
-        {
-          env: serviceEnvironment(),
-          timeoutMs: 5000,
-        },
-      );
-      const response = JSON.parse(result.stdout);
-      const info = response.data;
-      if (
-        result.exitCode ||
-        !response.success ||
-        !info?.active ||
-        info.namespace !== namespace ||
-        info.session !== browserSessionId(id) ||
-        typeof info.socketDir !== 'string'
-      )
-        return undefined;
-      const state = stateFor(id);
-      state.saved = saved;
-      state.socket = resolve(info.socketDir, `${browserSessionId(id)}.sock`);
-      state.recovered = true;
-      state.started = !saved.navigationFailed;
-      return state;
-    } catch {
-      return undefined;
-    }
-  }
-
   async function daemonSocket(state: BrowserState, signal?: AbortSignal): Promise<string> {
     if (state.socket) return state.socket;
     const result = await run(
@@ -828,9 +947,9 @@ export function createAgentBrowserComputer(options: {
         text: 'The page opened a new tab that has not loaded. Take a snapshot again.',
         url,
       };
-    const scope =
-      input?.action === 'snapshot' && input.selector ? selector(input.selector) : undefined;
-    const offset = input?.action === 'snapshot' ? (input.offset ?? 0) : 0;
+    const full = input?.action === 'snapshot';
+    const scope = full && input.selector ? selector(input.selector) : undefined;
+    const offset = full ? (input.offset ?? 0) : 0;
     if (!Number.isInteger(offset) || offset < 0)
       throw new Error('Choose a non-negative page offset.');
     const snapshot = async () => {
@@ -839,7 +958,11 @@ export function createAgentBrowserComputer(options: {
         await devtools?.mask(true, [], false, true);
         return await observationCommand(
           state,
-          { action: 'snapshot', urls: true, ...(scope ? { selector: scope } : {}) },
+          {
+            action: 'snapshot',
+            ...(full ? { urls: true } : {}),
+            ...(scope ? { selector: scope } : {}),
+          },
           { signal },
         );
       } finally {
@@ -872,9 +995,14 @@ export function createAgentBrowserComputer(options: {
         });
       }
     const page = redactBrowserText(String(data.snapshot ?? ''), state.secrets);
-    const end = Math.min(page.length, offset + snapshotChars);
+    const end = Math.min(page.length, offset + (full ? snapshotChars : actionChars));
+    const more = full
+      ? end < page.length
+        ? `; snapshot with offset ${end} continues`
+        : ''
+      : `, links without addresses; snapshot ${end < page.length ? 'reads more of the page with them' : 'adds them'}`;
     return {
-      text: `Page (${offset}-${end} of ${page.length} characters${end < page.length ? `; snapshot with offset ${end} continues` : ''}):\n${page.slice(offset, end)}`,
+      text: `Page (${offset}-${end} of ${page.length} characters${more}):\n${page.slice(offset, end)}`,
       url: redactBrowserUrl(url, state.secrets),
     };
   }
@@ -919,6 +1047,38 @@ export function createAgentBrowserComputer(options: {
     }
   }
 
+  async function alive(state: BrowserState) {
+    if (!state.socket || state.browser !== owner.cdpUrl) return false;
+    if (state.root && owner.watch?.open() && !owner.watch.tabs(state.root).length) return false;
+    return requestDaemon(
+      state.socket,
+      { action: 'dialog', response: 'status' },
+      undefined,
+      5000,
+    ).then(
+      () => true,
+      (error: unknown) => !(error instanceof DaemonTransportError),
+    );
+  }
+
+  async function reopen(id: string, signal?: AbortSignal) {
+    const state = browsers.get(threadIdentity(id));
+    if (state?.started && !state.closing && (await alive(state))) return;
+    if (state?.started && !state.closing) await closeBrowser(id, true);
+    const last = await screens.load(id);
+    if (last?.url && /^https?:/.test(last.url) && !last.navigationFailed && !last.fenced)
+      await browserAction(
+        id,
+        { action: 'open', url: last.url, timeZone: last.timeZone, locale: last.locale },
+        signal,
+      );
+  }
+
+  async function liveBrowser(id: string, signal?: AbortSignal) {
+    await reopen(id, signal);
+    return browsers.get(threadIdentity(id));
+  }
+
   async function browserAction(
     id: string,
     input: BrowserAction,
@@ -928,24 +1088,19 @@ export function createAgentBrowserComputer(options: {
     const gesture = visualGesture(input);
     if (input.waitMs !== undefined && (!Number.isInteger(input.waitMs) || input.waitMs < 0))
       throw new Error('Choose a non-negative wait.');
-    const savedProfile = input.action === 'open' ? await screens.load(id) : null;
-    if (input.action === 'open' && !browsers.has(id)) await recoverBrowser(id, true);
     const existing = input.action === 'open' ? browsers.get(id) : undefined;
+    const dead = existing?.started && !existing.closing && !(await alive(existing));
     if (
       existing &&
-      (existing.recovered ||
+      (dead ||
         existing.closed ||
         existing.closing ||
         existing.saved.navigationFailed ||
         existing.privateDocument)
     )
-      await closeBrowser(id);
+      await closeBrowser(id, dead);
+    if (input.action !== 'open') await reopen(id, signal);
     const state = stateFor(id);
-    if (input.action === 'open' && savedProfile?.profileId && !state.saved.profileId) {
-      state.saved.profileId = savedProfile.profileId;
-      state.saved.restoreSession = savedProfile.restoreSession;
-      state.saved.sensitive = savedProfile.sensitive;
-    }
     if (input.action !== 'open' && !state.started) {
       const saved = await screens.load(id);
       if (saved?.navigationFailed) state.saved = saved;
@@ -956,11 +1111,6 @@ export function createAgentBrowserComputer(options: {
       signal?.throwIfAborted();
       if (input.action === 'open') {
         const url = browserUrl(input.url ?? '');
-        const previous = state.saved.restoreSession ? state.saved : await screens.load(id);
-        if (previous?.restoreSession) {
-          state.saved.restoreSession = true;
-          state.saved.sensitive = true;
-        }
         if (state.closing || disposed) throw new BrowserLockedError();
         signal?.throwIfAborted();
         const resumeUrl = new URL(url);
@@ -969,6 +1119,7 @@ export function createAgentBrowserComputer(options: {
         if (redactBrowserText(resumeUrl.pathname, state.secrets) !== resumeUrl.pathname)
           resumeUrl.pathname = '/';
         state.saved.resumeUrl = resumeUrl.href;
+        state.saved.fenced = false;
         await reserveBrowser(state, signal);
         if (!state.socket) {
           state.saved.timeZone = browserTimeZone(input.timeZone);
@@ -1000,7 +1151,12 @@ export function createAgentBrowserComputer(options: {
               }
             } catch {}
           }
-          if (!signal?.aborted && !state.closing) {
+          if (
+            !signal?.aborted &&
+            !state.closing &&
+            error instanceof BrowserActionError &&
+            error.code === 'browser_navigation_failed'
+          ) {
             state.started = false;
             state.saved.navigationFailed = true;
             const destination = new URL(url);
@@ -1027,7 +1183,10 @@ export function createAgentBrowserComputer(options: {
           throw new BrowserActionError('browser_card_paused');
         await onTarget(state, input, signal);
         if (input.action === 'tab_list') {
-          const tabs = await browserTabs(state, signal);
+          const own = sessionTabs(state);
+          const tabs = (await browserTabs(state, signal)).filter((tab) =>
+            own.includes(tab.targetId),
+          );
           return {
             text: tabs
               .map(
@@ -1039,7 +1198,15 @@ export function createAgentBrowserComputer(options: {
           };
         }
         if (input.action === 'tab_switch') {
-          await command(state, { action: 'tab_switch', tabId: input.tabId }, { signal });
+          const own = sessionTabs(state);
+          const tab = (await browserTabs(state, signal)).find(
+            (entry) =>
+              own.includes(entry.targetId) &&
+              (entry.tabId === input.tabId || entry.targetId === input.tabId),
+          );
+          if (!tab) throw new Error('Choose a tab from tab_list.');
+          await command(state, { action: 'tab_switch', tabId: tab.targetId }, { signal });
+          state.targetId = tab.targetId;
         }
         if (input.action === 'click') {
           if (gesture) await movePointer(state, gesture, signal);
@@ -1113,6 +1280,7 @@ export function createAgentBrowserComputer(options: {
             return {
               ...observation,
               text: `The wait condition was not met.\n${observation.text}`,
+              unmet: true as const,
             };
           }
         }
@@ -1232,7 +1400,7 @@ export function createAgentBrowserComputer(options: {
       !/^[^/\\\u0000-\u001f\u007f]{1,200}$/.test(input.name)
     )
       throw new Error(`Choose a file of at most ${fileBytes / 1024 / 1024} MB.`);
-    const state = await recoverBrowser(id);
+    const state = await liveBrowser(id, signal);
     if (!state?.started) throw new Error('Open the upload website first.');
     if (state.injecting) throw new BrowserLockedError();
     return serialize(state, async () => {
@@ -1263,7 +1431,7 @@ export function createAgentBrowserComputer(options: {
   async function download(id: string, input: BrowserDownloadInput, signal?: AbortSignal) {
     if (input.selector && input.url) throw new Error('Choose a download link or URL.');
     if (input.name !== undefined) downloadName(input.name);
-    const state = await recoverBrowser(id);
+    const state = await liveBrowser(id, signal);
     if (!state?.started) throw new Error('Open the file website first.');
     if (state.injecting) throw new BrowserLockedError();
     return serialize(state, async () => {
@@ -1303,14 +1471,12 @@ export function createAgentBrowserComputer(options: {
         const type = await evaluate(state, 'document.contentType', signal);
         if (type === 'application/pdf') url = current;
         else {
-          let files = await completedDownloads(directory);
-          if (!files.length) {
-            await command(state, { action: 'waitfordownload' }, { signal });
-            files = await completedDownloads(directory);
-          }
-          if (!files.length) throw new Error('Choose the specific download link or URL.');
-          const result = await readDownload(directory, files[0]!, input.name);
-          await rm(resolve(directory, files[0]!), { force: true });
+          await downloadChannel();
+          const file =
+            (await completedDownloads(directory))[0] ??
+            (await nextDownload(directory, new Set(), signal));
+          const result = await readDownload(directory, file, input.name);
+          await rm(resolve(directory, file), { force: true });
           signal?.throwIfAborted();
           return result;
         }
@@ -1341,6 +1507,7 @@ export function createAgentBrowserComputer(options: {
             await evaluate(state, `delete window[${JSON.stringify(key)}]`).catch(() => {});
         }
       }
+      await downloadChannel();
       await mkdir(directory, { recursive: true, mode: 0o700 });
       const capture = await createDownloadCapture(directory);
       const anchor = target ? undefined : `nod-download-${randomUUID()}`;
@@ -1358,17 +1525,8 @@ export function createAgentBrowserComputer(options: {
           })()`,
             signal,
           );
-        await command(
-          state,
-          {
-            action: 'download',
-            selector: target ?? `#${anchor}`,
-            path: resolve(directory, capture.file),
-          },
-          { signal },
-        );
-        signal?.throwIfAborted();
-        const result = await readDownload(directory, capture.file, input.name);
+        await command(state, { action: 'click', selector: target ?? `#${anchor}` }, { signal });
+        const result = await readDownload(directory, await capture.next(signal), input.name);
         signal?.throwIfAborted();
         return result;
       } finally {
@@ -1376,7 +1534,7 @@ export function createAgentBrowserComputer(options: {
           if (anchor && !state.closed && !state.closing)
             await evaluate(state, `document.getElementById(${JSON.stringify(anchor)})?.remove()`);
         } finally {
-          await capture.cleanup(state.closed);
+          await capture.cleanup();
         }
       }
     });
@@ -1555,10 +1713,12 @@ export function createAgentBrowserComputer(options: {
       .object({ cdpUrl: z.string() })
       .passthrough()
       .parse(await command(state, { action: 'cdp_url' }, { signal }));
-    const tab = z
+    const tabs = z
       .array(z.object({ active: z.boolean(), targetId: z.string() }).passthrough())
-      .parse((await command(state, { action: 'tab_list' }, { signal })).tabs)
-      .find((item) => item.active);
+      .parse((await command(state, { action: 'tab_list' }, { signal })).tabs);
+    const tab = tabs.find((item) =>
+      state.targetId ? item.targetId === state.targetId : item.active,
+    );
     if (!tab) throw new Error('The checkout tab is no longer open.');
     return openDevtools(cdpUrl, tab.targetId, signal, options.clickReceiptMs);
   }
@@ -1903,7 +2063,7 @@ export function createAgentBrowserComputer(options: {
   }
 
   async function currentPage(id: string, step?: BrowserAction): Promise<BrowserPage> {
-    const state = await recoverBrowser(id);
+    const state = await liveBrowser(id);
     if (state?.saved.navigationFailed || (!state && (await screens.load(id))?.navigationFailed))
       throw new BrowserActionError('browser_navigation_failed');
     if (!state?.started) throw new Error('Open the login page in this task browser first.');
@@ -1948,7 +2108,7 @@ export function createAgentBrowserComputer(options: {
     signal?.throwIfAborted();
     if (browserUrl(origin).origin !== origin || !methods.length || methods.length > 10)
       throw new BrowserActionError('browser_target_changed', undefined, 'invalid_request');
-    const state = await recoverBrowser(id);
+    const state = await liveBrowser(id, signal);
     if (!state?.started)
       throw new BrowserActionError('browser_target_changed', undefined, 'browser_unavailable');
     if (state.saved.navigationFailed)
@@ -2091,8 +2251,6 @@ export function createAgentBrowserComputer(options: {
 
   async function captureScreen(state: BrowserState, signal?: AbortSignal): Promise<Buffer> {
     if (state.saved.navigationFailed) throw new BrowserActionError('browser_navigation_failed');
-    if (state.recovered && state.saved.sensitive && !state.secrets.size)
-      throw new Error('Reopen the login page before continuing this browser session.');
     await currentUrl(state, signal);
     if (await privateDocumentOpen(state, signal)) throw new BrowserLockedError();
     const path = resolve(runtimeRoot, `screen-${state.id}.capture.png`);
@@ -2135,7 +2293,7 @@ export function createAgentBrowserComputer(options: {
     input: BrowserHandoffInput,
     signal?: AbortSignal,
   ): Promise<string | void> {
-    const state = await recoverBrowser(id);
+    const state = await liveBrowser(id, signal);
     if (!state?.started) throw new Error('Open a page in this task browser first.');
     if (state.injecting) throw new BrowserLockedError();
     return serialize(state, async () => {
@@ -2205,10 +2363,8 @@ export function createAgentBrowserComputer(options: {
   }
 
   async function* view(id: string, signal: AbortSignal): AsyncGenerator<Buffer> {
-    const state = await recoverBrowser(id);
+    const state = await liveBrowser(id, signal);
     if (!state?.started) throw new Error('Open a page in this task browser first.');
-    if (state.recovered && state.saved.sensitive && !state.secrets.size)
-      throw new Error('Reopen the login page before continuing this browser session.');
     const { port } = z
       .object({ port: z.number().int().min(1).max(65_535) })
       .parse(
@@ -2259,43 +2415,32 @@ export function createAgentBrowserComputer(options: {
   }
 
   async function getScreenshot(id: string, signal?: AbortSignal): Promise<Buffer | null> {
-    const state = await recoverBrowser(id);
+    const state = browsers.get(threadIdentity(id));
     if (!state?.started) return lastKnownScreen(id);
     if (state.injecting) throw new BrowserLockedError();
     return serialize(state, async () => {
       if (state.injecting) throw new BrowserLockedError();
       signal?.throwIfAborted();
-      try {
-        return await captureScreen(state, signal);
-      } catch (error) {
-        signal?.throwIfAborted();
-        if (!state.recovered || error instanceof BrowserLockedError) throw error;
-        return lastKnownScreen(id);
-      }
+      return captureScreen(state, signal);
     });
   }
 
-  async function closeBrowser(id: string, idleAt?: number): Promise<void> {
-    const state = browsers.get(threadIdentity(id)) ?? (await recoverBrowser(id, true));
+  async function closeBrowser(id: string, stale = false): Promise<void> {
+    const state = browsers.get(threadIdentity(id));
     if (!state) return;
-    if (idleAt === undefined) state.closing = true;
+    state.closing = true;
     const close = async () => {
       if (browsers.get(id) !== state) return;
-      if (idleAt !== undefined && (state.lastUsed !== idleAt || state.busy || state.injecting))
-        return;
-      state.closing = true;
-      if (state.started && !state.closed && !state.injecting)
+      if (!stale && state.started && !state.closed && !state.injecting)
         await captureScreen(state).catch(() => {});
       state.closed = true;
       if (state.started || state.saved.navigationFailed) await shutDown(state);
       state.started = false;
-      await state.proxy?.dispose();
       await saveState(state);
       state.secrets.clear();
       delete state.sealedDocument;
       for (const directory of state.uploads) await rm(directory, { recursive: true, force: true });
       state.uploads.clear();
-      await rm(cachePath(state), { recursive: true, force: true });
       if (browsers.get(id) === state) browsers.delete(id);
       screenStatuses.set(
         id,
@@ -2312,67 +2457,6 @@ export function createAgentBrowserComputer(options: {
     await pending;
   }
 
-  async function bindProfile(id: string, rawProfileId: string): Promise<void> {
-    const profileId = z.uuid().parse(rawProfileId);
-    assertNotDiscarded(id);
-    await allocate(async () => {
-      assertNotDiscarded(id);
-      const previous = browsers.get(id) ?? (await recoverBrowser(id, true));
-      if (previous?.saved.profileId === profileId) {
-        if (!previous.saved.restoreSession) {
-          previous.saved.restoreSession = true;
-          previous.saved.sensitive = true;
-          previous.saved.capturedAt = undefined;
-          await screens.clearImage(id);
-          await saveState(previous);
-        }
-        return;
-      }
-      if (previous?.injecting) throw new BrowserLockedError();
-      if (previous) await closeBrowser(id);
-      const relatedIds = await screens.profileScreens(profileId);
-      for (const otherId of relatedIds) {
-        if (otherId === id) continue;
-        const other = browsers.get(otherId) ?? (await recoverBrowser(otherId, true));
-        if (!other) continue;
-        if (other.busy || other.injecting || holding(other)) throw new BrowserLockedError();
-        await closeBrowser(otherId);
-      }
-      const state = stateFor(id);
-      state.saved = {
-        version: 1,
-        url: '',
-        sensitive: true,
-        active: false,
-        profileId,
-        restoreSession: true,
-      };
-      await screens.clearImage(id);
-      await saveState(state);
-    });
-  }
-
-  async function deleteProfile(rawProfileId: string): Promise<void> {
-    const profileId = z.uuid().parse(rawProfileId);
-    await allocate(async () => {
-      const ids = await screens.profileScreens(profileId);
-      for (const id of ids) {
-        const state = browsers.get(id) ?? (await recoverBrowser(id, true));
-        if (state && (state.busy || state.injecting || holding(state)))
-          throw new BrowserLockedError();
-        if (state) await closeBrowser(id);
-      }
-      await rm(resolve(runtimeRoot, 'profiles', profileId), { recursive: true, force: true });
-      for (const id of ids) {
-        await Promise.all([
-          screens.delete(id),
-          rm(resolve(runtimeRoot, 'downloads', id), { recursive: true, force: true }),
-        ]);
-        screenStatuses.delete(id);
-      }
-    });
-  }
-
   async function clear(rawId: string): Promise<void> {
     await remove(threadIdentity(rawId));
   }
@@ -2386,7 +2470,6 @@ export function createAgentBrowserComputer(options: {
   async function remove(id: string): Promise<void> {
     await closeBrowser(id);
     await Promise.all([
-      rm(resolve(runtimeRoot, 'profiles', id), { recursive: true, force: true }),
       rm(resolve(runtimeRoot, 'downloads', id), { recursive: true, force: true }),
       rm(resolve(runtimeRoot, `screen-${id}.capture.png`), { force: true }),
       screens.delete(id),
@@ -2401,8 +2484,6 @@ export function createAgentBrowserComputer(options: {
       [...browsers.values()].every(
         (state) => !state.busy && !state.closing && !state.injecting && !holding(state),
       ),
-    bindProfile: tracked(bindProfile),
-    deleteProfile: tracked(deleteProfile),
     act: tracked(browserAction),
     upload: tracked(upload),
     download: tracked(download),
@@ -2424,6 +2505,9 @@ export function createAgentBrowserComputer(options: {
     dispose: async () => {
       disposed = true;
       const results = await Promise.allSettled([...browsers.keys()].map((id) => closeBrowser(id)));
+      owner.watch?.close();
+      if (owner.cdpUrl) await ownerCommand(['close']).catch(() => {});
+      await owner.proxy?.dispose();
       if (results.some((result) => result.status === 'rejected'))
         throw new Error('The browser service could not finish closing its sessions.');
     },

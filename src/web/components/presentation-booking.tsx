@@ -1,5 +1,5 @@
 import { useId, useState, type ReactNode } from 'react';
-import type { Presentation } from '../../shared/presentation';
+import { reviewCount, type Presentation } from '../../shared/presentation';
 import { useArtifactDrawer } from './artifact-context';
 import { ArrowUpRight, CalendarClock, ChevronDown, ExternalLink, Maximize2 } from './icons';
 
@@ -218,11 +218,7 @@ function Rating({ rating }: { rating: NonNullable<Venue['rating']> }) {
         </span>
         <span className="booking-rating-source">
           <strong>{rating.sourceLabel}</strong>
-          {rating.count !== undefined && (
-            <span>
-              {rating.count.toLocaleString()} {rating.count === 1 ? 'review' : 'reviews'}
-            </span>
-          )}
+          {rating.count !== undefined && <span>{reviewCount(rating.count)}</span>}
         </span>
         <ExternalLink size={14} aria-hidden="true" />
       </a>

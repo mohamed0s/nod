@@ -173,9 +173,10 @@ const tokens = (value: string) =>
   [...segmenter.segment(fold(value))].filter((part) => part.isWordLike).map((part) => part.segment);
 const words = (value: string) =>
   tokens(value).filter((word) => word.length > 1 || /\p{N}/u.test(word) || cjk.test(word));
+export const sameKey = (value: string) => tokens(value).join(' ');
 export const same = (a: string, b: string) => {
-  const left = tokens(a).join(' ');
-  return !!left && left === tokens(b).join(' ');
+  const left = sameKey(a);
+  return !!left && left === sameKey(b);
 };
 
 const abstractOf = (entry: Entry) => entry.abstract ?? entry.text;

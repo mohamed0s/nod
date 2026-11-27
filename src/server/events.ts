@@ -14,8 +14,9 @@ type DeltaEvent = {
 };
 type ActivityEvent = { type: 'activity'; ownerId: string; items: Activity[] };
 type OwnerEvent = { type: 'jobs' | 'pages'; ownerId: string };
+type TraceEvent = { type: 'trace'; ownerId: string; turnId: string };
 export type ServerEvent =
-  { type: 'refresh' } | { type: 'working' } | DeltaEvent | ActivityEvent | OwnerEvent;
+  { type: 'refresh' } | { type: 'working' } | DeltaEvent | ActivityEvent | OwnerEvent | TraceEvent;
 
 export const events = new EventEmitter<{ event: [ServerEvent] }>();
 events.setMaxListeners(50);

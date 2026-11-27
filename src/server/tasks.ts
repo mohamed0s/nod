@@ -66,9 +66,9 @@ const input = z.discriminatedUnion('action', [
       action: z.literal('start'),
       title: z.string().trim().min(1),
       key: z.string().trim().min(1).max(200).optional(),
-      message: z.string().trim().min(1),
+      message: z.string().trim().min(1).optional(),
       doneWhen: z.string().trim().min(1),
-      now,
+      now: now.optional(),
       brief: z.string().trim().min(1).optional(),
       steps: z.array(now).optional(),
       waitingFor: waits.optional(),
@@ -80,6 +80,7 @@ const input = z.discriminatedUnion('action', [
     .object({
       action: z.literal('update'),
       id: z.uuid(),
+      title: z.string().trim().min(1).optional(),
       now: now.optional(),
       steps: z.array(now).optional(),
       stepIndex: z.number().int().nonnegative().optional(),
@@ -459,6 +460,7 @@ export function createTasks(options: {
     sourceMessageId: string,
     parentTurnId: string,
     retry?: boolean,
+    sourcePrompt?: string,
     reopen?: boolean,
   ) {
     const task = (
@@ -486,6 +488,7 @@ export function createTasks(options: {
       )
     ).rows[0];
     if (!message) throw failure('A task update needs an owner message.');
+    const text = sourcePrompt ?? message.text;
     const closed = task.state !== 'open' && !reopen;
     if (closed) {
       const bound =
@@ -520,7 +523,7 @@ export function createTasks(options: {
       if (!bound)
         throw failure('That task is closed. To continue it, reply to one of its messages.');
     }
-    const turnId = await enqueueTurn(message.text, {
+    const turnId = await enqueueTurn(text, {
       source: 'task',
       sourceId,
       sessionId: task.session_id,
@@ -582,6 +585,7 @@ export function createTasks(options: {
     capture?: CaptureAnalytics,
     priorMessageId?: string,
     priorHandoff = false,
+    sourcePrompt?: string,
   ) {
     const request = input.parse(raw);
     if (request.action === 'list') return { tasks: await read(client) };
@@ -606,7 +610,8 @@ export function createTasks(options: {
       const ids = new Set(request.ids);
       if (request.retry && (ids.size !== 1 || request.agent))
         throw failure('A retry must name one task.');
-      for (const id of ids) await deliver(client, id, sourceMessageId, turn.turnId, request.retry);
+      for (const id of ids)
+        await deliver(client, id, sourceMessageId, turn.turnId, request.retry, sourcePrompt);
       if (request.agent) {
         if (!options.agents) throw failure('Agents are unavailable.');
         await options.agents.send(client, {
@@ -615,7 +620,8 @@ export function createTasks(options: {
           name: request.agent,
           messageId: sourceMessageId,
           brief: request.brief,
-          deliver: (id) => deliver(client, id, sourceMessageId, turn.turnId, false, true),
+          deliver: (id) =>
+            deliver(client, id, sourceMessageId, turn.turnId, false, sourcePrompt, true),
         });
       }
       return { tasks: await read(client) };
@@ -693,11 +699,27 @@ export function createTasks(options: {
               )
             ).rows[0]
           : undefined;
+      const startMessage = request.message ?? request.now ?? request.title;
       const messageId = current.proactive
         ? null
-        : prior && resemblesTaskAcknowledgement(prior.text, request.message, priorHandoff)
+        : prior && resemblesTaskAcknowledgement(prior.text, startMessage, priorHandoff)
           ? prior.id
-          : await insertAssistantMessage(client, turn, request.message);
+          : await insertAssistantMessage(
+              client,
+              turn,
+              startMessage,
+              [],
+              undefined,
+              sourceMessageId &&
+                (
+                  await client.query(
+                    `SELECT 1 FROM messages WHERE owner_id=$1 AND thread_id=$2 AND turn_id=$3 AND role='user' AND id<>$4`,
+                    [ownerId, turn.threadId, turn.turnId, sourceMessageId],
+                  )
+                ).rowCount
+                ? sourceMessageId
+                : undefined,
+            );
       const sessionId = independent ? id : current.session_id;
       await client.query(
         `INSERT INTO tasks(id,owner_id,turn_id,session_id,source_message_id,message_id,title,done_when,brief,now_text,steps,waiting_for,next_check,applied_revision,activity_key,model)
@@ -712,7 +734,7 @@ export function createTasks(options: {
           request.title,
           request.doneWhen,
           request.brief ?? request.doneWhen,
-          request.now,
+          request.now ?? startMessage,
           JSON.stringify(request.steps ?? []),
           JSON.stringify(request.waitingFor ?? []),
           request.nextCheck ?? null,
@@ -730,7 +752,7 @@ export function createTasks(options: {
         ).rows[0];
         if (!source && !current.proactive) throw failure('Owner request not found.');
         const child = await enqueueTurn(
-          current.proactive ? (request.brief ?? request.doneWhen) : source!.text,
+          current.proactive ? (request.brief ?? request.doneWhen) : (sourcePrompt ?? source!.text),
           {
             source: current.proactive ? 'event' : 'task',
             proactive: false,
@@ -756,7 +778,7 @@ export function createTasks(options: {
       const updated =
         request.action === 'update'
           ? await client.query(
-              `UPDATE tasks SET now_text=COALESCE($3,now_text),steps=COALESCE($4,steps),step_index=COALESCE($5,step_index),
+              `UPDATE tasks SET title=COALESCE($8,title),now_text=COALESCE($3,now_text),steps=COALESCE($4,steps),step_index=COALESCE($5,step_index),
            waiting_for=COALESCE($6,waiting_for),next_check=COALESCE($7,next_check),updated_at=now()
            WHERE id=$1 AND owner_id=$2 AND state='open'
              AND COALESCE($5,step_index)<GREATEST(jsonb_array_length(COALESCE($4,steps)),1)`,
@@ -768,6 +790,7 @@ export function createTasks(options: {
                 request.stepIndex ?? null,
                 request.waitingFor ? JSON.stringify(request.waitingFor) : null,
                 request.nextCheck ?? null,
+                request.title ?? null,
               ],
             )
           : await client.query(
@@ -1180,13 +1203,24 @@ export function createTasks(options: {
     sourceMessageId: string | null,
     priorMessageId?: string,
     priorHandoff?: boolean,
+    sourcePrompt?: string,
   ) {
     const capture = snapshotAnalytics(options.analytics);
     const result = await transaction(async (client) => {
       await lockThread(client);
       return withTurnLock(
         turn.turnId,
-        () => act(client, turn, raw, sourceMessageId, capture, priorMessageId, priorHandoff),
+        () =>
+          act(
+            client,
+            turn,
+            raw,
+            sourceMessageId,
+            capture,
+            priorMessageId,
+            priorHandoff,
+            sourcePrompt,
+          ),
         client,
       );
     }, pool);

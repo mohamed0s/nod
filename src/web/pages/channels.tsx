@@ -36,7 +36,7 @@ const providers = [
   {
     id: 'telegram' as const,
     name: 'Telegram',
-    description: 'Chat with Nod in Telegram.',
+    description: 'Message Nod in a private chat with your bot.',
   },
   {
     id: 'whatsapp' as const,
@@ -470,6 +470,24 @@ export function Channels() {
     setError('');
     setPairingUrl(null);
   }
+  useEffect(() => {
+    if (!settings?.ready) return;
+    const openRequested = () => {
+      const url = new URL(window.location.href);
+      if (!url.searchParams.has('connect')) return;
+      const requested = providers.find(({ id }) => id === url.searchParams.get('connect'))?.id;
+      url.searchParams.delete('connect');
+      window.history.replaceState(
+        window.history.state,
+        '',
+        `${url.pathname}${url.search}${url.hash}`,
+      );
+      if (requested) open(requested);
+    };
+    openRequested();
+    window.addEventListener('popstate', openRequested);
+    return () => window.removeEventListener('popstate', openRequested);
+  }, [settings?.ready]);
   function open(provider: ChannelProvider) {
     setupTrigger.current =
       document.activeElement instanceof HTMLButtonElement ? document.activeElement : null;
@@ -780,7 +798,9 @@ export function Channels() {
                 <img src="/logos/telegram.svg" alt="" width={24} height={24} />
                 {telegramStatus.paired ? 'Telegram' : 'Connect Telegram'}
               </DialogTitle>
-              <DialogDescription>Create a bot, then link your account.</DialogDescription>
+              <DialogDescription>
+                Nod replies only in your private chat with the bot, not in groups.
+              </DialogDescription>
               <TelegramSetup
                 setup={telegramSetup}
                 pairingUrl={pairingUrl}

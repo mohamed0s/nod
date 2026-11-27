@@ -29,7 +29,9 @@ import {
 } from './protocol.ts';
 
 const viewFrameLine = 4 * 1024 * 1024 + 256;
-const observationSchema = z.object({ text: z.string(), url: z.string() }).strict();
+const observationSchema = z
+  .object({ text: z.string(), url: z.string(), unmet: z.literal(true).optional() })
+  .strict();
 const controls = z
   .array(z.object({ role: z.string().max(100), name: z.string().max(300) }).strict())
   .max(3);
@@ -75,7 +77,7 @@ export function createBridgeComputer(options: {
   let disposing: Promise<void> | undefined;
   const recovering = new Map<string, Promise<void>>();
   const reopenNotice =
-    'Explicitly reopen the website or saved browser session to start a new page. The previous action may have completed; do not repeat it.';
+    'Explicitly reopen the website to start a new page. The previous action may have completed; do not repeat it.';
 
   function recover(browserId?: string) {
     const scope = uncertain ? undefined : browserId;
@@ -147,10 +149,10 @@ export function createBridgeComputer(options: {
         !disposed &&
         fenced &&
         available &&
-        (input.method === 'bindProfile' ||
-          (input.method === 'act' && input.input.action === 'open'))
+        input.method === 'act' &&
+        input.input.action === 'open'
       ) {
-        if (input.method === 'act') browserUrl(input.input.url ?? '');
+        browserUrl(input.input.url ?? '');
         return recover(browserId).then(() => call(input, signal, transfer));
       }
       return Promise.reject(
@@ -478,13 +480,6 @@ export function createBridgeComputer(options: {
         throw new Error('The workspace browser could not pause safely.');
       if (result) screens.clear();
       return result;
-    },
-    bindProfile: async (id, profileId) => {
-      await call({ method: 'bindProfile', threadId: threadIdentity(id), profileId });
-      screens.delete(threadIdentity(id));
-    },
-    deleteProfile: async (profileId) => {
-      await call({ method: 'deleteProfile', profileId });
     },
     screenStatus: (id) => screens.get(threadIdentity(id))?.value ?? { state: 'unavailable' },
     act: async (id, input, signal) =>

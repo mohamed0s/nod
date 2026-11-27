@@ -128,7 +128,7 @@ Model keys Nod saves are encrypted at rest. Keys you set in a shell or `.env` fi
 
 ZDR covers eligible tool calls and proxy requests. Files, trigger events, and tool-search queries have separate retention rules. Composio removes staged upload and download files after 24 hours. Nod disables Composio's session sandbox. Model services, destination apps, and Nod's local data follow their own rules.
 
-ZDR applies to new covered calls and does not delete older logs. Calls through Composio Managed OAuth apps require Enterprise for ZDR coverage. See [Composio's ZDR coverage](https://docs.composio.dev/docs/security/zero-data-retention) for the full scope.
+ZDR applies to new covered calls and does not delete older logs. Calls through Composio Managed OAuth apps require Enterprise for ZDR coverage. Apps on Nod's default service sign in through these apps and don't have that coverage yet, so Composio can keep the content of their calls in its execution logs for up to a year. See [Composio's ZDR coverage](https://docs.composio.dev/docs/security/zero-data-retention) for the full scope.
 
 The default connection service's policy applies to desktop and self-hosted Nod. ZDR coverage follows that service's project and plan, not where Nod runs. A custom connection service has its own settings. Ask its operator to confirm the current coverage.
 
@@ -187,7 +187,8 @@ The personal ideas on **Scheduled** read the same messages, at most once a day, 
 ## Delete your data
 
 - **A memory:** open **Settings → Memory**, select the note, and choose **Forget**. You can also ask Nod to forget something.
-- **A Vault item:** open it in **Vault** and delete it. For a saved browser session, select **Sign out**.
+- **A Vault item:** open it in **Vault** and delete it.
+- **A website sign-in:** Nod's browser stays signed in to websites you sign in to. Ask Nod to sign out of the website. **Remove all data** clears every sign-in.
 - **An app:** disconnect it in **Apps**.
 - **Everything in the desktop app:** select **Remove all data** in **Settings → Privacy & data**. Nod deletes your profile, its private computer, and unsent drafts, then opens setup again. The app stays installed, and no server data is deleted.
 - **A source install or server:** stop it, then remove its data folder and Docker volumes. See [Server operations](/deploy/server-operations/).

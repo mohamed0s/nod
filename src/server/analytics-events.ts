@@ -41,7 +41,6 @@ export const analyticsTool = z.enum([
   'apps',
   'ask_user',
   'browser',
-  'browser_session',
   'computer',
   'create_audio',
   'delegate',
@@ -142,6 +141,11 @@ export const analyticsEvent = z.discriminatedUnion('event', [
               'chart',
               'apps',
               'diagram',
+              'items',
+              'schedule',
+              'facts',
+              'compare',
+              'draft',
             ]),
             count: z.literal(1),
           })
@@ -237,7 +241,16 @@ export const analyticsEvent = z.discriminatedUnion('event', [
             ])
             .optional(),
           waiting_reason: z.enum(['question', 'approval', 'credentials']).optional(),
-          failure_reason: z.enum(['spending_limit', 'model', 'unknown']).optional(),
+          failure_reason: z.enum(['spending_limit', 'model', 'offline', 'unknown']).optional(),
+          failure_class: z
+            .enum([
+              ...serviceFailureReason.exclude(['cancelled']).options,
+              'tools_unsupported',
+              'quota_exhausted',
+              'context_too_large',
+            ])
+            .optional(),
+          provider_status: z.number().int().min(100).max(599).optional(),
         })
         .strict(),
     })
@@ -399,6 +412,12 @@ export const analyticsEvent = z.discriminatedUnion('event', [
     .object({
       event: z.literal('runtime_active'),
       properties: z.object({ started_today: z.boolean() }).strict(),
+    })
+    .strict(),
+  z
+    .object({
+      event: z.literal('runtime_stopped'),
+      properties: z.object({ uptime: z.enum(['under_1h', 'under_1d', 'over_1d']) }).strict(),
     })
     .strict(),
   z

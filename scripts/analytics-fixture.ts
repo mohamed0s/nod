@@ -111,7 +111,7 @@ const session = () => ({
     usageData,
     traces,
   },
-  capabilities: { developer: true, traces: true, updatesEmail: true },
+  capabilities: { developer: true, turnTraces: false, traces: true, updatesEmail: true },
   analytics: {
     enabled: usageData,
     distinctId: usageData ? `local:${user}` : null,

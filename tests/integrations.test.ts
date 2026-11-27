@@ -1434,6 +1434,71 @@ test('remote MCP calls ask the server for progress so long calls can keep report
   });
 });
 
+test('remote MCP results keep structuredContent the text only summarizes', async (t) => {
+  const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+  const { StreamableHTTPServerTransport } =
+    await import('@modelcontextprotocol/sdk/server/streamableHttp.js');
+  const job = { status: 'succeeded', files: [{ id: 'asset-1', url: 'https://example.test/a' }] };
+  const image = Buffer.from('synthetic-png').toString('base64');
+  const server = createServer(async (request, response) => {
+    const mcp = new McpServer({ name: 'synthetic-files', version: '1' });
+    mcp.registerTool('summary', { description: 'Summary' }, async () => ({
+      content: [{ type: 'text', text: 'Job succeeded with 1 file.' }],
+      structuredContent: job,
+    }));
+    mcp.registerTool('same', { description: 'Same' }, async () => ({
+      content: [{ type: 'text', text: JSON.stringify(job, null, 2) }],
+      structuredContent: job,
+    }));
+    mcp.registerTool('image', { description: 'Image' }, async () => ({
+      content: [
+        { type: 'image', data: image, mimeType: 'image/png' },
+        { type: 'text', text: 'ok' },
+      ],
+      structuredContent: { url: 'https://example.test/a.png' },
+    }));
+    mcp.registerTool('plain', { description: 'Plain' }, async () => ({
+      content: [
+        { type: 'text', text: 'first' },
+        { type: 'text', text: 'second' },
+      ],
+    }));
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    response.on('close', () => void transport.close());
+    await mcp.connect(transport);
+    await transport.handleRequest(request, response);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const transport = createDiscoveredTransport(ownerFetch(origin), async (value) => value);
+  assert.deepEqual(await transport.callTool(`${origin}/mcp`, {}, 'summary', {}), {
+    content: [
+      { type: 'text', text: 'Job succeeded with 1 file.' },
+      { type: 'text', text: JSON.stringify(job) },
+    ],
+  });
+  assert.deepEqual(await transport.callTool(`${origin}/mcp`, {}, 'same', {}), {
+    content: [{ type: 'text', text: JSON.stringify(job) }],
+  });
+  assert.deepEqual(await transport.callTool(`${origin}/mcp`, {}, 'image', {}), {
+    content: [
+      { name: 'image-1.png', mimeType: 'image/png', bytes: Buffer.from('synthetic-png') },
+      { type: 'text', text: 'ok' },
+      { type: 'text', text: JSON.stringify({ url: 'https://example.test/a.png' }) },
+    ],
+  });
+  assert.deepEqual(await transport.callTool(`${origin}/mcp`, {}, 'plain', {}), {
+    content: [
+      { type: 'text', text: 'first' },
+      { type: 'text', text: 'second' },
+    ],
+  });
+});
+
 test('remote MCP falls back to HTTP+SSE only when the server refuses Streamable HTTP', async (t) => {
   const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
   const { SSEServerTransport } = await import('@modelcontextprotocol/sdk/server/sse.js');
@@ -3886,10 +3951,15 @@ test('native connection waits for the owner and refuses a cancelled or expired s
       t.after(() => browser.close());
       const id = randomBytes(32).toString('base64url');
       let starts = 0;
-      const url = await browser.open(id, 'https://proxy.example.test', async () => {
-        starts++;
-        return 'https://proxy.example.test/v2/connect/pair?ticket=synthetic-consent';
-      });
+      const url = await browser.open(
+        id,
+        'https://proxy.example.test',
+        async () => {
+          starts++;
+          return 'https://proxy.example.test/v2/connect/pair?ticket=synthetic-consent';
+        },
+        '<img src=x>Synthetic',
+      );
       const html = await (await fetch(url)).text();
       const dom = new JSDOM(html, {
         url,
@@ -3912,6 +3982,11 @@ test('native connection waits for the owner and refuses a cancelled or expired s
       await delay(100);
       assert.equal(Number(starts), 0);
       assert.equal(browser.remote(url), undefined);
+      assert.equal(dom.window.document.querySelector('img'), null);
+      assert.equal(
+        dom.window.document.getElementById('heading')?.textContent,
+        'Connect <img src=x>Synthetic',
+      );
       const button = dom.window.document.getElementById('connect') as HTMLButtonElement;
       assert.ok(button && !button.disabled);
       if (outcome === 'cancel') browser.finish(id);
@@ -5042,10 +5117,8 @@ test(
       }),
     };
     const provider = fakeProvider(session);
-    const discoveredBrowserId = randomUUID();
-    const pendingBrowserId = randomUUID();
     const savedLoginIds = [randomUUID(), randomUUID()];
-    let browserEndpoint = 'https://example.test';
+    let loginOrigin = 'https://login.example.test';
     const iconOrigins: string[] = [];
     const integrations = await createIntegrations(pool, {
       ownerId: 'local-development',
@@ -5060,7 +5133,7 @@ test(
           ...savedLoginIds.map((id, index) => ({
             id,
             label: index ? 'Personal' : 'Work',
-            origin: 'https://login.example.test',
+            origin: index ? 'https://login.example.test' : loginOrigin,
           })),
           ...Array.from({ length: 25 }, (_, index) => ({
             id: randomUUID(),
@@ -5076,19 +5149,6 @@ test(
           updatedAt: '2026-01-01T00:00:00Z',
         }));
       },
-      browserConnections: async () =>
-        [
-          { id: discoveredBrowserId, state: undefined },
-          { id: pendingBrowserId, state: 'pending' as const },
-        ].map(({ id, state }) => ({
-          slug: 'browser-example-test',
-          name: 'example.test',
-          status: 'disconnected' as const,
-          connectionId: id,
-          triggersEnabled: false,
-          accessPaths: [{ id, kind: 'browser' as const, endpoint: browserEndpoint }],
-          ...(state ? { browserState: state } : {}),
-        })),
       wake: async (prompt, id) => {
         delivered.push(id);
         assert.equal(prompt.includes('provider-secret'), false);
@@ -5131,7 +5191,7 @@ test(
         browserPaths
           .filter((connection) => connection.accessPaths?.some((path) => path.kind === 'browser'))
           .map((connection) => connection.connectionId),
-        [discoveredBrowserId, pendingBrowserId, ...savedLoginIds],
+        savedLoginIds,
       );
       assert.deepEqual(
         browserPaths
@@ -5141,11 +5201,6 @@ test(
           connectionId: id,
           accessPaths: [{ id, kind: 'browser', endpoint: 'https://login.example.test' }],
         })),
-      );
-      assert.equal(
-        browserPaths.find((connection) => connection.connectionId === pendingBrowserId)
-          ?.browserAccess,
-        'browser_session',
       );
       assert.doesNotMatch(JSON.stringify(browserPaths), /synthetic-private|usernameHint|password/);
       const byName = await integrations.manageConnections(
@@ -5189,31 +5244,25 @@ test(
           for (const id of [foreign, randomUUID(), 'https%3A%2F%2Funowned.example'])
             assert.equal((await app.inject({ url: `/api/apps/${id}/icon` })).statusCode, 404);
           assert.deepEqual(iconOrigins, []);
-          browserEndpoint = 'https://example.test/private/account?token=private-query#private';
-          const result = await app.inject({ url: `/api/apps/${discoveredBrowserId}/icon` });
+          const result = await app.inject({ url: `/api/apps/${savedLoginIds[0]}/icon` });
           assert.equal(result.statusCode, 200);
           assert.equal(result.headers['content-type'], 'image/png');
           assert.equal(result.headers['cross-origin-resource-policy'], 'same-origin');
           assert.equal(result.headers['x-content-type-options'], 'nosniff');
-          assert.deepEqual(iconOrigins, ['https://example.test']);
-          assert.equal(
-            (await app.inject({ url: `/api/apps/${pendingBrowserId}/icon` })).statusCode,
-            200,
-          );
-          assert.deepEqual(iconOrigins, ['https://example.test']);
-          for (const endpoint of [
-            'https://private-user:private-password@example.test/account',
-            'http://127.0.0.1/account',
+          assert.deepEqual(iconOrigins, ['https://login.example.test']);
+          for (const origin of [
+            'https://private-user:private-password@login.example.test',
+            'http://127.0.0.1',
             'file:///private/account',
           ]) {
-            browserEndpoint = endpoint;
+            loginOrigin = origin;
             assert.equal(
-              (await app.inject({ url: `/api/apps/${discoveredBrowserId}/icon` })).statusCode,
+              (await app.inject({ url: `/api/apps/${savedLoginIds[0]}/icon` })).statusCode,
               404,
             );
           }
-          assert.deepEqual(iconOrigins, ['https://example.test']);
-          browserEndpoint = 'https://example.test';
+          loginOrigin = 'https://login.example.test';
+          assert.deepEqual(iconOrigins, ['https://login.example.test']);
         },
       );
       await pool.query(
@@ -5334,7 +5383,6 @@ async function appsFixture(
   listing: Partial<
     Pick<
       Parameters<typeof createIntegrations>[1],
-      | 'browserConnections'
       | 'browserAccounts'
       | 'wake'
       | 'readWorkspaceFile'
@@ -9264,7 +9312,11 @@ async function managedReconnectFixture(t: TestContext, watchRequested = true, se
     await control.pause('create', id);
     return snapshot(id);
   });
-  const authorize = async (slug: string, callbackUrl: string, reconnectAccountId?: string) => {
+  const authorize = async (
+    slug: string,
+    callbackUrl: string,
+    { reconnectAccountId }: { reconnectAccountId?: string } = {},
+  ) => {
     assert.equal(slug, service);
     assert.equal(reconnectAccountId, 'old-account');
     const accountId = `replacement-${links.length + 1}`;
@@ -9810,7 +9862,7 @@ test(
     let failed = false;
     const provider = createComposioProvider({
       proxy: composioProxyFixture(client, 'local-development', {
-        authorize: async (service, callbackUrl, reconnectAccountId) => {
+        authorize: async (service, callbackUrl, { reconnectAccountId } = {}) => {
           assert.equal(service, 'gmail');
           assert.equal(reconnectAccountId, undefined);
           if (failed) throw new Error('synthetic-private-provider-detail');
@@ -12594,7 +12646,7 @@ test('Composio catalog failures preserve owned accounts', async (t) => {
   await assert.rejects(session.authorize('outlook', callback));
   const authorization = await provider.createSession('fixture-owner', {});
   await authorization.authorize('outlook', callback);
-  assert.deepEqual(authorize.mock.calls[0]!.arguments, ['outlook', callback]);
+  assert.deepEqual(authorize.mock.calls[0]!.arguments, ['outlook', callback, { app: 'Outlook' }]);
   assert.equal(listing.mock.callCount(), 1);
   await session.execute('RETIRED_MCP_LIST', {}, 'owned-account');
   assert.equal(execute.mock.callCount(), 1);

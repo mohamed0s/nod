@@ -42,21 +42,20 @@ function compact(result: object) {
     structuredContent?: unknown;
   };
   if (structuredContent === undefined || !Array.isArray(rest.content)) return result;
-  const texts = rest.content.filter(
-    (block): block is { type: 'text'; text: string } =>
-      Boolean(block) && (block as { type?: unknown }).type === 'text',
-  );
-  if (texts.length !== 1) return result;
-  try {
-    if (!isDeepStrictEqual(JSON.parse(texts[0].text), structuredContent)) return result;
-  } catch {
-    return result;
-  }
+  const repeats = (block: { type?: unknown; text?: unknown } | null) => {
+    if (block?.type !== 'text' || typeof block.text !== 'string') return false;
+    try {
+      return isDeepStrictEqual(JSON.parse(block.text), structuredContent);
+    } catch {
+      return false;
+    }
+  };
   return {
     ...rest,
-    content: rest.content.map((block) =>
-      block === texts[0] ? { type: 'text', text: JSON.stringify(structuredContent) } : block,
-    ),
+    content: [
+      ...rest.content.filter((block) => !repeats(block)),
+      { type: 'text', text: JSON.stringify(structuredContent) },
+    ],
   };
 }
 

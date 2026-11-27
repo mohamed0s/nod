@@ -200,6 +200,84 @@ test(
         }
       },
     );
+    await t.test('dev turn traces stay owner-scoped and keep secrets out', async () => {
+      const { createTurnTraces } = await import('../src/server/turn-traces.ts');
+      const { createModelTraces } = await import('../src/server/traces.ts');
+      const currentThread = (await thread.activeThread()).id;
+      const otherOwner = 'synthetic-other-owner';
+      const mine = randomUUID();
+      const theirs = randomUUID();
+      const secret = 'fixture-model-key-5d21';
+      const nested = 'hunter2hunter2-private';
+      await db.pool.query(
+        `INSERT INTO turns(id,owner_id,thread_id,source,prompt,status)
+         VALUES($1,$3,$4,'user','hi','done'),($2,$5,$4,'user','hi','done')`,
+        [mine, theirs, ownerId, currentThread, otherOwner],
+      );
+      try {
+        const own = createTurnTraces({ pool: db.pool, ownerId });
+        const other = createTurnTraces({ pool: db.pool, ownerId: otherOwner });
+        const traces = createModelTraces();
+        traces.configure({ secrets: [secret], capture: own.record });
+        const call = (turnId: string) => ({
+          id: randomUUID(),
+          source: 'agent',
+          turnId,
+          provider: 'fixture',
+          model: 'fixture-model',
+          startedAt: '2026-11-25T10:00:00.000Z',
+          endedAt: '2026-11-25T10:00:01.000Z',
+          systemPrompt: `You are Nod. Key ${secret}`,
+          tools: [
+            {
+              name: 'read',
+              description: 'Read a file',
+              parameters: { type: 'object', default: { apiKey: nested } },
+            },
+          ],
+          messages: [
+            { role: 'user', content: JSON.stringify({ password: { value: nested } }) },
+            { role: 'user', content: `use ${secret}`, apiKey: secret },
+          ],
+          output: { content: [{ type: 'text', text: 'done' }], stopReason: 'stop' },
+          usage: {
+            inputTokens: 1,
+            outputTokens: 1,
+            totalTokens: 2,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            costUsd: null,
+          },
+          stopReason: 'stop',
+        });
+        traces.capture(() => call(mine), mine);
+        traces.capture(() => call(theirs), theirs);
+        traces.withTurn({ sessionId: mine, turnId: mine }, () => traces.capture(() => call(mine)));
+        traces.captureTurn(mine, () => traces.outsideTurn(() => traces.capture(() => call(mine))));
+        traces.captureTurn(mine, () => traces.capture(() => call(mine)));
+        let found;
+        for (let attempt = 0; attempt < 40; attempt++) {
+          found = await own.read(mine);
+          if (found?.calls.length === 2) break;
+          await delay(10);
+        }
+        assert.equal(found?.calls.length, 2);
+        assert.equal(found?.calls[0]?.tools[0]?.name, 'read');
+        const stored = JSON.stringify(
+          (await db.pool.query('SELECT call FROM model_call_traces')).rows,
+        );
+        assert.ok(!stored.includes(secret));
+        assert.ok(!stored.includes(nested));
+        assert.equal(await own.read(theirs), undefined);
+        assert.equal((await other.read(theirs))?.calls.length, 0);
+        assert.equal(
+          (await db.pool.query('SELECT count(*)::int AS n FROM model_call_traces')).rows[0].n,
+          2,
+        );
+      } finally {
+        await db.pool.query('DELETE FROM turns WHERE id=ANY($1::uuid[])', [[mine, theirs]]);
+      }
+    });
     await thread.initializeThreads();
     await t.test('periodic checks use an installation-spread five-minute schedule', async () => {
       const { createWorkConsumers } = await import('../src/server/work-admission.ts');
@@ -493,6 +571,10 @@ test(
     const abortedPrompts = new Set<string>();
     const fileContexts = new Map<string, RuntimeContext>();
     const integrationReads: string[] = [];
+    const syntheticEvents = Array.from(
+      { length: 1000 },
+      (_, index) => `Event ${index + 1}: Synthetic planning review in Room ${index % 12}.`,
+    ).join('\n');
     let failRelease = 0;
 
     let limitReached = false;
@@ -537,6 +619,7 @@ test(
               },
             },
           };
+        if (action === 'CALENDAR_LIST_EVENTS') return { text: syntheticEvents };
         integrationReads.push(action);
         return { successful: true, data: { threads: 2 } };
       },
@@ -641,6 +724,19 @@ test(
             mimeType: 'text/plain',
           });
           await context.publishScreenshot!(Buffer.from('synthetic image'), 'research.png');
+          assert.deepEqual(
+            await context.integration('CALENDAR_LIST_EVENTS', {}, undefined, undefined, true),
+            { text: syntheticEvents },
+          );
+          const preview = (await context.integration('CALENDAR_LIST_EVENTS', {})) as {
+            workspaceFile: string;
+            preview: string;
+          };
+          assert.equal(preview.preview.length, 2000);
+          assert.equal(
+            (await readFile(join(context.workspacePath, preview.workspaceFile))).toString(),
+            JSON.stringify({ text: syntheticEvents }),
+          );
           const download = (await context.integration('SLACK_DOWNLOAD_SLACK_FILE', {})) as {
             content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
           };
@@ -2287,6 +2383,43 @@ test(
               start: startMessage,
               expected: ['I found urgent synthetic inbox messages and flagged them.', startMessage],
               anchor: 1,
+            },
+            {
+              prompt: 'Check my synthetic flight to Lisbon.',
+              prior: 'Let me know your flight details',
+              start: 'Checking your flight number for Lisbon',
+              expected: [
+                'Let me know your flight details',
+                'Checking your flight number for Lisbon',
+              ],
+              anchor: 1,
+            },
+            {
+              prompt: 'Check the synthetic booking for Lisbon.',
+              prior: "I'll need your synthetic booking reference for Lisbon",
+              start: 'Checking your synthetic booking reference for Lisbon',
+              expected: [
+                "I'll need your synthetic booking reference for Lisbon",
+                'Checking your synthetic booking reference for Lisbon',
+              ],
+              anchor: 1,
+            },
+            {
+              prompt: 'Check the synthetic morning flight to Lisbon.',
+              prior: 'On it, I will check the synthetic 9:40 flight to Lisbon',
+              start: 'Checking the synthetic flight to Lisbon',
+              expected: [
+                'On it, I will check the synthetic 9:40 flight to Lisbon',
+                'Checking the synthetic flight to Lisbon',
+              ],
+              anchor: 1,
+            },
+            {
+              prompt: 'Check the synthetic 9:40 flight to Lisbon.',
+              prior: 'On it, I will check the synthetic 9:40 flight to Lisbon',
+              start: 'Checking the synthetic 9:40 flight to Lisbon',
+              expected: ['On it, I will check the synthetic 9:40 flight to Lisbon'],
+              anchor: 0,
             },
             {
               prompt: 'Check the synthetic invoice due Friday.',
@@ -3945,8 +4078,10 @@ test(
             for (let step = 0; step < 2; step++) {
               const messages = await context.takeMessages!();
               batches.push(messages.map((message) => message.id));
-              if (messages[0]) await context.reply(`Answered: ${messages[0].text}`);
+              for (const message of messages)
+                await context.reply(`Answered: ${message.text}`, undefined, message.id);
             }
+            await context.reply('Synthetic summary');
             return { status: 'succeeded' };
           };
           try {
@@ -3974,16 +4109,17 @@ test(
             assert.equal(await turnStatus(active.turnId), 'succeeded');
             assert.equal(await turnStatus(first.turnId), 'succeeded');
             assert.equal(await turnStatus(second.turnId), 'succeeded');
-            assert.deepEqual(batches, [[first.messageId], [second.messageId]]);
+            assert.deepEqual(batches, [[first.messageId, second.messageId], []]);
             const answers = (
               await db.pool.query(
-                "SELECT text FROM messages WHERE turn_id=$1 AND role='assistant' ORDER BY created_at,id",
+                "SELECT text,reply_to_message_id::text AS reply FROM messages WHERE turn_id=$1 AND role='assistant' ORDER BY created_at,id",
                 [active.turnId],
               )
-            ).rows.map((row) => row.text);
+            ).rows;
             assert.deepEqual(answers, [
-              'Answered: What is the first synthetic result?',
-              'Answered: What is the second synthetic result?',
+              { text: 'Answered: What is the first synthetic result?', reply: first.messageId },
+              { text: 'Answered: What is the second synthetic result?', reply: second.messageId },
+              { text: 'Synthetic summary', reply: null },
             ]);
           } finally {
             release(prompt);
@@ -4019,6 +4155,25 @@ test(
             );
           await start(context.currentMessageId);
           await start(later!.id);
+          const earlier = (
+            await db.pool.query<{ id: string }>(
+              `SELECT id::text FROM messages WHERE thread_id=$1 AND role='user' AND hidden_at IS NULL
+                 AND id<>ALL($2::uuid[]) ORDER BY created_at DESC LIMIT 1`,
+              [context.threadId, [context.currentMessageId, later!.id]],
+            )
+          ).rows[0];
+          await start(earlier!.id).then(
+            () => outcomes.push('started earlier'),
+            (error: Error) => outcomes.push(error.message),
+          );
+          await context.task!({
+            action: 'reply',
+            request: randomUUID(),
+            message: 'Synthetic reply',
+          }).then(
+            () => outcomes.push('replied'),
+            (error: Error) => outcomes.push(error.message),
+          );
           return { status: 'succeeded' };
         };
         try {
@@ -4032,6 +4187,8 @@ test(
           assert.deepEqual(outcomes, [
             'The owner sent several messages during this turn. Set request to the messageId of the one this work serves.',
             'request must be currentMessageId or the messageId of an owner message sent while you worked.',
+            'request must be currentMessageId or the messageId of an owner message sent while you worked.',
+            'request must be currentMessageId or the messageId of an owner message sent while you worked.',
           ]);
           const { rows } = await db.pool.query<{ source: string; prompt: string }>(
             `SELECT t.source_message_id::text AS source,u.prompt FROM tasks t
@@ -4044,6 +4201,15 @@ test(
             { source: active.messageId, prompt },
             { source: later.messageId, prompt: 'Synthetic second request' },
           ]);
+          const replies = await db.pool.query<{ reply: string | null }>(
+            `SELECT m.reply_to_message_id::text AS reply FROM tasks t JOIN messages m ON m.id=t.message_id
+             WHERE t.source_message_id IN ($1,$2) ORDER BY t.created_at,t.id`,
+            [active.messageId, later.messageId],
+          );
+          assert.deepEqual(
+            replies.rows.map((row) => row.reply),
+            [active.messageId, later.messageId],
+          );
         } finally {
           release(prompt);
           dependencies.runTurn = original;
@@ -4141,6 +4307,42 @@ test(
             background: true,
           });
           await completed(taskCheck, 'scheduled', false, 'reply');
+          const privateValue = 'synthetic-private-provider-value';
+          const failures = [
+            [
+              { kind: 'rate_limited', status: 429 },
+              { failure_class: 'rate_limited', provider_status: 429 },
+            ],
+            [{ kind: 'tools_unsupported', status: 99400 }, { failure_class: 'tools_unsupported' }],
+            [undefined, { failure_class: 'unknown' }],
+          ] as const;
+          for (const [index, [failure, expected]] of failures.entries()) {
+            const prompt = `Synthetic analytics model failure ${index}`;
+            modelErrors.set(
+              prompt,
+              Object.assign(new ModelRequestError(`${privateValue} (HTTP 429)`), {
+                code: privateValue,
+                failure,
+              }),
+            );
+            try {
+              const failed = await thread.submitUserMessage(prompt);
+              await completed(failed.turnId, 'immediate', true, 'failed', 'failed');
+              const event = analyticsEvents.find(
+                (event) =>
+                  event.event === 'turn_completed' &&
+                  event.properties.run_id === analyticsRuns.get(failed.turnId),
+              )!;
+              const { failure_reason, failure_class, provider_status } = event.properties;
+              assert.deepEqual(
+                JSON.parse(JSON.stringify({ failure_reason, failure_class, provider_status })),
+                { failure_reason: 'model', ...expected },
+              );
+              assert.equal(JSON.stringify(event).includes(privateValue), false);
+            } finally {
+              modelErrors.delete(prompt);
+            }
+          }
           assert.deepEqual(
             [requested.turnId, schedule, task, answer.turnId, signedIn, taskCheck].map(
               (id) => ran(id)?.automatic,
@@ -4577,6 +4779,40 @@ test(
         assert.equal(local.presentation.type, 'bug-report');
         assert.match(local.presentation.summary, /\(EADDRINUSE\)/);
         assert.doesNotMatch(local.presentation.summary, /127\.0\.0\.1|59024/);
+      });
+
+      await t.test('a queued chat turn sees no message sent after it', async (t) => {
+        const approvalId = randomUUID();
+        t.after(async () => {
+          release('history busy fixture');
+          await db.pool.query('DELETE FROM approvals WHERE id=$1', [approvalId]);
+        });
+        await db.pool.query(
+          `INSERT INTO approvals(id,owner_id,thread_id,action,args,status,title)
+           VALUES($1,$2,$3,'GMAIL_CREATE_EMAIL_DRAFT','{}','expired','Draft synthetic email')`,
+          [approvalId, ownerId, threadId],
+        );
+        block('history busy fixture');
+        const busy = await thread.submitUserMessage('history busy fixture', [], { channel: 'web' });
+        await waitFor(() => Boolean(ran(busy.turnId)));
+        const first = await thread.submitUserMessage('history first fixture', [], {
+          channel: 'web',
+        });
+        const second = await thread.submitUserMessage('history second fixture', [], {
+          channel: 'web',
+        });
+        release('history busy fixture');
+        await waitFor(settled(first.turnId));
+        await waitFor(settled(second.turnId));
+        const seen = (turnId: string) => ran(turnId)!.history.map(({ text }) => text);
+        assert.ok(seen(first.turnId).includes('history busy fixture'));
+        assert.ok(!seen(first.turnId).includes('history second fixture'));
+        assert.ok(seen(second.turnId).includes('history first fixture'));
+        assert.equal(
+          ran(first.turnId)!.approvals?.find(({ title }) => title === 'Draft synthetic email')
+            ?.status,
+          'expired',
+        );
       });
 
       await t.test('a reached spending limit pauses all but owner messages', async (t) => {
@@ -5720,10 +5956,9 @@ test(
                   queued.push(await thread.submitUserMessage('Synthetic trailing text'));
                   release(prompt);
                   await waitFor(settled(first.turnId));
-                  const absorbed = initialAudio ? queued : queued.slice(0, 1);
                   assert.deepEqual(
                     taken.get(first.turnId)!.map(({ id }) => id),
-                    absorbed.map(({ messageId }) => messageId),
+                    queued.map(({ messageId }) => messageId),
                   );
                   assert.equal(spoken.length, before + 1);
                   assert.equal(spoken.at(-1), `done: ${prompt}`);
@@ -5740,11 +5975,7 @@ test(
                     await localArtifacts.readArtifact(replies[1].attachments[0].id),
                     Buffer.from('Synthetic generated audio'),
                   );
-                  for (const message of absorbed) assert.equal(ran(message.turnId), undefined);
-                  for (const message of queued.slice(absorbed.length)) {
-                    await waitFor(settled(message.turnId));
-                    assert.ok(ran(message.turnId));
-                  }
+                  for (const message of queued) assert.equal(ran(message.turnId), undefined);
                 } finally {
                   release(prompt);
                 }
@@ -14379,7 +14610,6 @@ test(
       CREATE TABLE model_usage(id text,owner_id text,turn_id uuid,session_id uuid,run_id uuid,parent_run_id uuid,cost_usd double precision,details jsonb,created_at timestamptz DEFAULT now());
       CREATE TABLE tasks(id uuid,owner_id text,turn_id uuid,session_id uuid,state text,step_index integer,steps jsonb,revision integer,applied_revision integer,updated_at timestamptz DEFAULT now());
       CREATE TABLE app_connections(id uuid,owner_id text,slug text,account_id text,account_active boolean,revoked boolean,callback_expires timestamptz,triggers_enabled boolean,watch_failures integer,inbox_failed boolean,inbox_reconnect_required boolean,account_checked_at timestamptz,inbox_checked_at timestamptz,created_at timestamptz DEFAULT now());
-      CREATE TABLE browser_connections(id uuid,owner_id text,state text,checked_at timestamptz,created_at timestamptz DEFAULT now());
       CREATE TABLE discovered_connections(id uuid,owner_id text,reconnect_required boolean,replaced_at timestamptz,paths jsonb,created_at timestamptz DEFAULT now());
       CREATE TABLE model_connections(id uuid,owner_id text,provider text,method text,status text,managed boolean,models jsonb,request_failures jsonb,created_at timestamptz DEFAULT now());
       CREATE TABLE model_settings(owner_id text,selection jsonb,routes jsonb);
@@ -14518,10 +14748,6 @@ test(
       await f.pool.query(
         `INSERT INTO app_connections(id,owner_id,slug,account_id,account_active,revoked,triggers_enabled,watch_failures,inbox_failed,inbox_reconnect_required) VALUES($1,$2,$3,$4,false,false,true,3,true,true)`,
         [randomUUID(), owner, privateText, privateText],
-      );
-      await f.pool.query(
-        `INSERT INTO browser_connections(id,owner_id,state) VALUES($1,$2,'needs_sign_in')`,
-        [randomUUID(), owner],
       );
       await f.pool.query(
         `INSERT INTO discovered_connections(id,owner_id,reconnect_required,paths) VALUES($1,$2,true,$3)`,
@@ -14995,7 +15221,6 @@ test(
     assert.equal(report.connections[0].status, 'reconnect');
     assert.equal(report.connections[0].watchFailures, 3);
     assert.equal(report.connections[0].inboxFailed, true);
-    assert.equal(report.browserConnections.length, 1);
     assert.equal(report.directConnections.length, 1);
     assert.deepEqual(report.directConnections[0].methods, ['mcp', 'other']);
     assert.equal(report.modelConnections[0].provider, 'other');
@@ -15791,6 +16016,16 @@ test('the onboarding brief masks each link and keeps the fields after it', async
   };
   assert.deepEqual(JSON.parse(masked(JSON.stringify({ items: [event, event] }))), {
     items: [event, event].map((item) => ({ ...item, htmlLink: '[link]' })),
+  });
+  const textResult = { data: { text: JSON.stringify({ items: [event, event] }) } };
+  assert.deepEqual(JSON.parse(masked(JSON.stringify(textResult))), {
+    data: { text: { items: [event, event].map((item) => ({ ...item, htmlLink: '[link]' })) } },
+  });
+  const secretText = {
+    data: { text: JSON.stringify({ accessToken: 'synthetic-inner-value', summary: 'Planning' }) },
+  };
+  assert.deepEqual(JSON.parse(masked(secretText)), {
+    data: { text: { accessToken: '[redacted]', summary: 'Planning' } },
   });
   const quoted = { note: 'Open https://files.example.test/a"b?token=zzz then reply', next: 'kept' };
   const brief = masked(JSON.stringify(quoted));

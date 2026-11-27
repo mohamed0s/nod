@@ -51,7 +51,11 @@ export async function readElevenLabsVoices(
           has_more: z.boolean(),
           next_page_token: z.string().min(1).max(2048).nullish(),
         })
-        .parse(JSON.parse((await readSpeechResponse(response, 2 * 1024 * 1024)).toString()));
+        .parse(
+          JSON.parse(
+            (await readSpeechResponse(response, 2 * 1024 * 1024, 'ElevenLabs', [key])).toString(),
+          ),
+        );
       for (const value of body.voices) {
         const parsed = voiceSchema.safeParse(value);
         if (!parsed.success) continue;
@@ -84,7 +88,11 @@ export async function readElevenLabsVoices(
   } catch (error) {
     signal?.throwIfAborted();
     if (error instanceof ElevenLabsConnectionError) throw error;
-    throw new ElevenLabsConnectionError('ElevenLabs voices could not be loaded. Try again.');
+    throw new ElevenLabsConnectionError(
+      error instanceof SpeechProviderError
+        ? error.message
+        : 'ElevenLabs voices could not be loaded. Try again.',
+    );
   }
 }
 
@@ -100,14 +108,12 @@ export function createElevenLabsSpeechProvider(options: {
   let loadGeneration = 0;
   let catalogGeneration = 0;
   async function checkResponse(response: Response, operation: 'synthesize' | 'transcribe') {
-    if (![401, 403, 429].includes(response.status)) return;
+    if (![401, 403].includes(response.status)) return;
     await response.body?.cancel().catch(() => {});
     throw new SpeechProviderError(
       response.status === 401
         ? `ElevenLabs did not accept this API key. Reconnect ElevenLabs in ${appPages['/settings/voice']}.`
-        : response.status === 403
-          ? `Give this ElevenLabs API key ${operation === 'synthesize' ? 'Text to speech' : 'Speech to text'} permission, then try again.`
-          : 'ElevenLabs reached a limit. Check your ElevenLabs account before trying again.',
+        : `Give this ElevenLabs API key ${operation === 'synthesize' ? 'Text to speech' : 'Speech to text'} permission, then try again.`,
     );
   }
   async function key(signal?: AbortSignal) {
@@ -220,7 +226,9 @@ export function createElevenLabsSpeechProvider(options: {
           await response.body?.cancel().catch(() => {});
           throw new Error('Invalid audio response.');
         }
-        const bytes = await readSpeechResponse(response, 50 * 1024 * 1024, 'ElevenLabs');
+        const bytes = await readSpeechResponse(response, 50 * 1024 * 1024, 'ElevenLabs', [
+          authorization,
+        ]);
         if (!bytes.length) throw new Error('Invalid audio response.');
         return { bytes, mimeType: 'audio/mpeg', fileName: 'reply.mp3' };
       });
@@ -249,7 +257,11 @@ export function createElevenLabsSpeechProvider(options: {
         const result = z
           .object({ text: z.string().max(100_000) })
           .parse(
-            JSON.parse((await readSpeechResponse(response, 1024 * 1024, 'ElevenLabs')).toString()),
+            JSON.parse(
+              (
+                await readSpeechResponse(response, 1024 * 1024, 'ElevenLabs', [authorization])
+              ).toString(),
+            ),
           );
         return result.text;
       });

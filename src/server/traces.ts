@@ -1,7 +1,12 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { ModelTrace, ModelTraceDelivery, ModelTraces } from '../ports/traces.ts';
+import type {
+  ModelCallTrace,
+  ModelTrace,
+  ModelTraceDelivery,
+  ModelTraces,
+} from '../ports/traces.ts';
 import { analyticsVersion } from './analytics-events.ts';
 import {
   createPersonalDataRedactor,
@@ -40,6 +45,8 @@ export function createModelTraces(deliver?: ModelTraceDelivery, appVersion?: str
   }>();
   let secrets: string[] = [];
   let secretText = createTextRedactor(secrets);
+  const capturedTurns = new AsyncLocalStorage<string>();
+  let sink: ((entry: CapturedCall) => void) | undefined;
   let profile: () => Promise<PersonalProfile> = async () => ({ names: [] });
   let loaded: { profile: string; text: (value: string) => string } | undefined;
   let seen = -1;
@@ -131,7 +138,9 @@ export function createModelTraces(deliver?: ModelTraceDelivery, appVersion?: str
       profile?: () => Promise<PersonalProfile>;
       userId?: string;
       conversationKey?: Uint8Array;
+      capture?: ((entry: CapturedCall) => void) | null;
     }) {
+      if (options.capture !== undefined) sink = options.capture ?? undefined;
       if (options.conversationKey) {
         if (options.conversationKey.byteLength !== 32)
           throw new Error('The trace conversation key must contain 32 bytes.');
@@ -163,6 +172,43 @@ export function createModelTraces(deliver?: ModelTraceDelivery, appVersion?: str
     },
     available: deliver !== undefined,
     active: () => enabled && deliver !== undefined,
+    capturing: () => sink !== undefined,
+    capture(build: () => ModelCallTrace, explicitTurnId?: string) {
+      const turnId = explicitTurnId ?? capturedTurns.getStore();
+      if (!sink || !turnId) return;
+      const redact = secretText;
+      const plain = (value: string) =>
+        redact(homes.reduce((result, path) => result.replaceAll(path, '~'), value));
+      const text = (value: string): string => {
+        const trimmed = value.trim();
+        if (!/^[[{]/.test(trimmed)) return plain(value);
+        try {
+          return JSON.stringify(withoutSecretKeys(JSON.parse(trimmed)), (_key, item) =>
+            typeof item === 'string' ? text(item) : item,
+          );
+        } catch {
+          return plain(value);
+        }
+      };
+      sink({
+        turnId,
+        build() {
+          const trace = build();
+          return {
+            id: trace.id,
+            json: JSON.stringify(withoutSecretKeys({ ...trace, turnId }), (_key, item) =>
+              typeof item === 'string' ? text(item) : item,
+            ),
+          };
+        },
+      });
+    },
+    captureTurn<T>(turnId: string, run: () => T): T {
+      return capturedTurns.run(turnId, run);
+    },
+    outsideTurn<T>(run: () => T): T {
+      return capturedTurns.exit(run);
+    },
     withTurn<T>(
       context: { sessionId: string; turnId: string },
       run: (ids: { thread_id: string; turn_id: string }) => T,
@@ -191,3 +237,7 @@ export function createModelTraces(deliver?: ModelTraceDelivery, appVersion?: str
 }
 
 export type ModelTraceGate = ReturnType<typeof createModelTraces>;
+export interface CapturedCall {
+  turnId: string;
+  build(): { id: string; json: string };
+}

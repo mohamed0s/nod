@@ -58,17 +58,19 @@ These steps apply to apps connected through Composio, such as Gmail and Outlook.
 <Steps>
 
 1. Open **Apps**, find an app and select **Connect**.
-2. Read the data handling notice, then select **Continue to sign in**. No remote connection starts before this step.
+2. Read how your data travels, then select **Continue to** and the app's name, such as **Continue to Gmail**. No remote connection starts before this step.
 3. Sign in on the app's consent screen and choose what Nod can access. The screen may show Composio, the service that connects the app, instead of Nod.
 4. Return to Nod when the app is connected.
 
 </Steps>
 
+When you select **Connect** on WhatsApp in **Apps**, Nod first asks what you want. **Open Channels** sets up WhatsApp so you can chat with Nod from your own WhatsApp (see [Channels](/use/channels/)). **Connect a Business account** connects a WhatsApp Business account, so Nod can send messages from that business. It needs a Meta Business account.
+
 You can also ask Nod in chat. It searches the same catalog with your saved account status, so it can use an existing connection or explain the available recovery steps when an account is unavailable. When you need a new connection, it sends you a private connection link, shown as a connect button in Nod. Sign-in links never go through Telegram or WhatsApp: there, Nod asks you to open Nod, where the button waits in the chat.
 
 Use **Ask Nod** in the **Connect another tool** card below the catalog to get help connecting a tool. It opens chat with your search included, so Nod can guide the setup. If you already have an MCP server address, use **Connect MCP** at the top of the page.
 
-For Composio apps, the data handling notice appears in the desktop app and on a self-hosted server. This includes installs that use a custom connection service. It also appears for connection links from chat, onboarding and reconnection. App content, including email messages, passes through the connection service and Composio when Nod reads or sends it. Both services can read this content. See [data handling and retention](/trust/privacy/#composio-zero-data-retention).
+For Composio apps, this page appears in the desktop app and on a self-hosted server, for every connection, reconnection and added account, including links from chat and onboarding. It names the two services between Nod and the app: n8n's connection service, or the one your server uses, and Composio. What Nod reads or sends in the app, including email messages, passes through both, and both services can read the content as it passes. With an HTTPS connection service, such as n8n's, every hop is encrypted. With n8n's service, Composio can keep a copy for up to a year. With another service, its operator sets what Composio keeps. See [data handling and retention](/trust/privacy/#composio-zero-data-retention).
 
 The sign-in dialog closes automatically once Nod confirms the connection.
 

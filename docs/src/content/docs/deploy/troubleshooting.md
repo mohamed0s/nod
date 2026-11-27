@@ -198,7 +198,7 @@ Update the server to a version with [remote app sign-in](/deploy/self-host/#conn
 
 For HTTPS, use your public origin, such as `https://nod.example.com`. For an SSH tunnel, keep the tunnel open and use its local Nod address, such as `http://localhost:4310`. App sign-in uses that same port.
 
-Start a fresh connection from **Apps**. Keep its first page open and select **Continue to sign in**. Allow popups for Nod if no sign-in window opens. A page opened before a server restart or URL change cannot complete the connection.
+Start a fresh connection from **Apps**. Keep its first page open and select **Continue to** and the app's name, such as **Continue to Gmail**. Allow popups for Nod if no sign-in window opens. A page opened before a server restart or URL change cannot complete the connection.
 
 ChatGPT model sign-in uses a separate flow. Follow its [remote callback instructions](/connect/models/#connect-a-service); you don't need to expose its callback port publicly.
 

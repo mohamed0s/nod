@@ -73,6 +73,7 @@ export interface BrowserControl {
 export interface BrowserObservation {
   text: string;
   url: string;
+  unmet?: true;
 }
 export const browserRequestBytes = 16 * 1024 * 1024;
 export interface BrowserDownloadInput {
@@ -144,8 +145,6 @@ export interface CredentialSubmission {
   status: 'submitted';
 }
 export interface Computer {
-  bindProfile(threadId: string, profileId: string): Promise<void>;
-  deleteProfile(profileId: string): Promise<void>;
   act(threadId: string, input: BrowserAction, signal?: AbortSignal): Promise<BrowserObservation>;
   download(
     threadId: string,

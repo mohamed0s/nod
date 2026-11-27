@@ -6,8 +6,12 @@
   $files = [ordered]@{ installer = 'nod-Setup-x64.exe'; runtime = 'nod-Runtime-win32-x64.tar.gz' }
 
   $windows = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction SilentlyContinue
-  if (-not [Environment]::Is64BitOperatingSystem -or [int]$windows.CurrentBuildNumber -lt 22000) {
-    throw 'Nod requires 64-bit Windows 11.'
+  $processor = Get-CimInstance -ClassName Win32_Processor -Property Architecture | Select-Object -First 1
+  if (-not [Environment]::Is64BitOperatingSystem -or $processor.Architecture -ne 9) {
+    throw 'Sorry, Nod requires Windows 11 on an Intel or AMD x64 computer. Windows on Arm is not supported.'
+  }
+  if ([int]$windows.CurrentBuildNumber -lt 22000) {
+    throw 'Sorry, Nod requires Windows 11 or later.'
   }
   if ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Run this installer in a normal PowerShell window, not as administrator.'

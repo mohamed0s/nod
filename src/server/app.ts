@@ -230,6 +230,7 @@ export interface AppDependencies {
   >;
   configuration?: () => Configuration;
   onboard?: (timeZone?: string, threadId?: string) => Promise<unknown>;
+  forgetLearned?: () => Promise<void>;
   taskLedger?: (threadId?: string) => Promise<import('../shared/contracts.ts').Task[]>;
   agents?: (threadId: string) => Promise<import('../shared/agents.ts').Agent[]>;
   rooms?: (threadId: string) => Promise<import('../shared/rooms.ts').Room[]>;
@@ -587,8 +588,13 @@ export async function createApp(dependencies: AppDependencies = {}) {
     const capture = snapshotAnalytics(dependencies.analytics);
     if (!configuration().conversationResetEnabled)
       return reply.code(404).send({ error: 'Not found.' });
-    const { threadId } = z.object({ threadId: z.uuid() }).strict().parse(request.body);
+    const { threadId, forget } = z
+      .object({ threadId: z.uuid(), forget: z.boolean().default(false) })
+      .strict()
+      .parse(request.body);
+    if (forget && !dependencies.forgetLearned) return reply.code(404).send({ error: 'Not found.' });
     return audioMessages.pause(async () => {
+      if (forget) await dependencies.forgetLearned!();
       const { previousThreadId, browsers, ...reset } = await resetThread(threadId, capture);
       for (const id of [previousThreadId, ...browsers])
         void dependencies.computer?.discard(id).catch(() => {});
@@ -728,7 +734,9 @@ export async function createApp(dependencies: AppDependencies = {}) {
                   done: event.done,
                   taskId: event.taskId,
                 }
-              : undefined;
+              : event.type === 'trace' && event.ownerId === ownerId
+                ? { type: 'trace', turnId: event.turnId }
+                : undefined;
       if (payload && !reply.raw.destroyed) reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
     };
     send({ type: 'refresh' });

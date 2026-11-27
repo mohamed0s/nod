@@ -1,7 +1,7 @@
-import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, readdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { BrowserDownload } from '../../ports/computer.ts';
 import { fileBytes, fileName } from '../../shared/files.ts';
 
@@ -95,15 +95,32 @@ export async function readDownload(directory: string, file: string, name?: strin
   }
 }
 
+export async function nextDownload(
+  directory: string,
+  previous: Set<string>,
+  signal?: AbortSignal,
+  timeoutMs = 30_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const file = (await completedDownloads(directory)).find((name) => !previous.has(name));
+    if (file) return file;
+    if (Date.now() > deadline)
+      throw new Error(
+        `No download finished within ${timeoutMs / 1000} seconds. Choose the specific download link or URL.`,
+      );
+    await delay(100, undefined, { signal });
+  }
+}
+
 export async function createDownloadCapture(directory: string) {
   const root = await lstat(directory);
   if (!root.isDirectory() || root.isSymbolicLink())
     throw new Error('The browser download directory is unavailable.');
   const previous = new Set(await readdir(directory));
-  const file = `capture-${randomUUID()}`;
   return {
-    file,
-    async cleanup(closed = false) {
+    next: (signal?: AbortSignal) => nextDownload(directory, previous, signal),
+    async cleanup() {
       const current = await lstat(directory);
       if (
         !current.isDirectory() ||
@@ -112,7 +129,7 @@ export async function createDownloadCapture(directory: string) {
         current.ino !== root.ino
       )
         throw new Error('The browser download directory changed.');
-      for (const name of closed ? await readdir(directory) : [file]) {
+      for (const name of await readdir(directory)) {
         if (previous.has(name)) continue;
         await unlink(join(directory, name)).catch((error: NodeJS.ErrnoException) => {
           if (error.code !== 'ENOENT') throw error;

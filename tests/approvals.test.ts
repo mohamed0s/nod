@@ -3650,7 +3650,7 @@ test(
       );
 
       await t.test(
-        'a complete replacement approval repairs withdrawn schedule evidence once',
+        'a withdrawn request keeps its saved schedule running, and a complete replacement repairs evidence without sources once',
         async () => {
           const descriptions: ApprovalDescription[] = [];
           let writes = 0;
@@ -3695,6 +3695,22 @@ test(
           })) as { id: string };
           const originalMessage = (await row(owner.turnId)).message_id;
           await db.pool.query('UPDATE turns SET withdrawn=true WHERE id=$1', [owner.turnId]);
+          const run = await begin('Synthetic scheduled work', { source: 'schedule' });
+          await db.pool.query(
+            `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority)
+             SELECT $1,owner_id,id,revision,$2,title,$3,now(),time_zone,authority FROM schedules WHERE id=$4`,
+            [randomUUID(), randomUUID(), run.turnId, created.id],
+          );
+          const ran = await trust.check(run, 'GOOGLECALENDAR_PATCH_EVENT', {
+            event_id: 'synthetic-board',
+            start_time: '09:00',
+          });
+          assert.equal(ran.confirm, false);
+          await finish(run.turnId, 'succeeded');
+          await db.pool.query(
+            `UPDATE schedules SET authority=authority||'{"requiresReplacement":true}'::jsonb WHERE id=$1`,
+            [created.id],
+          );
           const changed = await begin(
             'Replace the complete instruction: read the synthetic archive every Friday and summarize it in Nod. Never send email.',
           );
@@ -4074,12 +4090,12 @@ test(
           const group = await begin('Open my work dashboard.');
           const target = {
             origin: 'https://workspace.example.test',
-            kind: 'session' as const,
+            kind: 'sign_in' as const,
             itemId: first,
           };
           const session = await access.authorize(group, target);
           assert.ok('details' in session);
-          assert.deepEqual(reviews.at(-1)?.action.name, 'NOD_browser_session');
+          assert.deepEqual(reviews.at(-1)?.action.name, 'NOD_sign_in');
           const groupResumed = await confirmAccess(group, session.args);
           const afterGroup = reviews.length;
           assert.deepEqual(await access.authorize(groupResumed, target), {
@@ -4102,7 +4118,6 @@ test(
           );
           for (const other of [
             { origin: site, kind: 'sign_in' as const, itemId: second },
-            { origin: site, kind: 'session' as const, itemId: first },
             { origin: 'https://other.example.test', kind: 'sign_in' as const, itemId: first },
           ])
             assert.ok('details' in (await access.authorize(resumed, other)));
@@ -4141,7 +4156,7 @@ test(
           const background = await begin('Synthetic background work', { source: 'event' });
           const verdict = await access.authorize(background, {
             origin: site,
-            kind: 'session',
+            kind: 'sign_in',
             itemId: first,
           });
           assert.ok('details' in verdict);
@@ -4592,6 +4607,52 @@ test(
           assert.equal(await turnStatus(origin.turnId), 'running');
           assert.equal((await stored(id)).status, 'pending');
           assert.equal(calls.length, before);
+        },
+      );
+
+      await t.test(
+        'an owner follow-up taken into a running background task is their request',
+        async () => {
+          const origin = await begin('Schedule the synthetic reminders one at a time.');
+          await finish(origin.turnId, 'succeeded');
+          const task = await running(
+            await thread.enqueueTurn('Schedule the synthetic reminders one at a time.', {
+              source: 'task',
+              background: true,
+              parentTurnId: origin.turnId,
+            }),
+          );
+          const followUp = await thread.submitUserMessage('Schedule the rest without asking me.');
+          const elsewhere = await thread.submitUserMessage('Unrelated synthetic message.');
+          await db.pool.query('UPDATE messages SET turn_id=$2 WHERE id=$1', [
+            followUp.messageId,
+            task.turnId,
+          ]);
+          await db.pool.query(
+            "UPDATE turns SET status='succeeded',finished_at=now() WHERE id=ANY($1::uuid[])",
+            [[followUp.turnId, elsewhere.turnId]],
+          );
+          await assert.rejects(
+            approvals.request(
+              task,
+              'NOD_notification_preferences_update',
+              { notificationRule: 'Synthetic rule.' },
+              { sourceMessageId: elsewhere.messageId },
+            ),
+            /direct request/,
+          );
+          const result = await approvals.request(
+            task,
+            'NOD_notification_preferences_update',
+            { notificationRule: 'Synthetic rule.' },
+            { sourceMessageId: followUp.messageId },
+          );
+          assert.ok(result && typeof result === 'object' && appConfirmation in result);
+          assert.equal((await proposal(task.turnId)).source_message_id, followUp.messageId);
+          await db.pool.query("UPDATE approvals SET status='expired' WHERE turn_id=$1", [
+            task.turnId,
+          ]);
+          await finish(task.turnId, 'succeeded');
         },
       );
 

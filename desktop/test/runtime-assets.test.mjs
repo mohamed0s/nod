@@ -25,7 +25,7 @@ import {
 import { createServer } from 'node:net';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { Readable } from 'node:stream';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, join, posix, relative, resolve } from 'node:path';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
@@ -42,6 +42,7 @@ import {
   findRuntimeAssets,
   installRuntimeArchive,
   openRuntimeAssets,
+  runtimeCacheDirectory,
   seedRuntimeCache,
 } from '../runtime/assets.mjs';
 import {
@@ -60,6 +61,16 @@ import { run, verifyDiskImage, verifyRuntimeRelease } from '../scripts/release-t
 import { draftServerRelease } from '../../.github/scripts/server-release.mjs';
 import { imageIdentities } from '../../deployment/self-host/image-identities.mjs';
 import { packageLinuxBundle } from '../scripts/linux-release.mjs';
+
+test('Linux keeps the runtime cache in the XDG data directory', () => {
+  const home = join(homedir(), '.local/share/nod/runtime');
+  assert.equal(
+    runtimeCacheDirectory('linux', { XDG_DATA_HOME: '/var/app/data' }),
+    '/var/app/data/nod/runtime',
+  );
+  assert.equal(runtimeCacheDirectory('linux', { XDG_DATA_HOME: 'relative' }), home);
+  assert.equal(runtimeCacheDirectory('linux', {}), home);
+});
 
 const syntheticVideoUrl =
   'https://github.com/user-attachments/assets/11111111-1111-4111-8111-111111111111';
@@ -470,6 +481,29 @@ test('release gate rejects malformed metadata, uncommitted notes and source drif
   await writeFile(join(f.root, 'desktop/main.mjs'), 'export const late = true;\n');
   f.commit();
   await assert.rejects(checkRelease(f.root, '0.1.0'));
+});
+
+test('a version prepared but never published can be prepared again', async (t) => {
+  const f = await releaseRepository(t);
+  const highlights = '## Synthetic update\n\nUpdates now finish correctly.';
+  await prepareRelease(f.root, '0.1.0', highlights);
+  f.commit();
+  f.git('tag', 'nod-v0.1.0');
+  for (const failed of ['0.1.1', '0.1.2']) {
+    await writeFile(join(f.root, 'desktop/main.mjs'), `export const attempt = '${failed}';\n`);
+    f.commit();
+    await prepareRelease(f.root, failed, highlights);
+    f.commit();
+  }
+  await writeFile(join(f.root, 'desktop/main.mjs'), 'export const fixed = true;\n');
+  f.commit();
+  const manifest = await prepareRelease(f.root, '', highlights);
+  assert.equal(manifest.version, '0.1.1');
+  f.commit();
+  await checkRelease(f.root, '0.1.1');
+  const changelog = await readFile(join(f.root, 'desktop/CHANGELOG.md'), 'utf8');
+  assert.deepEqual(changelog.match(/^## \S+ - /gm), ['## 0.1.1 - ', '## 0.1.0 - ']);
+  await assert.rejects(prepareRelease(f.root, '0.1.0', highlights), /already exists/);
 });
 
 test('release videos are optional and attached videos stay bound to the reviewed release', async (t) => {
@@ -1177,8 +1211,13 @@ if (args[0] !== 'release') throw new Error('Unexpected command');
 const tag = args[2];
 if (args[1] === 'create') {
   if (state.releases[tag]) throw new Error('Duplicate release');
+  const serverError = state.createServerError;
+  delete state.createServerError;
+  const fail = () => { save(); process.stderr.write('HTTP 500 (https://api.github.com/repos/synthetic/nod/releases)'); process.exit(1); };
+  if (serverError === 'before') fail();
   const id = ++state.created;
   state.releases[tag] = { id, tag_name: tag, target_commitish: args.includes('--target') ? flag('--target') : 'main', draft: args.includes('--draft'), prerelease: args.includes('--prerelease'), body: readFileSync(flag('--notes-file'), 'utf8'), html_url: 'https://github.com/synthetic/nod/releases/tag/untagged-' + id, assets: [] };
+  if (serverError === 'after') fail();
 } else {
   const release = state.releases[tag];
   if (!release) missing();
@@ -1221,6 +1260,7 @@ save();
 `,
     { mode: 0o700 },
   );
+  await writeFile(join(bin, 'sleep'), '#!/bin/sh\n', { mode: 0o700 });
   const network = join(root, 'network.mjs');
   await writeFile(
     network,
@@ -1425,6 +1465,18 @@ test('releases publish text notes when the release video is unavailable', async 
     assert.equal(published.draft, false);
     assert(published.body.startsWith('## Synthetic update\n\nTry the updated installer.\n\n'));
     assert(!published.body.includes(syntheticVideoUrl));
+  }
+});
+
+test('a GitHub server error while creating the draft still publishes exactly one release', async (t) => {
+  for (const createServerError of ['before', 'after']) {
+    const f = await releaseFixture(t, { plan: true, publish: true });
+    await f.invoke('plan', true);
+    await f.writeState({ ...(await f.readState()), createServerError });
+    await f.invoke('draft', true);
+    const state = await f.readState();
+    assert.equal(state.created, 1);
+    assert.equal(state.releases[f.appTag].draft, false);
   }
 });
 
@@ -1739,8 +1791,45 @@ test('all four checked bundles publish together as one regular Nod release', asy
       version: f.metadata.version,
       source: f.source,
       commit: 'c'.repeat(64),
-      partBytes: 16,
     });
+    const linuxRuntimeBytes = Buffer.from('Synthetic Linux runtime archive');
+    const linuxRuntimeDirectory = join(f.assets, 'linux-x64');
+    await mkdir(linuxRuntimeDirectory, { recursive: true });
+    const linuxRuntimeFiles = [
+      'docker-guest.tar.gz',
+      'docker-host/docker/docker',
+      'lima/bin/limactl',
+      'lima/share/lima/lima-guestagent.Linux-x86_64.gz',
+      'manifest.json',
+    ].map((path) => ({ path, bytes: 1, mode: 0o644, sha256: f.digest(path) }));
+    const linuxRuntimeId = f.digest(JSON.stringify(linuxRuntimeFiles));
+    const linuxFingerprint = JSON.parse(
+      (
+        await promisify(execFile)(process.execPath, ['desktop/scripts/runtime-inputs.mjs'], {
+          cwd: f.root,
+          env: { NOD_DESKTOP_TARGET: 'linux-x64' },
+        })
+      ).stdout,
+    ).fingerprint;
+    const linuxRuntimeArchiveName = `nod-Runtime-linux-x64-${linuxRuntimeId.slice(0, 12)}.tar.gz`;
+    const linuxRuntime = {
+      version: 1,
+      platform: 'linux-x64',
+      id: linuxRuntimeId,
+      fingerprint: linuxFingerprint,
+      archive: {
+        file: linuxRuntimeArchiveName,
+        bytes: linuxRuntimeBytes.length,
+        sha256: f.digest(linuxRuntimeBytes),
+      },
+      files: linuxRuntimeFiles,
+      url: `https://github.com/synthetic/nod/releases/download/${f.appTag}/${linuxRuntimeArchiveName}`,
+    };
+    await writeFile(join(linuxRuntimeDirectory, linuxRuntimeArchiveName), linuxRuntimeBytes);
+    await writeFile(
+      join(linuxRuntimeDirectory, 'runtime-release.json'),
+      JSON.stringify(linuxRuntime),
+    );
     const names = [
       'release.json',
       'runtime-release.json',
@@ -1913,11 +2002,19 @@ test('all four checked bundles publish together as one regular Nod release', asy
       assert(subjects.includes(`${win.runtime.sha256}  ${win.runtime.file}\n`));
       const linuxManifestPath = join(target, 'linux-x64/release-linux-x64.json');
       const linuxManifest = await readFile(linuxManifestPath, 'utf8');
-      assert(subjects.includes('nod-linux-x64.flatpak.part00\n'));
+      assert(subjects.includes('nod-linux-x64.flatpak\n'));
       await writeFile(linuxManifestPath, linuxManifest.replace(f.source, 'd'.repeat(40)));
       await assert.rejects(f.invoke('draft-all'), /Linux release does not match/);
       assert.equal((await f.readState()).created, 0);
       await writeFile(linuxManifestPath, linuxManifest);
+      const linuxRuntimePath = join(linuxRuntimeDirectory, 'runtime-release.json');
+      await writeFile(
+        linuxRuntimePath,
+        JSON.stringify({ ...linuxRuntime, url: linuxRuntime.url.replace(f.appTag, 'nod-v0.0.1') }),
+      );
+      await assert.rejects(f.invoke('draft-all'), /Linux runtime descriptor does not match/);
+      assert.equal((await f.readState()).created, 0);
+      await writeFile(linuxRuntimePath, JSON.stringify(linuxRuntime));
       assert(subjects.includes('nod-install.sh'));
       assert(subjects.includes('nod-install.ps1'));
       await writeFile(join(intel, 'nod-x64.zip'), 'Corrupt Intel ZIP');
@@ -1941,8 +2038,8 @@ test('all four checked bundles publish together as one regular Nod release', asy
         'nod-x64.zip',
         win.installer.file,
         win.runtime.file,
-        'nod-linux-x64.flatpak.part00',
-        'nod-linux-x64.flatpak.part01',
+        'nod-linux-x64.flatpak',
+        linuxRuntimeArchiveName,
       ]) {
         await f.writeState({ ...(await f.readState()), corruptDownload: name });
         await assert.rejects(f.invoke('draft-all'), /failed its checksum/);
@@ -2035,8 +2132,8 @@ test('all four checked bundles publish together as one regular Nod release', asy
       'nod-Setup-x64.exe',
       'release-linux-x64.json',
       'SHA256SUMS-linux-x64',
-      'nod-linux-x64.flatpak.part00',
-      'nod-linux-x64.flatpak.part01',
+      'nod-linux-x64.flatpak',
+      linuxRuntimeArchiveName,
       ...(!reusedRuntime ? [runtime.archive.file, f.release.archive.file] : []),
       win.runtime.file,
       windowsManifest,

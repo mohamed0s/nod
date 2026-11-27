@@ -26,6 +26,8 @@ type AnalyticsEvents = {
   app_opened: {
     entry: 'native_setup' | 'app_ui';
     server_connection_telemetry_available?: true;
+    login_item?: 'registered' | 'not_registered' | 'unknown';
+    since_boot?: 'under_5m' | 'under_1h' | 'over_1h';
   };
   onboarding_step_viewed: {
     step: OnboardingStep;
@@ -107,7 +109,7 @@ type AnalyticsEvents = {
   };
   app_connect_clicked: {
     entry: 'apps' | 'chat' | 'onboarding' | 'manage';
-    result: 'opened' | 'needs_access_setup';
+    result: 'opened' | 'needs_access_setup' | 'channels';
   };
   model_selected: {
     provider: ModelProvider | 'other';
@@ -154,6 +156,11 @@ const presentationKinds = [
   'chart',
   'apps',
   'diagram',
+  'items',
+  'schedule',
+  'facts',
+  'compare',
+  'draft',
 ];
 const artifactKinds = [
   'image',
@@ -173,7 +180,12 @@ const artifactKinds = [
   'file',
 ];
 const eventProperties: Record<keyof AnalyticsEvents, Record<string, readonly unknown[]>> = {
-  app_opened: { entry: ['native_setup', 'app_ui'], server_connection_telemetry_available: [true] },
+  app_opened: {
+    entry: ['native_setup', 'app_ui'],
+    server_connection_telemetry_available: [true],
+    login_item: ['registered', 'not_registered', 'unknown'],
+    since_boot: ['under_5m', 'under_1h', 'over_1h'],
+  },
   onboarding_step_viewed: {
     step: onboardingSteps,
     direction: ['forward', 'back'],
@@ -258,7 +270,7 @@ const eventProperties: Record<keyof AnalyticsEvents, Record<string, readonly unk
   },
   app_connect_clicked: {
     entry: ['apps', 'chat', 'onboarding', 'manage'],
-    result: ['opened', 'needs_access_setup'],
+    result: ['opened', 'needs_access_setup', 'channels'],
   },
   model_selected: {
     provider: [...modelProviders, 'other'],
@@ -694,6 +706,12 @@ function captureAppOpened(path: string) {
               ...(opening.entry === 'native_setup' &&
               opening.serverConnectionTelemetryAvailable === true
                 ? { server_connection_telemetry_available: true }
+                : {}),
+              ...(opening.entry === 'app_ui' && opening.loginItem
+                ? { login_item: opening.loginItem }
+                : {}),
+              ...(opening.entry === 'app_ui' && opening.sinceBoot
+                ? { since_boot: opening.sinceBoot }
                 : {}),
             },
             {

@@ -159,7 +159,8 @@ export function PrivateEntryWorkspace({
             tabIndex={-1}
             data-analytics-private
             onKeyDown={(event) => {
-              if (event.defaultPrevented) return;
+              if (event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229)
+                return;
               if (event.key === 'Escape') {
                 event.preventDefault();
                 event.stopPropagation();

@@ -37,6 +37,7 @@ import {
   bedrockRegionPattern,
   cloudflareAccountPattern,
   cloudflareGatewayPattern,
+  lighterEffort,
   lightestEffort,
   modelSource,
   openAIRegions,
@@ -749,7 +750,7 @@ export function createModelService(options: {
     return {
       connectionId: row.id,
       modelId: definition.choice.id,
-      effort: defaultEffort(row.provider, definition.choice),
+      effort: lighterEffort(definition.choice.efforts, defaultEffort(definition.choice)),
     };
   }
   function textChoice(
@@ -995,7 +996,7 @@ export function createModelService(options: {
       state.selection = {
         connectionId: id,
         modelId: preferred.id,
-        effort: defaultEffort(provider, preferred),
+        effort: defaultEffort(preferred),
       };
       state.selectionSet = true;
     }
@@ -1346,7 +1347,7 @@ export function createModelService(options: {
       if (definition.choice.efforts.includes(work.selection.effort)) return work;
       return {
         ...work,
-        selection: { ...work.selection, effort: defaultEffort(row.provider, definition.choice) },
+        selection: { ...work.selection, effort: defaultEffort(definition.choice) },
       };
     },
     async candidates(
@@ -1366,7 +1367,7 @@ export function createModelService(options: {
               ? auxiliaryEffort(definition.choice.efforts)
               : definition.choice.efforts.includes(item.effort)
                 ? item.effort
-                : defaultEffort(row.provider, definition.choice),
+                : defaultEffort(definition.choice),
             ...requestAccess(row),
             needsReconnect: (credential) =>
               needsReconnect(row.id, { models: row.models, credential }),
@@ -1717,7 +1718,7 @@ export function createModelService(options: {
                 definition: companion,
                 effort: auxiliary
                   ? lightestEffort(companion.choice.efforts)
-                  : defaultEffort(row.provider, companion.choice),
+                  : defaultEffort(companion.choice),
               },
             }
           : {}),
@@ -1732,17 +1733,17 @@ export function createModelService(options: {
     register(app: FastifyInstance, capture?: CaptureAnalytics) {
       analytics = capture;
       void app.register(async (routes) => {
-        routes.setErrorHandler((error, _request, reply) =>
-          reply.code(400).send({
-            error:
-              error instanceof ConnectionError || error instanceof ModelAuthError
-                ? error.message
-                : 'The model connection request failed. Check the service and try again.',
+        routes.setErrorHandler((error, _request, reply) => {
+          if (error instanceof z.ZodError)
+            return reply.code(400).send({ error: 'Check the supplied values.' });
+          if (!(error instanceof ConnectionError || error instanceof ModelAuthError)) throw error;
+          return reply.code(400).send({
+            error: error.message,
             ...(error instanceof ModelWorkspaceSelectionError
               ? { workspaces: error.workspaces }
               : {}),
-          }),
-        );
+          });
+        });
         routes.get('/api/models', async () => service.view());
         routes.post('/api/models/keys', async (request) => {
           const { provider, key, ...settings } = keySchema.parse(request.body);

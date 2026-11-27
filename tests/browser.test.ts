@@ -55,7 +55,7 @@ import {
   fakeDevtools,
   type DevtoolsModel,
 } from './browser-fixture.ts';
-import { stagedLoginBrowser } from './login-fixture.ts';
+import { ownerBrowserCommand, stagedLoginBrowser } from './login-fixture.ts';
 import { fakeComputer, fakeWorkspace } from './runtime-fixtures.ts';
 import { accessCookie, accessKey } from '../src/server/access.ts';
 import { withFailureLog } from '../src/ports/failure-log.ts';
@@ -761,6 +761,8 @@ async function browserFixture() {
   const computer = createBrowserFixture({
     dataRoot: directory,
     run: async (executable, args, options) => {
+      const owned = ownerBrowserCommand(args);
+      if (owned) return owned;
       await before(args.slice(args.indexOf('--idle-timeout') + 2));
       return browser.run(executable, args, options);
     },
@@ -865,6 +867,8 @@ async function transportFixture() {
     onDiagnostic: (event) => diagnostics.push(event),
     daemonCommand: (path, command, signal) => existingDaemonCommand(path, command, signal, 250),
     run: async (executable, args, options) => {
+      const owned = ownerBrowserCommand(args);
+      if (owned) return owned;
       if (args.includes('info'))
         return {
           exitCode: 0,
@@ -1013,6 +1017,8 @@ test('a card goes only into the approved fields on the approved sites and stays 
   const computer = createBrowserFixture({
     dataRoot: directory,
     run: async (_executable, args, options) => {
+      const owned = ownerBrowserCommand(args);
+      if (owned) return owned;
       const command = args.slice(args.indexOf('--idle-timeout') + 2);
       let data: Record<string, unknown> = {};
       if (command[0] === 'open' || command[0] === 'reload') {
@@ -1163,59 +1169,40 @@ test('a card goes only into the approved fields on the approved sites and stays 
   }
 });
 
-test('discarding a thread closes its browser and deletes only its throwaway data; clearing a finished session lets it start fresh', async () => {
+test('discarding a task closes only its tab and throwaway data, and the owner profile stays', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'nod-browser-discard-'));
   const fixture = stagedLoginBrowser();
-  const commands: string[] = [];
-  const computer = createBrowserFixture({
-    dataRoot: directory,
-    run: async (executable, args, options) => {
-      commands.push(args[args.indexOf('--idle-timeout') + 2]);
-      return fixture.run(executable, args, options);
-    },
-  });
+  const computer = createBrowserFixture({ dataRoot: directory, run: fixture.run });
   const runtime = join(directory, 'runtime');
-  const savedProfile = randomUUID();
-  const dirs = ['profiles/old', 'downloads/old', 'profiles/other', `profiles/${savedProfile}`];
-  const screens = [
-    'screen-old.png',
-    'screen-old.capture.png',
-    'screen-bound.png',
-    'screen-other.png',
-  ];
   try {
-    for (const dir of dirs) {
+    for (const dir of ['profiles/owner', 'downloads/old']) {
       await mkdir(join(runtime, dir), { recursive: true });
       await writeFile(join(runtime, dir, 'data'), 'synthetic');
     }
-    for (const screen of screens) await writeFile(join(runtime, screen), 'synthetic');
+    for (const screen of ['screen-old.png', 'screen-old.capture.png', 'screen-other.png'])
+      await writeFile(join(runtime, screen), 'synthetic');
     await computer.act('old', { action: 'open', url: 'https://1.1.1.1/login' });
     await computer.act('other', { action: 'open', url: 'https://1.1.1.1/login' });
-    await computer.bindProfile!('bound', savedProfile);
     await computer.discard!('old');
-    await computer.discard!('bound');
     await assert.rejects(
       computer.act('old', { action: 'open', url: 'https://1.1.1.1/login' }),
       /was reset/,
     );
-    await assert.rejects(computer.bindProfile!('old', savedProfile), /was reset/);
-    assert.equal(commands.filter((command) => command === 'close').length, 1);
-    assert.deepEqual(
-      (await readdir(join(runtime, 'profiles'))).sort(),
-      [savedProfile, 'other'].sort(),
-    );
+    assert.equal(fixture.pages.get('old'), undefined);
+    assert.deepEqual(await readdir(join(runtime, 'profiles')), ['owner']);
     assert.deepEqual(await readdir(join(runtime, 'downloads')), []);
+    const screens = (await readdir(runtime)).filter((file) => file.startsWith('screen-'));
     assert.deepEqual(
-      (await readdir(runtime)).filter((file) => file.startsWith('screen-')),
-      ['screen-other.png'],
+      screens.filter((file) => file.startsWith('screen-old')),
+      [],
     );
-    assert.equal(computer.screenStatus!('old').state, 'unavailable');
+    assert.ok(screens.includes('screen-other.png'));
     assert.equal(
       (await computer.act('other', { action: 'snapshot' })).url,
       'https://1.1.1.1/login',
     );
     await computer.clear!('other');
-    assert.deepEqual(await readdir(join(runtime, 'profiles')), [savedProfile]);
+    assert.deepEqual(await readdir(join(runtime, 'profiles')), ['owner']);
     assert.equal(
       (await computer.act('other', { action: 'open', url: 'https://1.1.1.1/login' })).url,
       'https://1.1.1.1/login',
@@ -1258,6 +1245,8 @@ test('a browser that will not close is killed with its process groups so the nex
   const computer = createBrowserFixture({
     dataRoot: directory,
     run: async (executable, args, input) => {
+      const owned = ownerBrowserCommand(args);
+      if (owned) return owned;
       const action = args[args.indexOf('--idle-timeout') + 2];
       commands.push(action);
       if (action === 'open' && failOpen) {
@@ -1304,13 +1293,14 @@ for (const [host, owner] of [
   test(`a profile locked by a replaced browser container on ${host} opens again`, async () => {
     const directory = await mkdtemp(join(tmpdir(), 'nod-browser-foreign-lock-'));
     const fixture = stagedLoginBrowser();
-    const profile = join(directory, 'runtime', 'profiles', 'fixture');
+    const profile = join(directory, 'runtime', 'profiles', 'owner');
     const computer = createBrowserFixture({
       dataRoot: directory,
       run: async (executable, args, input) => {
         const lock = await readlink(join(profile, 'SingletonLock')).catch(() => '');
-        if (args[args.indexOf('--idle-timeout') + 2] === 'open' && lock === owner)
-          throw new RuntimeTimeLimitError();
+        if (args.includes('--profile') && lock === owner) throw new RuntimeTimeLimitError();
+        const owned = ownerBrowserCommand(args);
+        if (owned) return owned;
         return fixture.run(executable, args, input);
       },
     });
@@ -1385,38 +1375,17 @@ async function runtimeFixture(
   };
 }
 
-test('at the browser cap a new browser waits for one idle past the window and never evicts a held one', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'nod-browser-cap-'));
+test('many task tabs stay open together and each keeps its own page', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-browser-tabs-'));
   const fixture = stagedLoginBrowser();
-  const computer = createBrowserFixture({
-    dataRoot: directory,
-    run: fixture.run,
-    maxLiveSessions: 2,
-    evictIdleMs: 1000,
-  });
-  const open = (id: string, signal?: AbortSignal) =>
-    computer.act(id, { action: 'open', url: 'https://1.1.1.1/login' }, signal);
-  const pages = () => [...fixture.pages.keys()].sort();
+  const computer = createBrowserFixture({ dataRoot: directory, run: fixture.run });
+  const ids = Array.from({ length: 10 }, (_, index) => `task-${index}`);
   try {
-    await open('chat');
-    await computer.hold('chat', true);
-    await open('subagent');
-    const stop = new AbortController();
-    const stopped = open('event', stop.signal);
-    await delay(200);
-    stop.abort();
-    await assert.rejects(stopped, { name: 'AbortError' });
-    assert.deepEqual(pages(), ['chat', 'subagent']);
-    await open('scheduled');
-    assert.deepEqual(pages(), ['chat', 'scheduled']);
-    await computer.hold('scheduled', true);
-    await delay(1100);
-    const waiting = new AbortController();
-    const blocked = open('later', waiting.signal);
-    await delay(700);
-    waiting.abort();
-    await assert.rejects(blocked, { name: 'AbortError' });
-    assert.deepEqual(pages(), ['chat', 'scheduled']);
+    for (const id of ids) await computer.act(id, { action: 'open', url: 'https://1.1.1.1/login' });
+    for (const id of ids) {
+      fixture.pages.get(id)!.location = new URL(`https://1.1.1.1/${id}`);
+      assert.equal((await computer.act(id, { action: 'snapshot' })).url, `https://1.1.1.1/${id}`);
+    }
   } finally {
     await computer.dispose();
     await rm(directory, { recursive: true, force: true });
@@ -1677,7 +1646,6 @@ test('each application namespace retains its own worker and disposal drains only
       first.act('same-task', { action: 'open', url: 'https://example.com' }),
       /unavailable/,
     );
-    await assert.rejects(first.bindProfile!('same-task', randomUUID()), /unavailable/);
     assert.equal(one.calls.filter((call) => call.method === 'dispose').length, 1);
     await second.act('same-task', { action: 'snapshot' });
   } finally {
@@ -1821,22 +1789,24 @@ test('a browser that fails to start reports why through the workspace browser', 
   const directory = await mkdtemp(join(tmpdir(), 'nod-browser-start-failure-'));
   let failure = (args: string[]) =>
     `Chrome exited early (exit code: 21) for ${args[args.indexOf('--profile') + 1]} and ${/--disk-cache-dir=([^,]+)/.exec(args.join(' '))?.[1]}`;
+  let ownerStarts = false;
   const fixture = await harness({
     computer: createAgentBrowserComputer({
       dataRoot: directory,
       headless: true,
-      run: async (_executable, args) => ({
-        exitCode: args.includes('info') ? 0 : 1,
-        stderr: '',
-        stdout: JSON.stringify(
-          args.includes('info')
-            ? { success: true, data: { active: false } }
-            : {
-                success: false,
-                error: failure(args),
-              },
-        ),
-      }),
+      run: async (_executable, args) =>
+        (ownerStarts ? ownerBrowserCommand(args) : undefined) ?? {
+          exitCode: args.includes('info') ? 0 : 1,
+          stderr: '',
+          stdout: JSON.stringify(
+            args.includes('info')
+              ? { success: true, data: { active: false } }
+              : {
+                  success: false,
+                  error: failure(args),
+                },
+          ),
+        },
     }),
   });
   try {
@@ -1848,6 +1818,7 @@ test('a browser that fails to start reports why through the workspace browser', 
       },
     );
     failure = () => 'Navigation failed: net::ERR_NAME_NOT_RESOLVED';
+    ownerStarts = true;
     await assert.rejects(
       fixture.client(directory).act('fixture', { action: 'open', url: 'https://example.com/' }),
       { message: new BrowserActionError('browser_navigation_failed').message },
@@ -2059,7 +2030,7 @@ test(
   },
 );
 
-for (const method of ['open', 'bindProfile'] as const)
+for (const method of ['open'] as const)
   test(`an explicit ${method} drains an uncertain namespace before opening a new session`, async () => {
     const fixture = await harness();
     const dataRoot = `/synthetic/recover-${method}`;
@@ -2073,7 +2044,6 @@ for (const method of ['open', 'bindProfile'] as const)
       await assert.rejects(computer.act('task', { action: 'open', url: 'x'.repeat(8193) }));
       for (const url of ['not-a-url', 'javascript:alert(1)', 'https://user:pass@example.com'])
         await assert.rejects(computer.act('task', { action: 'open', url }));
-      await assert.rejects(computer.bindProfile!('task', 'invalid-profile'));
       await assert.rejects(computer.act('task', { action: 'snapshot' }), /unavailable/);
       await assert.rejects(
         computer.act('task', { action: 'click', selector: '#submit' }),
@@ -2081,20 +2051,18 @@ for (const method of ['open', 'bindProfile'] as const)
       );
       assert.equal(fixture.launches.length, launches);
       let settled = false;
-      const recovery = (
-        method === 'open'
-          ? computer.act('task', { action: 'open', url: 'https://example.com/reopened' })
-          : computer.bindProfile!('task', randomUUID())
-      ).then(
-        () => {
-          settled = true;
-          return undefined;
-        },
-        (error: unknown) => {
-          settled = true;
-          return error;
-        },
-      );
+      const recovery = computer
+        .act('task', { action: 'open', url: 'https://example.com/reopened' })
+        .then(
+          () => {
+            settled = true;
+            return undefined;
+          },
+          (error: unknown) => {
+            settled = true;
+            return error;
+          },
+        );
       await delay(10);
       assert.equal(settled, false);
       release.resolve();
@@ -2254,6 +2222,59 @@ test('a password typed through the handoff in several pauses hides only the fini
 });
 
 describe('native browser controls', { concurrency: 3 }, () => {
+  test(
+    'a private sign-in works in a session whose window is behind another session window',
+    {
+      skip: process.env.NOD_TEST_NATIVE_DOWNLOAD !== 'true' || process.platform !== 'linux',
+      timeout: 60_000,
+    },
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'nod-focus-'));
+      const server = createHttpServer((request, response) => {
+        response.setHeader('content-type', 'text/html');
+        response.end(
+          request.url?.startsWith('/signed')
+            ? `<h1>${request.url.includes('password=') ? 'signed with password' : 'signed empty'}</h1>`
+            : '<h1>Login</h1><form action="/signed"><input id="password" type="password" name="password"><button id="submit">Sign in</button></form>',
+        );
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const address = server.address();
+      assert.ok(address && typeof address !== 'string');
+      const origin = `http://127.0.0.1:${address.port}`;
+      const computer = createAgentBrowserComputer({
+        ...containerBrowserOptions(directory),
+        privateNetwork: true,
+      });
+      try {
+        await computer.act('behind', { action: 'open', url: `${origin}/login` });
+        await computer.act('front', { action: 'open', url: `${origin}/login` });
+        await computer.injectCredentials!({
+          threadId: 'behind',
+          origin,
+          kind: 'password',
+          password: 'Synthetic private value',
+          passwordSelector: '#password',
+          submitSelector: '#submit',
+        });
+        for (let attempt = 0; attempt < 50; attempt++) {
+          if (
+            (await computer.act('behind', { action: 'snapshot' })).text.includes(
+              'signed with password',
+            )
+          )
+            return;
+          await delay(100);
+        }
+        assert.fail('The private sign-in did not reach the page.');
+      } finally {
+        await computer.dispose();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   test(
     'the browser bridge reports invalid wait conditions and keeps the page usable',
     {
@@ -2764,6 +2785,316 @@ describe('native browser controls', { concurrency: 3 }, () => {
       } finally {
         inspector?.close();
         await computer.dispose();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test(
+    'native sessions share one signed-in browser and keep their own tabs through popups, closes and restarts',
+    { skip: process.env.NOD_TEST_NATIVE_DOWNLOAD !== 'true', timeout: 180_000 },
+    async () => {
+      const ids = ['a', 'b', 'c', 'd', 'e', 'f'];
+      const directory = await mkdtemp(join(tmpdir(), 'nod-one-browser-native-'));
+      const server = createHttpServer((request, response) => {
+        const signedIn = /(?:^|; )account=owner(?:;|$)/.test(request.headers.cookie ?? '');
+        response.setHeader('content-type', 'text/html');
+        if (request.url === '/sign-in') {
+          response.setHeader(
+            'set-cookie',
+            'account=owner; Path=/; Max-Age=3600; HttpOnly; Secure; SameSite=Lax',
+          );
+          return response.end('<h1>Welcome</h1>');
+        }
+        if (request.url === '/login')
+          return response.end(
+            '<h1>Login</h1><form action="/signed"><input id="password" type="password" name="password"><button id="submit">Sign in</button></form>',
+          );
+        if (request.url?.startsWith('/signed'))
+          return response.end(
+            `<h1>signed ${request.url.includes('password=') ? 'with password' : 'empty'}</h1>`,
+          );
+        if (request.url === '/popup')
+          return response.end(
+            '<h1>Popup page</h1><button id="done" onclick="window.close()">Done</button>',
+          );
+        const name = [...ids, 'b-again'].find((id) => request.url === `/${id}`) ?? 'home';
+        response.end(
+          `<h1>${name} ${signedIn ? 'signed in' : 'signed out'}</h1>` +
+            '<a id="popup" href="/popup" target="_blank">Open popup</a><input id="field">' +
+            "<button id=\"confirm\" onclick=\"document.title = confirm('Continue?') ? 'confirmed' : 'declined'\">Confirm</button>",
+        );
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const address = server.address();
+      assert.ok(address && typeof address !== 'string');
+      const origin = `http://127.0.0.1:${address.port}`;
+      const sockets = new Set<string>();
+      const start = () =>
+        createAgentBrowserComputer({
+          ...(process.platform === 'linux'
+            ? containerBrowserOptions(directory)
+            : {
+                dataRoot: directory,
+                browserExecutable: process.env.NOD_TEST_BROWSER_EXECUTABLE,
+                headless: true,
+              }),
+          privateNetwork: true,
+          daemonCommand: async (path, command, signal, timeoutMs) => {
+            sockets.add(path);
+            return existingDaemonCommand(path, command, signal, timeoutMs);
+          },
+        });
+      let computer = start();
+      const page = async (id: string) => {
+        const { text, url } = await computer.act(id, { action: 'snapshot' });
+        return { url, text };
+      };
+      const browserPages = async () =>
+        (
+          (
+            await existingDaemonCommand(
+              [...sockets].find((path) => path.endsWith(`${browserSessionId('a')}.sock`))!,
+              { action: 'tab_list' },
+            )
+          ).tabs as Array<{
+            url: string;
+          }>
+        ).map((tab) => tab.url);
+      const ownTabs = async (id: string) =>
+        [...(await computer.act(id, { action: 'tab_list' })).text.matchAll(/ (t\d+): /g)].map(
+          (match) => match[1]!,
+        );
+      const frame = async (id: string) => {
+        const controller = new AbortController();
+        try {
+          for await (const value of computer.view!(id, controller.signal)) return value;
+        } finally {
+          controller.abort();
+        }
+      };
+      const passkey = async (id: string) =>
+        (
+          await computer.act(id, {
+            action: 'evaluate',
+            script:
+              "navigator.credentials.get({ publicKey: { challenge: new Uint8Array(16) } }).then(() => 'allowed', (error) => error.message)",
+          })
+        ).text;
+      const waitFor = async (check: () => Promise<boolean>) => {
+        for (let attempt = 0; attempt < 50; attempt++) {
+          if (await check().catch(() => false)) return;
+          await delay(200);
+        }
+        assert.fail('The browser did not reach the expected state.');
+      };
+      try {
+        await computer.act('a', { action: 'open', url: `${origin}/sign-in` });
+        for (const id of ids) await computer.act(id, { action: 'open', url: `${origin}/${id}` });
+        for (const id of ids) assert.match((await page(id)).text, new RegExp(`${id} signed in`));
+        const opened = await browserPages();
+        assert.equal(opened.filter((url) => url.startsWith(origin)).length, ids.length);
+        assert.ok(opened.filter((url) => url === 'about:blank').length <= 1);
+        assert.match(await passkey('c'), /Passkeys are not available in this browser/);
+        await computer.act('a', { action: 'open', url: `${origin}/login` });
+        await computer.injectCredentials({
+          threadId: 'a',
+          origin,
+          kind: 'password',
+          password: 'Synthetic private value',
+          passwordSelector: '#password',
+          submitSelector: '#submit',
+        });
+        await waitFor(async () => (await page('a')).text.includes('signed with password'));
+        await computer.act('a', { action: 'open', url: `${origin}/a` });
+        await computer.act('e', { action: 'click', selector: '#confirm' });
+        const answered = Date.now();
+        await computer.act('e', { action: 'accept_dialog' });
+        assert.ok(Date.now() - answered < 10_000);
+        assert.match(
+          (await computer.act('e', { action: 'evaluate', script: 'document.title' })).text,
+          /confirmed/,
+        );
+
+        await Promise.all(
+          ids.map((id) => computer.act(id, { action: 'fill', selector: '#field', text: id })),
+        );
+        for (const id of ids)
+          assert.equal(
+            (
+              await computer.act(id, {
+                action: 'evaluate',
+                script: 'document.querySelector("#field").value',
+              })
+            ).text
+              .split('\n')
+              .at(-1),
+            JSON.stringify(id),
+          );
+
+        const opener = await frame('a');
+        await computer.act('a', { action: 'click', selector: '#popup' });
+        await waitFor(async () => (await page('a')).url === `${origin}/popup`);
+        assert.notDeepEqual(await frame('a'), opener);
+        assert.match(await passkey('a'), /Passkeys are not available in this browser/);
+        assert.equal((await page('b')).url, `${origin}/b`);
+        const tabs = await ownTabs('a');
+        assert.equal(tabs.length, 2);
+        assert.doesNotMatch((await computer.act('a', { action: 'tab_list' })).text, /\/b\b/);
+        for (const tabId of ['t1', 't2', 't3', 't4', 't5', 't6', 't7', 't8', 't9'])
+          if (!tabs.includes(tabId))
+            await assert.rejects(computer.act('a', { action: 'tab_switch', tabId }), /tab_list/);
+        await computer.act('a', { action: 'click', selector: '#done' }).catch(() => {});
+        await waitFor(async () => (await page('a')).url === `${origin}/a`);
+        assert.deepEqual(await ownTabs('a'), [tabs[0]]);
+
+        await computer.act('b', { action: 'click', selector: '#popup' });
+        await waitFor(async () => (await page('b')).url === `${origin}/popup`);
+        await computer.close('b');
+        await waitFor(async () => !(await browserPages()).some((url) => /\/(b|popup)$/.test(url)));
+        for (const id of ['a', 'c', 'd', 'e', 'f'])
+          assert.match((await page(id)).text, new RegExp(`${id} signed in`));
+        await computer.act('b', { action: 'open', url: `${origin}/b-again` });
+        assert.match((await page('b')).text, /b-again signed in/);
+
+        await computer.dispose();
+        computer = start();
+        for (const id of ['a', 'c'])
+          assert.match((await page(id)).text, new RegExp(`${id} signed in`));
+        assert.equal((await page('c')).url, `${origin}/c`);
+      } finally {
+        await computer.dispose().catch(() => {});
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test(
+    'native sessions recover from killed drivers, a closed tab, a crashed service and a crashed browser',
+    { skip: process.env.NOD_TEST_NATIVE_DOWNLOAD !== 'true', timeout: 240_000 },
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'nod-chaos-native-'));
+      const server = createHttpServer((request, response) => {
+        const signedIn = /(?:^|; )account=owner(?:;|$)/.test(request.headers.cookie ?? '');
+        const state = signedIn ? 'signed in' : 'signed out';
+        const url = new URL(request.url ?? '/', 'http://localhost');
+        const id = ['a', 'b', 'c', 'd'].find((name) => url.pathname.endsWith(`/${name}`)) ?? '';
+        const value =
+          ['value-a', 'value-b', 'value-c', 'value-d'].find(
+            (option) => option === url.searchParams.get('value'),
+          ) ?? '';
+        response.setHeader('content-type', 'text/html');
+        if (url.pathname === '/sign-in') {
+          response.setHeader(
+            'set-cookie',
+            'account=owner; Path=/; Max-Age=3600; HttpOnly; Secure; SameSite=Lax',
+          );
+          return response.end('<h1>Welcome</h1>');
+        }
+        if (url.pathname.startsWith('/form/'))
+          return response.end(
+            `<h1>form ${id} ${state}</h1><form action="/done/${id}"><input id="field" name="value"><button id="submit">Send</button></form>`,
+          );
+        if (url.pathname.startsWith('/slow/'))
+          return void setTimeout(() => response.end(`<h1>slow ${id} ${state}</h1>`), 4000);
+        response.end(`<h1>done ${id} ${value} ${state}</h1>`);
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const address = server.address();
+      assert.ok(address && typeof address !== 'string');
+      const origin = `http://127.0.0.1:${address.port}`;
+      const sockets = new Set<string>();
+      const start = () =>
+        createAgentBrowserComputer({
+          ...(process.platform === 'linux'
+            ? containerBrowserOptions(directory)
+            : {
+                dataRoot: directory,
+                browserExecutable: process.env.NOD_TEST_BROWSER_EXECUTABLE,
+                headless: true,
+              }),
+          privateNetwork: true,
+          daemonCommand: async (path, command, signal, timeoutMs) => {
+            sockets.add(path);
+            return existingDaemonCommand(path, command, signal, timeoutMs);
+          },
+        });
+      const abandoned = start();
+      let computer = abandoned;
+      const ids = ['a', 'b', 'c', 'd'];
+      const heading = async (id: string) =>
+        /heading "([^"]+)"/.exec((await computer.act(id, { action: 'snapshot' })).text)?.[1];
+      const socket = (id: string) =>
+        [...sockets].find((path) => path.endsWith(`${browserSessionId(id)}.sock`))!;
+      const killDriver = async (id: string) => {
+        const pid = Number(await readFile(socket(id).replace(/\.sock$/, '.pid'), 'utf8'));
+        process.kill(pid, 'SIGKILL');
+        for (let attempt = 0; attempt < 50; attempt++) {
+          try {
+            process.kill(pid, 0);
+          } catch {
+            return;
+          }
+          await delay(100);
+        }
+      };
+      try {
+        await computer.act('a', { action: 'open', url: `${origin}/sign-in` });
+        await Promise.all(
+          ids.map(async (id) => {
+            await computer.act(id, { action: 'open', url: `${origin}/form/${id}` });
+            await computer.act(id, { action: 'fill', selector: '#field', text: `value-${id}` });
+            await computer.act(id, { action: 'click', selector: '#submit' });
+            await computer.act(id, { action: 'wait', url: `**/done/${id}*` });
+          }),
+        );
+        for (const id of ids) assert.equal(await heading(id), `done ${id} value-${id} signed in`);
+
+        await killDriver('b');
+        assert.equal(await heading('b'), 'done b signed in');
+        for (const id of ['a', 'c', 'd'])
+          assert.equal(await heading(id), `done ${id} value-${id} signed in`);
+
+        const slow = assert.rejects(computer.act('c', { action: 'open', url: `${origin}/slow/c` }));
+        await delay(1000);
+        await killDriver('c');
+        await slow;
+        await assert.rejects(heading('c'));
+        await computer.act('c', { action: 'open', url: `${origin}/form/c` });
+        assert.equal(await heading('c'), 'form c signed in');
+
+        const tabs = (await existingDaemonCommand(socket('d'), { action: 'tab_list' })) as {
+          tabs: Array<{ active: boolean; targetId: string }>;
+        };
+        await existingDaemonCommand(socket('a'), {
+          action: 'tab_close',
+          tabId: tabs.tabs.find((tab) => tab.active)!.targetId,
+        });
+        assert.equal(await heading('d'), 'done d signed in');
+
+        computer = start();
+        assert.equal(await heading('a'), 'done a signed in');
+        assert.equal(await heading('c'), 'form c signed in');
+
+        const loading = assert.rejects(
+          computer.act('b', { action: 'open', url: `${origin}/slow/b` }),
+        );
+        await delay(1000);
+        const lock = await readlink(
+          join(directory, 'runtime', 'profiles', 'owner', 'SingletonLock'),
+        );
+        process.kill(Number(lock.split('-').at(-1)), 'SIGKILL');
+        await loading;
+        assert.match((await heading('d')) ?? '', /^done d /);
+        await computer.act('b', { action: 'open', url: `${origin}/form/b` });
+        assert.match((await heading('b')) ?? '', /^form b /);
+      } finally {
+        await computer.dispose().catch(() => {});
+        await abandoned.dispose().catch(() => {});
+        server.closeAllConnections();
         await new Promise<void>((resolve) => server.close(() => resolve()));
         await rm(directory, { recursive: true, force: true });
       }
@@ -3587,33 +3918,41 @@ test('the owner time zone and region reach a new browser launch without injectin
   const directory = await mkdtemp(join(tmpdir(), 'nod-browser-locale-'));
   const fixture = stagedLoginBrowser();
   const launches: Array<{ flags: string; zone?: string }> = [];
-  const computer = createBrowserFixture({
-    dataRoot: directory,
-    run: (executable, args, options) => {
-      if (args.includes('open'))
-        launches.push({ flags: args[args.indexOf('--args') + 1], zone: options?.env?.TZ });
-      return fixture.run(executable, args, options);
-    },
-  });
-  const open = (timeZone: string, locale: string) =>
-    computer.act('fixture', {
-      action: 'open',
-      url: 'https://1.1.1.1/login',
-      timeZone,
-      locale,
+  const browser = () =>
+    createBrowserFixture({
+      dataRoot: directory,
+      run: (executable, args, options) => {
+        if (args.includes('--profile'))
+          launches.push({ flags: args[args.indexOf('--args') + 1]!, zone: options?.env?.TZ });
+        return fixture.run(executable, args, options);
+      },
     });
+  const open = (computer: ReturnType<typeof browser>, timeZone: string, locale: string) =>
+    computer.act('fixture', { action: 'open', url: 'https://1.1.1.1/login', timeZone, locale });
+  const first = browser();
   try {
-    await open('Europe/Madrid', 'en-GB');
-    await computer.close('fixture');
-    await open('Europe/Madrid,--remote-debugging-port=9222', 'en-GB,--remote-debugging-port=9222');
-    assert.equal(launches.length, 2);
-    assert.equal(launches[0].zone, 'Europe/Madrid');
-    assert.match(launches[0].flags, /,--accept-lang=en-GB(,|$)/);
-    assert.equal(launches[1].zone, undefined);
-    assert.equal(launches[1].flags.includes('remote-debugging'), false);
-    assert.equal(launches[1].flags.includes('accept-lang'), false);
+    await open(first, 'Europe/Madrid', 'en-GB');
+    await first.close('fixture');
+    await open(first, 'Europe/Madrid', 'en-GB');
+    assert.equal(launches.length, 1);
   } finally {
-    await computer.dispose();
+    await first.dispose();
+  }
+  const restarted = browser();
+  try {
+    await open(
+      restarted,
+      'Europe/Madrid,--remote-debugging-port=9222',
+      'en-GB,--remote-debugging-port=9222',
+    );
+    assert.equal(launches.length, 2);
+    assert.equal(launches[0]!.zone, 'Europe/Madrid');
+    assert.match(launches[0]!.flags, /,--accept-lang=en-GB(,|$)/);
+    assert.equal(launches[1]!.zone, undefined);
+    assert.equal(launches[1]!.flags.includes('remote-debugging'), false);
+    assert.equal(launches[1]!.flags.includes('accept-lang'), false);
+  } finally {
+    await restarted.dispose();
     await rm(directory, { recursive: true, force: true });
   }
 });
@@ -4706,7 +5045,11 @@ test('navigation stays available when a saved script fence cannot reach the insp
       const command = args[1].slice(args[1].indexOf('--idle-timeout') + 2);
       if (offline && command[0] === 'get' && command[1] === 'cdp-url')
         return { stdout: '{"success":false}', stderr: '', exitCode: 1 };
-      if (['back', 'forward', 'reload', 'open'].includes(command[0])) navigated.push(command[0]);
+      if (
+        !args[1].includes('--profile') &&
+        ['back', 'forward', 'reload', 'open'].includes(command[0])
+      )
+        navigated.push(command[0]);
       const result = await fixture.run(...args);
       if (command[0] === 'eval') offline = true;
       return result;
@@ -4935,7 +5278,7 @@ test('a checked browser step is described from its snapshot and runs only on tha
       (error) => error instanceof BrowserActionError && error.code === 'browser_target_changed',
     );
     assert.equal(
-      commands.some((command) => command.action === 'download'),
+      commands.some((command) => command.action === 'click'),
       false,
     );
     const nextTarget = await computer.currentPage('checked', next);
@@ -5066,13 +5409,25 @@ describe('interface components', { concurrency: interfaceLanes }, () => {
         await act(async () => frame.dispatchEvent(new Event('load')));
         let screen = document.querySelector('.browser-handoff-screen');
         assert.equal(screen.getAttribute('aria-disabled'), 'false');
-        const press = async (type, button) => act(async () => frame.dispatchEvent(
-          new dom.window.MouseEvent(type, { button, clientX: 50, clientY: 50, bubbles: true }),
-        ));
+        const press = async (type, button, clientX = 50) => {
+          let allowed;
+          await act(async () => {
+            allowed = frame.dispatchEvent(new dom.window.MouseEvent(type, {
+              button, clientX, clientY: 50, bubbles: true, cancelable: true,
+            }));
+          });
+          return allowed;
+        };
         for (const button of [3, 4]) {
-          await press('mousedown', button);
-          await press('mouseup', button);
+          assert.equal(await press('mousedown', button), false);
+          assert.equal(await press('mouseup', button), false);
         }
+        frame.getBoundingClientRect = () => ({ left: 0, top: 0, width: 200, height: 100 });
+        for (const button of [3, 4]) {
+          assert.equal(await press('mousedown', button, 10), false);
+          assert.equal(await press('mouseup', button, 10), false);
+        }
+        frame.getBoundingClientRect = () => ({ left: 0, top: 0, width: 100, height: 100 });
         assert.deepEqual(received, []);
         await press('mousedown', 0);
         await press('mouseup', 0);
@@ -5876,7 +6231,9 @@ describe('interface components', { concurrency: interfaceLanes }, () => {
       assert.equal(viewed().length, 3);
       const count = pending.length;
       await click('.answer-choice');
-      await click('.answer-choice');
+      assert.equal(pending.length, count);
+      await click('.answer-choices-done');
+      await click('.answer-choices-done');
       assert.equal(pending.length, count + 1);
       assert.equal(selected().length, 0);
       await finish(true);
@@ -5912,9 +6269,10 @@ describe('interface components', { concurrency: interfaceLanes }, () => {
       assert.equal(selected().at(-1).properties.option_count, 6);
       assert.equal(selected().at(-1).properties.selected_count, 1);
       await mount('typed');
-      assert.ok(document.querySelector('.answer-choices-send').hasAttribute('data-idle'));
+      assert.equal(document.querySelector('.answer-choices-done').getAttribute('aria-disabled'), 'true');
+      await click('.answer-choice');
       await type(' PRIVATE_TYPED ');
-      await click('.answer-choices-send');
+      await click('.answer-choices-done');
       assert.deepEqual(pending.at(-1).selection, { custom: true });
       assert.equal(pending.at(-1).text, 'PRIVATE_TYPED');
       await finish(true);
@@ -5923,11 +6281,13 @@ describe('interface components', { concurrency: interfaceLanes }, () => {
       for (const [index, outcome] of ['unavailable', false, new Error('Synthetic rejection')].entries()) {
         await mount('rejected-' + index);
         await click('.answer-choice');
+        await click('.answer-choices-done');
         await finish(outcome);
         assert.equal(selected().length, 2);
       }
       await mount('late-consent');
       await click('.answer-choice');
+      await click('.answer-choices-done');
       consent(false);
       consent(true);
       await finish(true);
@@ -5935,6 +6295,7 @@ describe('interface components', { concurrency: interfaceLanes }, () => {
       await mount('late-account');
       await intersect(true);
       await click('.answer-choice');
+      await click('.answer-choices-done');
       const oldViews = viewed().length;
       setRequestAccount('synthetic-owner-two');
       await intersect(true);
@@ -5943,6 +6304,7 @@ describe('interface components', { concurrency: interfaceLanes }, () => {
       assert.equal(selected().length, 2);
       await mount('accepted-after-unmount');
       await click('.answer-choice');
+      await click('.answer-choices-done');
       const observer = observations.at(-1);
       await act(() => root.render(null));
       observer.intersect(true);
@@ -7600,6 +7962,7 @@ describe('interface components', { concurrency: interfaceLanes }, () => {
         await mountQuestion(true, { text: 'Unrelated draft stays here', attachments: [artifact] });
         choiceOutcome = 'question_unavailable';
         await act(async () => document.querySelector('.answer-choice').click());
+        await act(async () => document.querySelector('.answer-choices-done').click());
         await settle(() => choiceRequests.length === 4 && !document.querySelector('.answer-choices'));
         assert.equal(document.querySelector('[role="alert"]'), null);
         assert.equal(document.querySelector('[contenteditable]').textContent, 'Unrelated draft stays here');
@@ -8316,7 +8679,7 @@ describe('interface components', { concurrency: interfaceLanes }, () => {
         if (path === '/api/session') return Response.json({
           user: { id: ownerId, name: 'Synthetic', email: null, avatarUrl: null },
           settings: { theme: 'system', onboardingCompleted: true, usageData: false, traces: false },
-          capabilities: { developer: false, traces: false },
+          capabilities: { developer: false, turnTraces: false, traces: false },
         });
         if (path === '/api/state') return new Promise((resolve, reject) => {
           reads.push({ resolve, signal: options.signal });

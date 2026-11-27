@@ -280,6 +280,9 @@ export function createComposioProvider(options: {
       description: integrationServices[slug].description,
     }));
   }
+  function serviceName(slug: string) {
+    return (catalog?.services ?? builtInServices()).find((service) => service.slug === slug)?.name;
+  }
   async function listServices(): Promise<IntegrationServiceInfo[]> {
     if (catalog && catalog.expiresAt > Date.now()) return catalog.services;
     if (catalogRequest) return catalogRequest;
@@ -518,7 +521,7 @@ export function createComposioProvider(options: {
           (!toolkits.includes(slug) && !(await listServices()).some((entry) => entry.slug === slug))
         )
           throw new Error('This app is not available for connection.');
-        return options.proxy.authorize(slug, callbackUrl);
+        return options.proxy.authorize(slug, callbackUrl, { app: serviceName(slug) });
       },
       async search(query, signal) {
         try {
@@ -737,7 +740,8 @@ export function createComposioProvider(options: {
     supportsSubscriptions: [],
     async authorize(ownerId, service, callbackUrl) {
       userId(ownerId);
-      return options.proxy.authorize(schemaToolkit.parse(service), callbackUrl);
+      const slug = schemaToolkit.parse(service);
+      return options.proxy.authorize(slug, callbackUrl, { app: serviceName(slug) });
     },
     async connectionStatus(ownerId, url, signal) {
       userId(ownerId);
@@ -1151,7 +1155,10 @@ export function createComposioProvider(options: {
       if (original.toolkit.slug !== slug || original.auth_config.is_disabled)
         throw new Error('This connection sign-in configuration is unavailable.');
       return {
-        ...(await options.proxy.authorize(slug, callbackUrl, accountId)),
+        ...(await options.proxy.authorize(slug, callbackUrl, {
+          reconnectAccountId: accountId,
+          app: serviceName(slug),
+        })),
         authConfigId: original.auth_config.id,
       };
     },

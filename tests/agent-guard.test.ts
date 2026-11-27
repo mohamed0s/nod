@@ -953,6 +953,69 @@ test('mail that grants account access stays out of app tool results and workspac
   );
 });
 
+test('codemode scripts still get sign-in mail withheld from a full app result', async () => {
+  const secrets = ['482913', 'https://example.test/recover?token=fixture-nested-unchecked'];
+  const check: MailCheck = async (emails) =>
+    emails.map((email) => (email.from.includes('broken@example.test') ? undefined : true));
+  const saved: string[] = [];
+  const returned: unknown[] = [];
+  let scriptText = '';
+  await fixture(
+    async (tools) => {
+      const nested = await tools
+        .get('apps')!
+        .execute({ action: 'GMAIL_FETCH_EMAILS', args: {} }, { nested: true });
+      scriptText = nested.content.map((part) => (part.type === 'text' ? part.text : '')).join('');
+    },
+    {
+      integration: async (_action, _args, signal, _admit, nested) => {
+        const value = await inlineAppResult(
+          {
+            data: {
+              messages: [
+                {
+                  messageId: 'code',
+                  sender: 'codes@example.test',
+                  subject: 'Your sign-in code',
+                  preview: `Your code is ${secrets[0]}.`,
+                },
+                {
+                  messageId: 'unchecked',
+                  sender: 'broken@example.test',
+                  subject: 'Recover your account',
+                  preview: `Recover it here: ${secrets[1]}`,
+                },
+              ],
+              unrelated: 'ordinary '.repeat(6000),
+            },
+          },
+          async (text) => {
+            saved.push(text);
+            return 'mail.json';
+          },
+          check,
+          signal,
+          nested,
+        );
+        returned.push(value);
+        return value;
+      },
+    },
+  );
+  const value = returned[0] as {
+    contentWithheld?: { emails: number };
+    data: { messages: Array<Record<string, unknown>>; unrelated: string };
+  };
+  assert.equal(value.data.unrelated, 'ordinary '.repeat(6000));
+  assert.equal(value.contentWithheld?.emails, 1);
+  assert.ok(value.data.messages.every((mail) => !('preview' in mail)));
+  for (const secret of secrets) {
+    assert.ok(!JSON.stringify(value).includes(secret));
+    assert.ok(!scriptText.includes(secret));
+  }
+  assert.deepEqual(saved, []);
+});
+
 test('mail privacy checks retain HTML link destinations without changing ordinary email content', async () => {
   const links = [
     {
@@ -2142,7 +2205,6 @@ test('outside results reach Pi in one untrusted block, scripts get them raw, and
   let appImage: AgentToolResult | undefined;
   let mcpBlocks: AgentToolResult | undefined;
   let catalog: AgentToolResult | undefined;
-  let savedSession: AgentToolResult | undefined;
   const text = (result: { content: Array<{ type: string; text?: string }> }) =>
     result.content.map((part) => part.text ?? '').join('');
   const page = (body: string) => async () => ({
@@ -2158,11 +2220,6 @@ test('outside results reach Pi in one untrusted block, scripts get them raw, and
       appImage = await call(tools, 'apps', { action: 'SLACK_DOWNLOAD_SLACK_FILE', args: {} });
       mcpBlocks = await call(tools, 'apps', { action: 'CONNECTED_MCP_CALL', args: {} });
       catalog = await call(tools, 'manage_apps', { action: 'discover', query: 'calendar' });
-      savedSession = await call(tools, 'browser_session', {
-        action: 'use',
-        url: 'https://example.com',
-        connectionId: randomUUID(),
-      });
       texts.push(text(await options.runTool('fetch_content', { urls: [] }, page(injected))));
       texts.push(
         text(
@@ -2179,11 +2236,6 @@ test('outside results reach Pi in one untrusted block, scripts get them raw, and
       }));
     },
     {
-      browserConnection: async () => ({
-        status: 'session_opened',
-        connectionId: randomUUID(),
-        observation: { text: injected, url: 'https://example.com' },
-      }),
       connections: async (action, _service, _proposal, _newAccount, query) => {
         assert.equal(action, 'discover');
         assert.equal(query, 'calendar');
@@ -2221,9 +2273,6 @@ test('outside results reach Pi in one untrusted block, scripts get them raw, and
   assert.equal(texts[3], injected);
   assert.match(text(catalog!), /^<untrusted_tool_result source="manage_apps">/);
   assert.equal(text(catalog!).match(/untrusted_tool_result/gi)?.length, 2);
-  assert.match(text(savedSession!), /^<untrusted_tool_result source="browser_session">/);
-  assert.equal(text(savedSession!).match(/untrusted_tool_result/gi)?.length, 2);
-  assert.match(text(savedSession!), /Invoice due/);
   assert.deepEqual(
     screenshot?.content.map((part) => part.type),
     ['text', 'image', 'text'],
@@ -2344,14 +2393,12 @@ test('secure credential pause prevents subsequent tools in the same execution se
     {
       origin: 'https://example.com',
       label: 'Example',
-      kind: 'identifier' as const,
       usernameSelector: '@username',
       submitSelector: '@submit',
     },
     {
       origin: 'https://example.com',
       label: 'Example',
-      kind: 'password' as const,
       passwordSelector: '@password',
       submitSelector: '@submit',
     },
@@ -2612,6 +2659,242 @@ test('typing, keys and field clicks reach the step check only in work that asks 
   }
 });
 
+test('browser steps run in order, stop at stale refs, unmet waits, failures and approvals', async () => {
+  let url = 'https://example.com/start';
+  const acted: string[] = [];
+  const checked: string[] = [];
+  const outputs: string[] = [];
+  const text = (result: Awaited<ReturnType<typeof call>>) =>
+    result.content.map((part) => ('text' in part ? part.text : '')).join('\n');
+  const turn = await taskFixture(
+    async (tools) => {
+      outputs.push(
+        text(
+          await call(tools, 'browser', {
+            action: 'steps',
+            steps: [
+              { action: 'click', selector: '#first' },
+              { action: 'click', selector: '@e9' },
+            ],
+          }),
+        ),
+      );
+      outputs.push(
+        text(
+          await call(tools, 'browser', {
+            action: 'steps',
+            steps: [
+              { action: 'open', url: 'https://example.com/results' },
+              { action: 'evaluate', script: 'document.title' },
+              { action: 'fill', selector: '#query', text: 'Synthetic query' },
+            ],
+          }),
+        ),
+      );
+      outputs.push(
+        text(
+          await call(tools, 'browser', {
+            action: 'steps',
+            steps: [
+              { action: 'click', selector: '@e2' },
+              { action: 'click', selector: '@e3' },
+            ],
+          }),
+        ),
+      );
+      outputs.push(
+        text(
+          await call(tools, 'browser', {
+            action: 'steps',
+            steps: [
+              { action: 'wait', text: 'Never' },
+              { action: 'click', selector: '#never' },
+            ],
+          }),
+        ),
+      );
+      await assert.rejects(
+        call(tools, 'browser', {
+          action: 'steps',
+          steps: [
+            { action: 'scroll', direction: 'down' },
+            { action: 'click', selector: '#broken' },
+            { action: 'click', selector: '#after-broken' },
+          ],
+        }),
+        /Ran 1 of 3 steps: scroll\. Step 2 \(click\) failed and may have taken effect/,
+      );
+      await assert.rejects(
+        call(tools, 'browser', {
+          action: 'steps',
+          steps: [
+            { action: 'scroll', direction: 'down' },
+            { action: 'click', selector: '#refused' },
+          ],
+        }),
+        /Ran 1 of 2 steps: scroll\. Step 2 \(click\) did not run; later steps did not run\./,
+      );
+      outputs.push(
+        text(
+          await call(tools, 'browser', {
+            action: 'steps',
+            steps: [
+              { action: 'click', selector: '#covered' },
+              { action: 'click', selector: '#after-covered' },
+            ],
+          }),
+        ),
+      );
+      outputs.push(
+        text(
+          await call(tools, 'browser', {
+            action: 'steps',
+            steps: [
+              { action: 'fill', selector: '#name', text: 'Synthetic name' },
+              { action: 'click', selector: '#blocked' },
+              { action: 'click', selector: '#after-blocked' },
+            ],
+          }),
+        ),
+      );
+      await assert.rejects(
+        call(tools, 'browser', {
+          action: 'steps',
+          steps: [{ action: 'snapshot' }, { action: 'click', selector: '#late' }],
+        }),
+        /only as the last step/,
+      );
+      outputs.push(
+        text(
+          await call(tools, 'browser', {
+            action: 'steps',
+            steps: [
+              { action: 'fill', selector: '#approve-name', text: 'Synthetic name' },
+              { action: 'click', selector: '#approve' },
+              { action: 'click', selector: '#after-approve' },
+            ],
+          }),
+        ),
+      );
+    },
+    {
+      browserStep: async ({ step }) => {
+        checked.push(step.selector ?? '');
+        if (step.selector === '#refused') return 'refused';
+        if (step.selector === '#approve') return { [appConfirmation]: 'Submit the form?' };
+        return step.selector === '#blocked' ? { result: 'Blocked' } : 'run';
+      },
+    },
+    {
+      computer: fakeComputer({
+        currentPage: async () => ({
+          origin: 'https://example.com',
+          url,
+          controls: [{ role: 'button', name: 'Go' }],
+        }),
+        act: async (_id, step) => {
+          acted.push(`${step.action} ${step.selector ?? step.url ?? step.script ?? ''}`.trim());
+          if (step.selector === '#broken') throw new Error('Synthetic browser failure');
+          if (step.selector === '#covered')
+            throw new BrowserActionError('browser_click_intercepted');
+          if (step.action === 'open') url = step.url!;
+          if (step.selector === '@e2') url = 'https://example.com/next';
+          if (step.action === 'evaluate') return { url, text: 'Synthetic title' };
+          if (step.action === 'wait') return { url, text: 'Not yet', unmet: true };
+          return { url, text: `Synthetic page at ${url}` };
+        },
+      }),
+    },
+  );
+  assert.deepEqual(acted, [
+    'click #first',
+    'open https://example.com/results',
+    'evaluate document.title',
+    'fill #query',
+    'click @e2',
+    'wait',
+    'scroll',
+    'click #broken',
+    'scroll',
+    'click #covered',
+    'fill #name',
+    'fill #approve-name',
+  ]);
+  assert.deepEqual(checked, [
+    '#first',
+    '@e2',
+    '#broken',
+    '#refused',
+    '#covered',
+    '#blocked',
+    '#approve',
+  ]);
+  assert.match(outputs[0]!, /Ran 1 of 2 steps: click\.\n\nStopped before Step 2 \(click\)/);
+  assert.match(outputs[1]!, /Ran 3 of 3 steps: open, evaluate, fill\./);
+  assert.match(outputs[1]!, /Step 2 \(evaluate\):\nURL: \S+\nSynthetic title/);
+  assert.match(outputs[1]!, /Synthetic page at https:\/\/example.com\/results/);
+  assert.match(outputs[2]!, /Ran 1 of 2 steps: click\.\n\nStopped before Step 2 \(click\)/);
+  assert.match(outputs[2]!, /Synthetic page at https:\/\/example.com\/next/);
+  assert.match(outputs[3]!, /Ran 1 of 2 steps: wait\.\n\nThe wait in step 1 \(wait\) was not met/);
+  assert.match(outputs[4]!, /Ran 0 of 2 steps\.\n\nStep 1 \(click\) did not run/);
+  assert.match(outputs[5]!, /Step 2 \(click\) and the steps after it did not run/);
+  assert.match(outputs[5]!, /Blocked/);
+  assert.match(outputs[6]!, /Ran 1 of 3 steps: fill\.[\s\S]*Step 2 \(click\) and the steps after/);
+  assert.match(outputs[6]!, /confirmation question is in chat/);
+  assert.match(outputs[5]!, /untrusted_tool_result/);
+  assert.doesNotMatch(outputs[6]!, /untrusted_tool_result/);
+  assert.equal(turn.result.status, 'waiting_user');
+
+  const queryActed: string[] = [];
+  let queryUrl = 'https://example.com/results?page=1';
+  const queryOutputs: string[] = [];
+  await fixture(
+    async (tools) => {
+      queryOutputs.push(
+        text(
+          await call(tools, 'browser', {
+            action: 'steps',
+            steps: [
+              { action: 'click', selector: '#page2' },
+              { action: 'click', selector: '@e4' },
+            ],
+          }),
+        ),
+      );
+      queryOutputs.push(
+        text(
+          await call(tools, 'browser', {
+            action: 'steps',
+            steps: [
+              { action: 'click', selector: '#hash' },
+              { action: 'click', selector: '@e5' },
+            ],
+          }),
+        ),
+      );
+    },
+    {},
+    {
+      computer: fakeComputer({
+        currentPage: async () => ({
+          origin: 'https://example.com',
+          url: queryUrl,
+          controls: [],
+        }),
+        act: async (_id, step) => {
+          queryActed.push(`${step.action} ${step.selector ?? ''}`.trim());
+          if (step.selector === '#page2') queryUrl = 'https://example.com/results?page=2';
+          if (step.selector === '#hash') queryUrl = 'https://example.com/results?page=2#details';
+          return { url: queryUrl, text: `Synthetic page at ${queryUrl}` };
+        },
+      }),
+    },
+  );
+  assert.deepEqual(queryActed, ['click #page2', 'click #hash']);
+  assert.match(queryOutputs[0]!, /Stopped before Step 2 \(click\)/);
+  assert.match(queryOutputs[1]!, /Stopped before Step 2 \(click\)/);
+});
+
 test('browser handoff requires a live page, binds its session and stops further work without a link', async () => {
   const sessionId = randomUUID();
   let opened = false;
@@ -2703,7 +2986,6 @@ test('private entry returns page data once and stops before an observation after
             label: 'Synthetic login',
             message: 'Sign in.',
             action: 'Continue',
-            kind: 'password',
             passwordSelector: '#password',
           });
           const text = result.content

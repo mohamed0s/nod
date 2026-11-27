@@ -927,7 +927,7 @@ export const approvalCases = inParts(
       if (options.wait !== false) await waitFor(task.turn_id, options.wait ?? 'waiting|succeeded');
       return { turnId: task.turn_id, sessionId, rootTurnId: response.json().turnId as string };
     }
-    const taskTools = new Set(['browser', 'sign_in', 'pay', 'browser_session', 'computer']);
+    const taskTools = new Set(['browser', 'sign_in', 'pay', 'computer']);
     async function propose(
       action: string,
       args: Record<string, unknown>,
@@ -6175,7 +6175,7 @@ export const approvalCases = inParts(
       });
 
       await inPart(
-        'unavailable schedule evidence fails before the model and posts the named failure',
+        'unusable schedule evidence fails before the model and posts the named failure, and a later withdrawn request does not',
         async () => {
           const title = 'Synthetic unavailable schedule';
           const schedule = await reminder({ title });
@@ -6208,10 +6208,6 @@ export const approvalCases = inParts(
               /no saved owner instruction/,
             ],
             [{ messages: [], requiresReplacement: true }, /changes without source records/],
-            [
-              { messages: [{ id: sourceMessage, at: new Date().toISOString(), text }] },
-              /withdrawn or unavailable/,
-            ],
           ] as const) {
             await pool.query('UPDATE schedules SET authority=$2 WHERE id=$1', [
               schedule.id,
@@ -6242,6 +6238,18 @@ export const approvalCases = inParts(
             assert.ok(notices[0].text.includes(title));
             assert.match(notices[0].text, reason);
           }
+          await pool.query('UPDATE schedules SET authority=$2 WHERE id=$1', [
+            schedule.id,
+            JSON.stringify({
+              messages: [{ id: sourceMessage, at: new Date().toISOString(), text }],
+            }),
+          ]);
+          const withdrawn = await request('POST', `/api/schedules/${schedule.id}/run`, {
+            requestId: randomUUID(),
+            expectedRevision: 0,
+          });
+          assert.equal(withdrawn.statusCode, 200, withdrawn.body);
+          await waitFor(withdrawn.json().turnId, 'succeeded');
           await request('DELETE', `/api/schedules/${schedule.id}`);
         },
       );
@@ -8120,7 +8128,6 @@ export const approvalCases = inParts(
         const input = {
           origin,
           label: 'Synthetic cancellation login',
-          kind: 'password',
           passwordSelector: '@password',
           submitSelector: '@submit',
           message: 'Enter the synthetic password.',
@@ -8295,8 +8302,9 @@ export const approvalCases = inParts(
               'Enter saved login',
               kind === 'password'
                 ? {
-                    ...input,
-                    kind,
+                    origin: input.origin,
+                    submitSelector: input.submitSelector,
+                    message: input.message,
                     label: 'Model-supplied account name',
                     savedLoginId: login,
                     usernameSelector: '@username',
@@ -8389,7 +8397,6 @@ export const approvalCases = inParts(
           origin,
           label: 'Synthetic www account',
           message: 'Sign in to the synthetic website.',
-          kind: 'password',
           usernameSelector: '@username',
           passwordSelector: '@password',
           submitSelector: '@submit',
@@ -9889,28 +9896,15 @@ export const approvalCases = inParts(
             'context hidden',
             'parent edit',
             'approval-backed',
-            'legacy snapshot',
           ])
             await t.test(
-              `Calendar schedule approval handles ${change} with frozen authority`,
+              `Calendar schedule approval keeps its frozen authority after ${change}`,
               async () => {
                 const fixture = await submitSchedule(change === 'approval-backed');
                 const { turn: id, approval: card } = fixture;
                 assert.equal(card.status, 'pending');
-                assert.deepEqual(
-                  card.details.verifiedInstructionRevision.sourceMessageIds,
-                  change === 'approval-backed'
-                    ? []
-                    : [fixture.sourceMessage, fixture.contextMessage],
-                );
                 const writes = writeCount();
                 const reads = readCount();
-                const succeeds = ['parent edit', 'approval-backed'].includes(change);
-                if (change === 'legacy snapshot')
-                  await pool.query(
-                    "UPDATE approvals SET details=jsonb_set(details,'{verifiedInstructionRevision}',(details->'verifiedInstructionRevision')-'sourceMessageIds') WHERE id=$1",
-                    [card.id],
-                  );
                 onRead = async () => {
                   if (change === 'source withdrawn')
                     await pool.query('UPDATE turns SET withdrawn=true WHERE id=$1', [
@@ -9933,15 +9927,13 @@ export const approvalCases = inParts(
                   assert.equal(accepted.statusCode, 200, accepted.body);
                   await waitFor(accepted.json().turnId, 'waiting|succeeded|failed');
                   const [saved] = await approvalsFor(id);
-                  assert.equal(saved.status, succeeds ? 'completed' : 'expired');
-                  assert.equal(writeCount(), writes + (succeeds ? 1 : 0));
-                  assert.equal(readCount(), reads + (change === 'legacy snapshot' ? 0 : 1));
+                  assert.equal(saved.status, 'completed');
+                  assert.equal(writeCount(), writes + 1);
+                  assert.equal(readCount(), reads + 1);
                   const frozen = (
                     await pool.query('SELECT authority FROM schedule_runs WHERE turn_id=$1', [id])
                   ).rows[0].authority;
                   assert.deepEqual(frozen, fixture.authority);
-                  if (['source withdrawn', 'context hidden'].includes(change))
-                    assert.match(JSON.stringify(saved), /withdrawn or unavailable/);
                 } finally {
                   onRead = undefined;
                   await pool.query('UPDATE turns SET withdrawn=false WHERE id=$1', [
@@ -10837,7 +10829,6 @@ export const approvalCases = inParts(
               args: {
                 origin: 'https://bank.example.test',
                 label: 'Synthetic shutdown login',
-                kind: 'password',
                 savedLoginId: saved.json().id,
                 passwordSelector: '@password',
                 submitSelector: '@submit',

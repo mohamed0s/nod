@@ -2809,6 +2809,69 @@ test('OpenRouter speech refuses failed, empty, oversized and non-audio responses
   });
 });
 
+test('speech errors keep the service reason and status, and separate a rate limit from credits', async () => {
+  const reply = (status: number, body: unknown) => async () => Response.json(body, { status });
+  const audio = { bytes: Buffer.from('abc'), mimeType: 'audio/ogg', name: 'a.ogg' };
+  const synthesize = (status: number, body: unknown) =>
+    createOpenRouterSpeechProvider({
+      apiKey: async () => 'fixture-never-live',
+      configured: () => true,
+      fetch: reply(status, body),
+    }).synthesize('Synthetic reply.');
+  const transcribe = (status: number, body: unknown) =>
+    createOpenRouterTranscriptionProvider({
+      apiKey: async () => 'fixture-never-live',
+      configured: () => true,
+      fetch: reply(status, body),
+    }).transcribe(audio);
+  await assert.rejects(
+    synthesize(429, { error: { message: 'Rate limit exceeded: free-models-per-min', code: 429 } }),
+    (error: Error) =>
+      /OpenRouter rate-limited this request: Rate limit exceeded: free-models-per-min/.test(
+        error.message,
+      ) && !/credit/i.test(error.message),
+  );
+  await assert.rejects(
+    synthesize(429, { error: { message: 'x'.repeat(5000) } }),
+    (error: Error) => error.message.length < 400,
+  );
+  await assert.rejects(
+    synthesize(402, { error: { message: 'Insufficient credits', code: 402 } }),
+    /HTTP 402.*Insufficient credits.*credits/,
+  );
+  await assert.rejects(
+    transcribe(400, { error: { message: 'Unsupported audio format: ogg', code: 400 } }),
+    (error: Error) =>
+      /HTTP 400.*Unsupported audio format: ogg/.test(error.message) &&
+      !/voice/i.test(error.message),
+  );
+  await assert.rejects(
+    synthesize(400, { error: { message: 'Bad key fixture-never-live' } }),
+    (error: Error) =>
+      /HTTP 400/.test(error.message) && !error.message.includes('fixture-never-live'),
+  );
+  await assert.rejects(
+    transcribe(401, { error: { message: 'No auth' } }),
+    /needs to be reconnected/,
+  );
+  await assert.rejects(
+    readElevenLabsVoices('fixture-key', reply(500, { error: { message: 'Voice index offline' } })),
+    /ElevenLabs failed \(HTTP 500\).*Voice index offline/,
+  );
+  const elevenLabs = createElevenLabsSpeechProvider({
+    apiKey: async () => 'fixture-key',
+    configured: () => true,
+    fetch: async (url) =>
+      String(url).includes('/v2/voices')
+        ? Response.json({ voices: [{ voice_id: 'v1', name: 'Voice' }], has_more: false })
+        : Response.json({ error: { message: 'Too many concurrent requests' } }, { status: 429 }),
+  });
+  await assert.rejects(
+    elevenLabs.transcribe!(audio),
+    /ElevenLabs rate-limited this request: Too many concurrent requests/,
+  );
+});
+
 test('ElevenLabs lists owned custom voices with bounded pagination and never follows provider redirects', async () => {
   const calls: URL[] = [];
   const voices = await readElevenLabsVoices('fixture-elevenlabs-key', async (input, init) => {
@@ -3237,8 +3300,8 @@ test('ElevenLabs preserves safe setup recovery through the speech service withou
                 : /Speech to text.*permission/i,
             );
           if (status === 429) {
-            assert.match(error.message, /ElevenLabs.*limit.*account/i);
-            assert.doesNotMatch(error.message, /credits|balance|quota|rate|retry/i);
+            assert.match(error.message, /ElevenLabs rate-limited this request/);
+            assert.doesNotMatch(error.message, /credits|balance|quota/i);
           }
           assert.equal((error as Error & { statusCode?: number }).statusCode, 400);
           return true;

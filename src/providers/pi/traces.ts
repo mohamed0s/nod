@@ -1,13 +1,16 @@
 import { randomUUID } from 'node:crypto';
-import type {
-  Api,
-  AssistantMessage,
-  Context,
-  Message,
-  Model,
-  ToolResultMessage,
+import {
+  getSystemMessageText,
+  type Api,
+  type AssistantMessage,
+  type Context,
+  type Message,
+  type Model,
+  type Tool,
+  type ToolResultMessage,
 } from '@earendil-works/pi-ai';
-import type { ModelTrace } from '../../ports/traces.ts';
+import type { ModelFailure } from '../../ports/agent.ts';
+import type { ModelCallTrace, ModelTrace, ModelTraces } from '../../ports/traces.ts';
 import { piUsageMetrics } from './usage.ts';
 import { memoryEvidenceSource, untrustedParts } from '../../shared/untrusted.ts';
 import { modelQuotaFailure } from '../../shared/model-quota.ts';
@@ -97,6 +100,43 @@ function errorType(error: string, phase?: ModelRequestFacts['requestPhase']) {
   )
     return 'connection';
   return 'unknown';
+}
+
+const toolsUnsupported =
+  /\b(?:tools?|tool[_ -]?(?:use|calls?|calling|choice)|function[_ -]?call(?:s|ing)?)\b.{0,80}?\b(?:(?:not|n't) (?:supported|enabled|available)|unsupported|requires --enable-auto-tool-choice)|\b(?:not|n't) support\b.{0,40}?\b(?:tools?|tool[_ -]?(?:use|calls?|calling)|function[_ -]?calling)\b|\bno endpoints found that support tool/i;
+const failureKinds: Record<string, ModelFailure['kind']> = {
+  auth: 'authentication',
+  billing: 'quota_exhausted',
+  quota: 'quota_exhausted',
+  rate_limit: 'rate_limited',
+  provider_unavailable: 'unavailable',
+  model_config: 'invalid_request',
+};
+
+export function modelFailure(error: string, overflow = false): ModelFailure {
+  const status = Number([...error.matchAll(/\(HTTP ([1-5]\d{2})\)/g)].at(-1)?.[1]) || undefined;
+  const phase = /\[request phase: ([a-z_]+)\]\s*$/.exec(error)?.[1];
+  const type = errorType(error, phase as ModelRequestFacts['requestPhase'] | undefined);
+  const kind =
+    overflow || status === 413 || /\brequest too large\b/i.test(error)
+      ? 'context_too_large'
+      : toolsUnsupported.test(error)
+        ? 'tools_unsupported'
+        : type === 'connection'
+          ? /timed? ?out|timeout/i.test(error)
+            ? 'timeout'
+            : 'unavailable'
+          : (failureKinds[type] ??
+            (status === 403
+              ? 'permission'
+              : status === 408 || status === 504
+                ? 'timeout'
+                : status && status >= 500
+                  ? 'unavailable'
+                  : status && status >= 400
+                    ? 'invalid_request'
+                    : 'unknown'));
+  return { kind, ...(status ? { status } : {}) };
 }
 
 function text(content: string | { type: string; text?: string }[]) {
@@ -249,4 +289,128 @@ export function piModelTrace(
         : {}),
     },
   };
+}
+
+function withoutImageData(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutImageData);
+  if (!value || typeof value !== 'object') return value;
+  const entries = Object.entries(value);
+  if ((value as { type?: unknown }).type === 'image')
+    return Object.fromEntries(
+      entries.map(([key, item]) =>
+        key === 'data' && typeof item === 'string'
+          ? [key, `[${item.length} base64 characters]`]
+          : [key, item],
+      ),
+    );
+  return Object.fromEntries(entries.map(([key, item]) => [key, withoutImageData(item)]));
+}
+
+function replayedSystem(context: Context) {
+  const tools = new Map<string, Tool>((context.tools ?? []).map((tool) => [tool.name, tool]));
+  const content: string[] = context.systemPrompt ? [context.systemPrompt] : [];
+  const sections: Record<string, string | null> = {};
+  for (const entry of context.messages) {
+    if (entry.role !== 'system') continue;
+    const text = getSystemMessageText({ ...entry, sections: undefined });
+    if (text) content.push(text);
+    Object.assign(sections, entry.sections);
+    for (const tool of entry.toolsAdded ?? []) tools.set(tool.name, tool);
+    for (const tool of entry.toolsRemoved ?? []) tools.delete(tool.name);
+  }
+  return {
+    systemPrompt: getSystemMessageText({
+      role: 'system',
+      content: content.join('\n\n'),
+      sections: Object.fromEntries(Object.entries(sections).filter(([, value]) => value !== null)),
+      timestamp: 0,
+    }),
+    tools: [...tools.values()].map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+    })),
+  };
+}
+
+export function piModelCallTrace(
+  call: PiModelCall,
+  metadata: {
+    source: string;
+    task?: string;
+    turnId?: string;
+    runId?: string;
+    parentRunId?: string;
+    endedAt?: string;
+  },
+): ModelCallTrace {
+  const { message } = call;
+  const usage = piUsageMetrics(message.usage);
+  const cacheReadTokens = usage.cacheReadTokens ?? 0;
+  const cacheWriteTokens = usage.cacheWriteTokens ?? 0;
+  const inputTokens = (usage.inputTokens ?? 0) + cacheReadTokens + cacheWriteTokens;
+  const outputTokens = usage.outputTokens ?? 0;
+  return {
+    id: randomUUID(),
+    ...Object.fromEntries(Object.entries(metadata).filter(([, value]) => value)),
+    source: metadata.source,
+    provider: call.model.provider,
+    model: message.responseModel ?? call.model.id,
+    startedAt: call.startedAt,
+    endedAt: metadata.endedAt ?? new Date().toISOString(),
+    ...replayedSystem(call.context),
+    messages: withoutImageData(
+      call.context.messages.map((entry) =>
+        entry.role === 'system'
+          ? {
+              role: 'system',
+              content: `[${getSystemMessageText({ ...entry, sections: Object.fromEntries(Object.entries(entry.sections ?? {}).filter(([, value]) => value !== null)) }).length} characters, shown in the system prompt]`,
+              timestamp: entry.timestamp,
+              ...(entry.toolsAdded
+                ? { toolsAdded: entry.toolsAdded.map((tool) => tool.name) }
+                : {}),
+              ...(entry.toolsRemoved
+                ? { toolsRemoved: entry.toolsRemoved.map((tool) => tool.name) }
+                : {}),
+            }
+          : entry,
+      ),
+    ) as unknown[],
+    output: withoutImageData({ content: message.content, stopReason: message.stopReason }),
+    usage: {
+      inputTokens,
+      outputTokens,
+      totalTokens: inputTokens + outputTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
+      costUsd: usage.costUsd ?? null,
+    },
+    stopReason: message.stopReason,
+    ...(call.request ? { requestKind: call.request.requestKind } : {}),
+    ...(message.stopReason === 'error' || message.stopReason === 'aborted'
+      ? { error: message.errorMessage || message.stopReason }
+      : {}),
+  };
+}
+
+export function recordPiModelCall(
+  traces: ModelTraces | undefined,
+  call: PiModelCall,
+  trace: () => ModelTrace,
+  metadata: Parameters<typeof piModelCallTrace>[1],
+) {
+  if (!traces) return;
+  if (traces.active()) traces.record(trace());
+  capturePiModelCall(traces, call, metadata);
+}
+
+export function capturePiModelCall(
+  traces: ModelTraces | undefined,
+  call: PiModelCall,
+  metadata: Parameters<typeof piModelCallTrace>[1],
+) {
+  if (!traces?.capturing?.()) return;
+  const snapshot = { ...call, context: { ...call.context, messages: [...call.context.messages] } };
+  const endedAt = new Date().toISOString();
+  traces.capture?.(() => piModelCallTrace(snapshot, { ...metadata, endedAt }), metadata.turnId);
 }

@@ -27,7 +27,7 @@ import type { TrustBasis } from './trust-basis.ts';
 import {
   ownerChatRevision,
   validateInstructionChange,
-  validateOwnerInstructions,
+  validateSavedInstructions,
   type InstructionChange,
   type OwnerInstructions,
 } from './owner-instructions.ts';
@@ -121,6 +121,7 @@ type TurnRow = {
   session_id: string;
   task_id: string | null;
   source: string;
+  source_id: string | null;
   parent_turn_id: string | null;
   message_id: string | null;
   prompt: string;
@@ -173,7 +174,7 @@ function confirmedOutcome(
 async function turnRow(client: PoolClient, turnId: string) {
   return (
     await client.query<TurnRow>(
-      "SELECT id,thread_id,session_id,to_jsonb(turns)->>'task_id' AS task_id,source,parent_turn_id,message_id,prompt,background,channel FROM turns WHERE id=$1 AND owner_id=$2",
+      "SELECT id,thread_id,session_id,to_jsonb(turns)->>'task_id' AS task_id,source,to_jsonb(turns)->>'source_id' AS source_id,parent_turn_id,message_id,prompt,background,channel FROM turns WHERE id=$1 AND owner_id=$2",
       [turnId, ownerId],
     )
   ).rows[0];
@@ -273,10 +274,13 @@ export async function turnOrigin(turnId: string) {
       origin.source === 'user'
         ? [...new Set([...chained, ...(task?.source_message_id ? [task.source_message_id] : [])])]
         : [];
+    const scheduledResume =
+      current.source === 'resume' && String(current.source_id ?? '').startsWith('task-check:');
     return {
       taskId: current.task_id,
       sessionId: current.session_id,
       source: origin.source,
+      scheduledResume,
       messageIds: said,
       chainMessageIds: [...new Set(chained)],
       channel: current.channel,
@@ -410,20 +414,23 @@ export async function createApprovals(
       if (!chain || !origin) throw new Error('This action needs a direct request from the user.');
       let steering: { id: string; text: string } | undefined;
       if (options.sourceMessageId && options.sourceMessageId !== current.message_id) {
-        if (!current.background)
-          steering = (
-            await client.query<{ id: string; text: string }>(
-              "SELECT id,text FROM messages WHERE id=$1 AND owner_id=$2 AND thread_id=$3 AND turn_id=$4 AND role='user'",
-              [options.sourceMessageId, ownerId, turn.threadId, turn.turnId],
-            )
-          ).rows[0];
+        steering = (
+          await client.query<{ id: string; text: string }>(
+            `SELECT m.id,m.text FROM messages m WHERE m.id=$1 AND m.owner_id=$2 AND m.thread_id=$3 AND m.turn_id=$4
+             AND m.role='user' AND m.hidden_at IS NULL AND NOT ${withdrawnSql('m')}`,
+            [options.sourceMessageId, ownerId, turn.threadId, turn.turnId],
+          )
+        ).rows[0];
         if (!steering) throw new Error('This action needs a direct request from the user.');
       }
-      const background = !steering && ['event', 'schedule'].includes(origin.source);
+      const scheduledResume =
+        current.source === 'resume' && String(current.source_id ?? '').startsWith('task-check:');
+      const background =
+        !steering && (['event', 'schedule'].includes(origin.source) || scheduledResume);
       let authorMessageId: string | null;
       const schedule =
         origin.source === 'schedule' ? await scheduleAuthority(client, origin.id) : undefined;
-      if (schedule?.authority) await validateOwnerInstructions(client, ownerId, schedule.authority);
+      if (schedule?.authority) validateSavedInstructions(schedule.authority);
       if (steering) {
         authorMessageId = steering.id;
       } else if (origin.source === 'event') {

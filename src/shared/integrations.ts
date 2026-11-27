@@ -1,5 +1,7 @@
 export type IntegrationService = string;
 
+export const defaultConnectionService = 'https://composio.n8n.cloud';
+
 export interface IntegrationServiceInfo {
   slug: string;
   name: string;

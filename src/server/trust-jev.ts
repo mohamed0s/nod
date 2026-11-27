@@ -50,7 +50,7 @@ const settings = new Set([
   'NOD_agent_create',
   'NOD_room_update',
 ]);
-const signIns = new Set(['NOD_sign_in', 'NOD_browser_session', 'NOD_vault_allow']);
+const signIns = new Set(['NOD_sign_in', 'NOD_vault_allow']);
 const grants = {
   send: 'owner_send',
   delete: 'owner_delete',

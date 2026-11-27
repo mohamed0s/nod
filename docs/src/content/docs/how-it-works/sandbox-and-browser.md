@@ -30,16 +30,16 @@ flowchart LR
 
 ## What each part can and can't reach
 
-|                       | Server                           | Sandbox user              | Connected CLI user        | Browser container                               |
-| --------------------- | -------------------------------- | ------------------------- | ------------------------- | ----------------------------------------------- |
-| Provider keys         | Yes                              | No                        | No                        | No                                              |
-| Owner access key      | Yes                              | No                        | No                        | No                                              |
-| Vault values          | Yes                              | No                        | No                        | Only a value the server enters in a page        |
-| A connected CLI token | Yes                              | No                        | Its own token only        | No                                              |
-| Docker control        | Local socket or restricted proxy | No                        | No                        | No                                              |
-| Workspace files       | Through a guarded reader         | Yes                       | Files passed as arguments | No shared mounts                                |
-| Browser profiles      | Through the bridge               | No                        | No                        | Yes                                             |
-| Internet              | Yes                              | Yes, see the limits below | Yes, with the same limits | Public addresses only, saved profiles included. |
+|                       | Server                           | Sandbox user              | Connected CLI user        | Browser container                                |
+| --------------------- | -------------------------------- | ------------------------- | ------------------------- | ------------------------------------------------ |
+| Provider keys         | Yes                              | No                        | No                        | No                                               |
+| Owner access key      | Yes                              | No                        | No                        | No                                               |
+| Vault values          | Yes                              | No                        | No                        | Only a value the server enters in a page         |
+| A connected CLI token | Yes                              | No                        | Its own token only        | No                                               |
+| Docker control        | Local socket or restricted proxy | No                        | No                        | No                                               |
+| Workspace files       | Through a guarded reader         | Yes                       | Files passed as arguments | No shared mounts                                 |
+| Browser profiles      | Through the bridge               | No                        | No                        | Yes                                              |
+| Internet              | Yes                              | Yes, see the limits below | Yes, with the same limits | Public addresses only, signed-in pages included. |
 
 ## The workspace container
 
@@ -103,15 +103,29 @@ The browser is a separate trusted container. It doesn't share mounts or a networ
 
 | Setting    | Value                                                                   |
 | ---------- | ----------------------------------------------------------------------- |
-| Display    | Headed Chromium on a private 1920x1080 virtual display per session      |
+| Display    | One headed Chromium on a private 1920x1080 virtual display              |
 | Viewport   | 1440x900, with Noto fonts and software WebGL                            |
 | Time zone  | The owner's saved IANA time zone, or UTC when unknown or invalid        |
 | Language   | The owner's formatting locale, such as en-GB, sent as `Accept-Language` |
-| HTTP cache | Under `/tmp`, per session, outside saved profiles                       |
+| HTTP cache | Under `/tmp`, outside the owner's profile                               |
 
-Pi reads the page from agent-browser's accessibility snapshot, with `@eN` references, as plain text after the page URL. A snapshot returns up to 40,000 characters, and Pi reads the rest with an offset. Pi interprets the page and chooses controls. The server also reads the selected control's form method and destination for the trust check, and the page's visible text when it prepares a confirmation question.
+### One browser, a tab per session
+
+Nod runs one Chromium for the owner, with one profile that keeps cookies, logins and carts. Sessions share it, so two sessions on one website share its sign-in and cart. The chat, each task, each scheduled or background run and each subagent get their own window in that browser, so every session's page stays painted for screenshots and the live view. Each session has its own agent-browser session, attached to the browser over the DevTools protocol and pinned to its tab, so sessions act in parallel without touching each other's pages. All windows share the browser's network guard. Nod keeps one DevTools connection to the browser to place each session's window, track which tabs each session opened and route downloads.
+
+- **The browser stays up.** It starts on first use and runs while Nod runs.
+- **A session keeps its tab** for as long as it lives. Nothing else closes it: no other session, eviction or profile switch.
+- **Tabs a page opens belong to its session.** When a page opens a popup or a new tab, the session follows it, and returns to the page that opened it when it closes. `tab_list` and `tab_switch` show only the session's own tabs.
+- **The tabs close when their session ends**, such as when a task finishes or you stop it. The profile stays, so a later task on the same website is still signed in.
+- **Only you erase the profile**, with **Remove all data**.
+- **Downloads stay with their session.** The browser saves every download to one private folder. Nod moves each finished file to the session whose tab started it and deletes a file that no session's tab started.
+- **A lost session recovers on its next step.** Before each step, Nod checks the session's browser, its driver and its tab with one small read. If the driver stopped or the tab closed, Nod gives the session a new driver in the running browser. If the browser crashed or the browser service restarted, Nod first starts the browser again with the same profile. Either way it reopens the session's last page without the query string, and then runs the step. A session that stopped during an action doesn't reopen on its own, because the action may have happened: Pi opens the website again, checks the result there and never repeats the action. A browser crash can lose sign-ins from its last 30 seconds, because Chrome saves new cookies on a timer. A restart keeps them.
+
+Pi reads the page from agent-browser's accessibility snapshot, with `@eN` references, as plain text after the page URL. A snapshot returns up to 40,000 characters with link addresses, and Pi reads the rest with an offset. After any other action, Pi gets the first 10,000 characters of the page without link addresses, which keeps each step's context small; Pi takes a snapshot when it needs more. Pi interprets the page and chooses controls. The server also reads the selected control's form method and destination for the trust check, and the page's visible text when it prepares a confirmation question.
 
 A snapshot can use a CSS selector to read one part of the page. If the selector is invalid or no element matches it, Nod gets a specific reason and can take a snapshot of the whole page or choose a valid scope. The page stays open.
+
+Pi can send up to 10 browser actions in one call as a list of steps, such as opening a page and running a script, or filling fields and submitting. Each step goes through the same trust check as a single action. Nod returns script results and the page after the last step. It stops at the first step that fails, a wait that isn't met, a step that needs the owner's approval, or a step with an `@eN` reference after the page changed, and tells Pi which steps ran. A snapshot or screenshot can only be the last step.
 
 A browser wait takes one condition: text to appear, a URL to match, or a page load state. `waitMs` sets how long to wait for that condition. If the call omits the condition or supplies more than one, Nod gets a validation error and can correct the wait on the same page.
 
@@ -119,11 +133,11 @@ Browser hit tests convert viewport positions to document coordinates using the t
 
 For a private sign-in click, Nod keeps the control's position in its frame and its position in the main page. Nod calculates the position in the main page again before each check. It checks the visible point and live target from the main page, then sends one press and release through the checked frame's browser session. The page can still change between the check and the press. Nod does not retry input. The private picker still refuses a frame whose origin differs from the page's origin.
 
-Every browser command has a deadline: 60 seconds, or a wait's own timeout plus 30 seconds. That leaves room for agent-browser's own 30-second limit on each browser call, so only a browser that has stopped answering misses it. A browser that misses its deadline, is interrupted or doesn't close within 5 seconds is killed with all its Chromium processes. A cancelled action requires an explicit open or saved-session selection before that browser can continue. Once cancellation is acknowledged, other sessions keep their browsers and can continue. A lost bridge response still requires recovery of the application namespace because the worker may have closed it. Nod never repeats the interrupted action during recovery. While a dialog is open, the observation is the dialog, and every action except open is refused until Pi accepts or dismisses it.
+Every browser command has a deadline: 60 seconds, or a wait's own timeout plus 30 seconds. That leaves room for agent-browser's own 30-second limit on each browser call, so only a browser that has stopped answering misses it. A session that misses its deadline, is interrupted or doesn't close within 5 seconds has its agent-browser process killed and its tab closed. The browser and other sessions' tabs keep running. A cancelled action requires an explicit open before that session can continue. A lost bridge response still requires recovery of the application namespace because the worker may have closed it. Nod never repeats the interrupted action during recovery. While a dialog is open, the observation is the dialog, and every action except open is refused until Pi accepts or dismisses it.
 
-Profiles stay on the browser container's volume when Nod replaces the container, for example after a restart. Chromium's profile lock from the old container names a host that no longer exists. Before Chromium starts, Nod removes a lock whose `<host>-<pid>` target names another host, so the profile opens again. A lock from the current container, or one Nod can't read, stays. When the browser fails to start, Pi sees that no page opened and the reason the browser gave, with Nod's internal browser paths removed. When a browser command exceeds Nod's time limit, Pi sees that fixed reason. Any other failure outside the browser's own errors shows only the generic "The workspace browser could not complete this action. Try again." message.
+The owner's profile stays on the browser container's volume when Nod replaces the container, for example after a restart. Chromium's profile lock from the old container names a host that no longer exists. Before Chromium starts, Nod removes a lock whose `<host>-<pid>` target names another host, so the profile opens again. A lock from the current container, or one Nod can't read, stays. When the browser fails to start, Pi sees that no page opened and the reason the browser gave, with Nod's internal browser paths removed. When a browser command exceeds Nod's time limit, Pi sees that fixed reason. Any other failure outside the browser's own errors shows only the generic "The workspace browser could not complete this action. Try again." message.
 
-Known secret values (passwords, codes, card numbers and security codes) are removed from tool output and masked in screenshots; usernames and the cardholder name aren't secrets and stay visible. URL parameters that carry credentials, such as tokens and signatures, are hidden; other query parameters stay. When an action fails, Pi sees the browser's own error with known secrets removed. Pi uses saved profiles through `browser_session` and never reads their files. The code is in [`src/providers/agent-browser/`](https://github.com/n8n-io/nod/tree/main/src/providers/agent-browser).
+Known secret values (passwords, codes, card numbers and security codes) are removed from tool output and masked in screenshots; usernames and the cardholder name aren't secrets and stay visible. URL parameters that carry credentials, such as tokens and signatures, are hidden; other query parameters stay. When an action fails, Pi sees the browser's own error with known secrets removed. Pi never reads the browser profile's files. The code is in [`src/providers/agent-browser/`](https://github.com/n8n-io/nod/tree/main/src/providers/agent-browser).
 
 ## Browser handoff
 
@@ -143,12 +157,12 @@ sequenceDiagram
   Note over Pi: Next turn takes a fresh snapshot
 ```
 
-- Each handoff identifies its waiting turn and browser. Input reaches only that browser while its question stays pending. Other sessions keep their own browsers.
+- Each handoff identifies its waiting turn and tab. Input reaches only that tab while its question stays pending. Other sessions keep their own tabs.
 - **Return to Nod** continues the session that asked, including a background session, without posting a message for you. Pi looks at the page to see what you did.
 - The panel scrolls into view once, when its first frame arrives. While it is open, the task ledger marks its task `browserHandoff`. With the full prompt, not the compact one for small context windows, the coordinator then points you to the panel instead of forwarding a message, because a task reply closes the handoff.
 - One bridge call carries frames out, newest first, and your input in. Each input is acknowledged after the browser applies it. Failures reach the view without retrying the input. Losing the connection rejects pending input and disables it until the view reconnects.
 - Frames pause during credential entry. Passwords you type in the handoff join the known secrets.
-- An init script makes every passkey request fail at once and reports no passkey support, so a sign-in doesn't open a passkey prompt that the live view can't show.
+- An init script makes every passkey request fail at once and reports no passkey support, so a sign-in doesn't open a passkey prompt that the live view can't show. Nod adds it to every tab, popup and frame before the page's own scripts run.
 
 :::caution[Limits]
 The workspace can reach public internet addresses. Source installs and self-hosted servers use a separate firewall container. It blocks private and reserved IPv4 addresses, including cloud metadata services, and all external IPv6 traffic. The workspace starts only after the firewall is ready and has no permission to change its rules. Local workspace services remain available through loopback. The desktop app's local runtime also blocks private and reserved addresses. The browser reaches only public addresses. Inside the browser container, Chromium runs with its own sandbox turned off; the container is the boundary.

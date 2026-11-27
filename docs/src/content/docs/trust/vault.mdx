@@ -75,7 +75,7 @@ sequenceDiagram
   Nod-->>You: Here are the numbers
 ```
 
-Nod picks the account, the fields and the submit button. Before the server opens a private form or uses a saved login, it checks that each one is on the page. If one is missing, it refuses the step, enters nothing and Nod reads the page again. The server enters and submits in one private step that Nod can't watch, then Nod carries on with the live page.
+Nod picks the account, the fields and the submit button. The private form asks for the fields Nod picked, so a page that shows the username and password together asks for both at once. Before the server opens a private form or uses a saved login, it checks that each one is on the page. If one is missing, it refuses the step, enters nothing and Nod reads the page again. The server enters and submits in one private step that Nod can't watch, then Nod carries on with the live page.
 
 Some websites disable the submit button while they check a field. Nod waits up to 30 seconds for the button to become enabled. If it stays disabled, the page changes or the browser closes, Nod stops the private step. It does not activate the disabled control or repeat the submission. A failed private entry can keep the page unreadable until you reload it.
 
@@ -132,9 +132,9 @@ Private forms never open in a chat app. Finish the step in the same conversation
 
 ## Review and change access
 
-**Usage** lists every sign-in, code, saved-session use, question, held attempt, reveal and permission change, with the task and the reason, next to what Nod did in your apps.
+**Usage** lists every sign-in, code, question, held attempt, reveal and permission change, with the task and the reason, next to what Nod did in your apps.
 
-**Vault** lists your logins, cards and saved sessions. Open one to edit, reveal, copy or delete it. Every reveal is recorded.
+**Vault** lists your logins and cards. Open one to edit, reveal, copy or delete it. Every reveal is recorded.
 
 ![Vault with five logins and a card, and Add at the top. The selected login shows every time Nod asked for it, used it or you entered it.](../../../assets/screens/vault-light.png)
 
@@ -169,7 +169,6 @@ If you set the key yourself, keep a copy somewhere safe. Saved logins can't be r
 ## Related resources
 
 - [Trust and Vault](/trust/)
-- [Saved browser sessions](/trust/browser-sessions/)
 - [Payments](/trust/payments/)
 - [One use, one result](/trust/outcomes/)
 - [Security model and limits](/trust/security-model/)

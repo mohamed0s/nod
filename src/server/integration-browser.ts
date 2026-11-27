@@ -4,7 +4,8 @@ import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import {
   createHostedIntegrationBrowser,
-  integrationPrivacyNotice,
+  integrationNotice,
+  integrationPageStyle,
 } from './integration-browser-hosted.ts';
 import {
   IntegrationConnectionError,
@@ -25,14 +26,16 @@ function renderIntegrationBrowser(
   nonce: string,
   bridgeKey: string,
   continuation: { id?: string; expiresAt: number },
+  app?: string,
 ) {
+  const notice = integrationNotice(brokerOrigin, app);
   const broker = JSON.stringify(brokerOrigin).replaceAll('<', '\\u003c');
   const secret = JSON.stringify(bridgeKey).replaceAll('<', '\\u003c');
   const expected = JSON.stringify(continuation).replaceAll('<', '\\u003c');
   const introduction = continuation.id
     ? ''
-    : `<div id="introduction">${integrationPrivacyNotice}<button id="connect" type="button">Continue to sign in</button></div>`;
-  return String.raw`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect your app · Nod</title><style nonce="${nonce}">:root{color-scheme:light dark}body{font:16px system-ui;margin:0;min-height:100svh;display:grid;place-items:center;background:light-dark(#fafafa,#191919);color:light-dark(#191919,#fafafa)}main{max-width:360px;padding:32px;text-align:center}h1{font-size:21px;font-weight:550;letter-spacing:-.4px}p{line-height:1.6;color:light-dark(#676767,#bfbfbf)}button{font:inherit;padding:12px 20px;border:0;border-radius:8px;background:light-dark(#191919,#fafafa);color:light-dark(#fafafa,#191919);cursor:pointer}button:disabled{opacity:.5;cursor:default}a{color:inherit;text-underline-offset:3px}</style></head><body><main${continuation.id ? ' hidden' : ''}><h1 id="heading">${continuation.id ? 'Opening sign-in…' : 'Connect your app'}</h1>${introduction}<p id="status" role="status"></p></main><script nonce="${nonce}">
+    : `<div id="introduction">${notice.body}<button id="connect" type="button">${notice.button}</button></div>`;
+  return String.raw`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${continuation.id ? 'Connect your app' : notice.title} · Nod</title><style nonce="${nonce}">${integrationPageStyle}</style></head><body><main${continuation.id ? ' hidden' : ''}>${continuation.id ? '' : notice.route}<h1 id="heading">${continuation.id ? 'Opening sign-in…' : notice.title}</h1>${introduction}<p id="status" role="status"></p></main><script nonce="${nonce}">
 const brokerOrigin=${broker};
 const bridgeKey=${secret};
 const expected=${expected};
@@ -127,7 +130,7 @@ export function createIntegrationBrowser(options?: {
   }
   return {
     registerRoutes() {},
-    async open(id, brokerOrigin, start) {
+    async open(id, brokerOrigin, start, app) {
       token.parse(id);
       if (closed || attempts.has(id) || opening.has(id) || attempts.size + opening.size >= 20)
         throw new Error('Another app connection is already being opened.');
@@ -170,7 +173,9 @@ export function createIntegrationBrowser(options?: {
           if (request.method === 'GET' && request.url === `/${capability}` && !starting) {
             bootstrapped = true;
             response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-            response.end(renderIntegrationBrowser(brokerOrigin, nonce, bridgeKey, { expiresAt }));
+            response.end(
+              renderIntegrationBrowser(brokerOrigin, nonce, bridgeKey, { expiresAt }, app),
+            );
             return;
           }
           if (
